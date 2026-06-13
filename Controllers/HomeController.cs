@@ -85,6 +85,34 @@ public class HomeController : Controller
         return File(fileBytes, "application/x-rdp", $"{resource.Name ?? resource.Id}.rdp");
     }
 
+    /// <summary>
+    /// In-browser RDP console page for an authorized resource. Renders the HTML5 client that connects
+    /// to the WebSocket relay (<c>/ws/rdp/{id}</c>). Authorization mirrors <see cref="DownloadRdpFile"/>.
+    /// </summary>
+    [Microsoft.AspNetCore.Authorization.Authorize]
+    public async Task<IActionResult> Console(string id)
+    {
+        var userId = _userManager.GetUserId(User);
+        if (userId == null)
+        {
+            return Unauthorized();
+        }
+
+        var authorization = await _context.RDPResourceUserAuthorizations
+            .Include(r => r.RDPResource)
+            .FirstOrDefaultAsync(r => r.UserId == userId && r.RDPResourceId == id);
+
+        if (authorization?.RDPResource == null)
+        {
+            return NotFound();
+        }
+
+        ViewData["ResourceId"] = id;
+        ViewData["ResourceName"] = authorization.RDPResource.Name ?? id;
+        ViewData["DefaultUser"] = _userManager.GetUserName(User);
+        return View();
+    }
+
     public IActionResult Privacy()
     {
         return View();

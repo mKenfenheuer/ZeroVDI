@@ -294,6 +294,11 @@ public class Program
         }
 
         app.UseHttpsRedirection();
+
+        // Enable WebSocket upgrades for the browser RDP console (/ws/rdp/{id}). Must run before
+        // routing so the relay endpoint can accept the upgrade.
+        app.UseWebSockets();
+
         app.UseRouting();
 
         app.UseAuthorization();

@@ -63,6 +63,20 @@ public class ProxmoxBackend
     [Display(Name = "Start timeout (seconds)")]
     public int StartTimeoutSeconds { get; set; } = 120;
 
+    // --- Optional Kerberos config for the in-browser RDP console's NLA (CredSSP) ---
+
+    /// <summary>
+    /// Kerberos realm of this backend's VMs (e.g. <c>CORP.EXAMPLE.COM</c>). When set together with
+    /// <see cref="KdcHost"/>, the browser-RDP console prefers Kerberos/AES for NLA; otherwise it falls
+    /// back to NTLMv2. Leave empty for workgroup VMs.
+    /// </summary>
+    [Display(Name = "Kerberos realm")]
+    public string? KerberosRealm { get; set; }
+
+    /// <summary>KDC host[:port] used to obtain Kerberos tickets for NLA. Empty disables the Kerberos path.</summary>
+    [Display(Name = "KDC host")]
+    public string? KdcHost { get; set; }
+
     /// <summary>Whether this backend is complete enough to talk to Proxmox.</summary>
     public bool IsConfigured =>
         !string.IsNullOrWhiteSpace(Host)

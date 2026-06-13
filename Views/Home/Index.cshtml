@@ -70,6 +70,9 @@
                                 <a href="rdp://full%20address=s:@resource.Id&gatewayhostname=s:@Context.Request.Host.Host" class="btn btn-primary btn-sm">
                                     <i class="bi bi-play-circle"></i> Start Session
                                 </a>
+                                <a asp-action="Console" asp-route-id="@resource.Id" target="_blank" class="btn btn-outline-primary btn-sm">
+                                    <i class="bi bi-display"></i> Open in browser
+                                </a>
                                 <a asp-action="DownloadRdpFile" asp-route-id="@resource.Id" class="btn btn-secondary btn-sm">
                                     <i class="bi bi-download"></i> Download .RDP File
                                 </a>

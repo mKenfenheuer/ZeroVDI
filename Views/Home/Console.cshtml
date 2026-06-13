@@ -1,0 +1,168 @@
+@{
+    Layout = null;
+    var resourceId = ViewData["ResourceId"] as string;
+    var resourceName = ViewData["ResourceName"] as string;
+    var defaultUser = ViewData["DefaultUser"] as string;
+}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@resourceName — RDP Console</title>
+    <link rel="stylesheet" href="~/lib/bootstrap/dist/css/bootstrap.min.css" />
+    <style>
+        html, body { height: 100%; margin: 0; background: #1a1a1a; color: #eee; overflow: hidden; }
+        #toolbar {
+            position: fixed; top: 0; left: 0; right: 0; height: 36px; z-index: 20;
+            display: flex; align-items: center; gap: .75rem; padding: 0 .75rem;
+            background: #222; border-bottom: 1px solid #000; font-size: .85rem;
+        }
+        #toolbar .name { font-weight: 600; }
+        #toolbar .status { color: #9bd; }
+        #toolbar .spacer { flex: 1 1 auto; }
+        #screen-wrap {
+            position: absolute; top: 36px; left: 0; right: 0; bottom: 0;
+            overflow: auto; display: flex; align-items: flex-start; justify-content: center;
+            background: #000;
+        }
+        #canvas { background: #000; image-rendering: pixelated; }
+        #pointer-cache { display: none; }
+        .pointer-cache-null { cursor: none; }
+        .pointer-cache-default { cursor: default; }
+        #login-overlay {
+            position: fixed; inset: 0; z-index: 30; display: flex; align-items: center; justify-content: center;
+            background: rgba(0,0,0,.85);
+        }
+        #login-card { width: 360px; max-width: 90vw; background: #2a2a2a; border: 1px solid #444;
+            border-radius: 8px; padding: 1.25rem; }
+        #login-card h5 { margin-bottom: 1rem; }
+        #login-card label { font-size: .8rem; color: #bbb; }
+        .form-control { background: #1e1e1e; color: #eee; border-color: #555; }
+        .form-control:focus { background: #1e1e1e; color: #eee; }
+        #login-error { color: #f88; font-size: .85rem; min-height: 1.2em; }
+    </style>
+</head>
+<body>
+    <div id="toolbar">
+        <span class="name">@resourceName</span>
+        <span class="status" id="status-text">Not connected</span>
+        <span class="spacer"></span>
+        <button class="btn btn-sm btn-outline-light" id="btn-fullscreen" type="button">Fullscreen</button>
+        <button class="btn btn-sm btn-outline-danger" id="btn-disconnect" type="button" disabled>Disconnect</button>
+    </div>
+
+    <div id="screen-wrap">
+        <canvas id="canvas" width="1280" height="800"></canvas>
+        <canvas id="pointer-cache" width="32" height="32"></canvas>
+    </div>
+
+    <div id="login-overlay">
+        <div id="login-card">
+            <h5>Connect to @resourceName</h5>
+            <form id="login-form" autocomplete="off">
+                <div class="mb-2">
+                    <label for="vm-user">Username</label>
+                    <input class="form-control form-control-sm" id="vm-user" value="@defaultUser" autocomplete="username" />
+                </div>
+                <div class="mb-2">
+                    <label for="vm-pass">Password</label>
+                    <input class="form-control form-control-sm" id="vm-pass" type="password" autocomplete="current-password" />
+                </div>
+                <div class="mb-2">
+                    <label for="vm-domain">Domain <span class="text-muted">(optional)</span></label>
+                    <input class="form-control form-control-sm" id="vm-domain" />
+                </div>
+                <div id="login-error"></div>
+                <div class="d-grid mt-2">
+                    <button class="btn btn-primary btn-sm" type="submit" id="btn-connect">Connect</button>
+                </div>
+                <p class="text-muted mt-2 mb-0" style="font-size:.72rem;">
+                    Credentials are sent over this HTTPS connection to authenticate the desktop (NLA) and are not stored.
+                </p>
+            </form>
+        </div>
+    </div>
+
+    @* The RLE wasm module auto-initializes on load and exposes a global `Module`. *@
+    <script>
+        // locateFile lets the emscripten loader find the .wasm next to the .js under /lib/rdpweb/rle/.
+        var Module = { locateFile: function (p) { return "/lib/rdpweb/rle/" + p; } };
+    </script>
+    <script src="~/lib/rdpweb/rle/ms-rle-wasm.js"></script>
+
+    <script src="~/lib/rdpweb/binary.js"></script>
+    <script src="~/lib/rdpweb/color.js"></script>
+    <script src="~/lib/rdpweb/update/header.js"></script>
+    <script src="~/lib/rdpweb/update/bitmap.js"></script>
+    <script src="~/lib/rdpweb/update/pointer.js"></script>
+    <script src="~/lib/rdpweb/input/header.js"></script>
+    <script src="~/lib/rdpweb/input/keymap.js"></script>
+    <script src="~/lib/rdpweb/input/keyboard.js"></script>
+    <script src="~/lib/rdpweb/input/mouse.js"></script>
+    <script src="~/lib/rdpweb/protocol.js"></script>
+    <script src="~/lib/rdpweb/client.js"></script>
+
+    <script>
+        (function () {
+            var wsUrl = "/ws/rdp/@resourceId";
+            var statusText = document.getElementById("status-text");
+            var loginOverlay = document.getElementById("login-overlay");
+            var loginError = document.getElementById("login-error");
+            var btnConnect = document.getElementById("btn-connect");
+            var btnDisconnect = document.getElementById("btn-disconnect");
+            var btnFullscreen = document.getElementById("btn-fullscreen");
+
+            var client = new Client(wsUrl, "canvas");
+            client.setStatusCallback(function (status, message) {
+                switch (status) {
+                    case "connecting":
+                        statusText.textContent = message || "Connecting…";
+                        break;
+                    case "ready":
+                        statusText.textContent = "Connected";
+                        loginOverlay.style.display = "none";
+                        btnDisconnect.disabled = false;
+                        break;
+                    case "error":
+                        statusText.textContent = "Error";
+                        loginError.textContent = message || "Connection failed";
+                        loginOverlay.style.display = "flex";
+                        btnConnect.disabled = false;
+                        btnConnect.textContent = "Connect";
+                        btnDisconnect.disabled = true;
+                        break;
+                    case "closed":
+                        statusText.textContent = "Disconnected";
+                        btnDisconnect.disabled = true;
+                        break;
+                }
+            });
+
+            document.getElementById("login-form").addEventListener("submit", function (e) {
+                e.preventDefault();
+                loginError.textContent = "";
+                var user = document.getElementById("vm-user").value;
+                var pass = document.getElementById("vm-pass").value;
+                var domain = document.getElementById("vm-domain").value;
+                if (!user) { loginError.textContent = "Username is required."; return; }
+                btnConnect.disabled = true;
+                btnConnect.textContent = "Connecting…";
+                client.connect({ user: user, password: pass, domain: domain });
+            });
+
+            btnDisconnect.addEventListener("click", function () { client.disconnect(); });
+            btnFullscreen.addEventListener("click", function () {
+                var wrap = document.getElementById("screen-wrap");
+                if (!document.fullscreenElement) {
+                    (wrap.requestFullscreen ? wrap.requestFullscreen() : Promise.reject()).catch(function () {});
+                } else {
+                    document.exitFullscreen();
+                }
+            });
+
+            window.addEventListener("beforeunload", function () { client.disconnect(); });
+        })();
+    </script>
+</body>
+</html>
