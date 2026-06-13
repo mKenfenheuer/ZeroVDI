@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using KSol.RDPGateway.Data;
 using RDPGW.Extensions;
@@ -37,7 +38,78 @@ public class Program
         builder.Services.AddSingleton<RDP.RdpFileGenerator>();
         builder.Services.AddSingleton<RDP.PaaTokenService>();
 
+        // Self-hosted OAuth 2.0 / OpenID Connect server (OpenIddict), backed by the Identity users.
+        // Lets OAuth-capable clients obtain a Bearer token via an interactive login and present it
+        // to the RDWeb feed. OpenIddict's ASP.NET validation also populates HttpContext.User from a
+        // valid Bearer token, so the feed's cookie/bearer resolution works uniformly.
+        builder.Services.AddOpenIddict()
+            .AddCore(options =>
+            {
+                options.UseEntityFrameworkCore().UseDbContext<ApplicationDbContext>();
+            })
+            .AddServer(options =>
+            {
+                options.SetAuthorizationEndpointUris("connect/authorize")
+                       .SetTokenEndpointUris("connect/token")
+                       .SetUserInfoEndpointUris("connect/userinfo")
+                       .SetConfigurationEndpointUris(".well-known/openid-configuration");
+
+                // Authorization Code + PKCE (interactive) and refresh tokens.
+                options.AllowAuthorizationCodeFlow()
+                       .AllowRefreshTokenFlow()
+                       .RequireProofKeyForCodeExchange();
+
+                options.RegisterScopes("openid", "profile", "email", "offline_access", "rdgateway");
+
+                // Signing/encryption credentials.
+                // In Development, use the throwaway development certificates. In production, use
+                // persistent self-signed certificates that are generated on first run and stored on
+                // disk, so issued tokens survive restarts (the development certs are ephemeral).
+                if (builder.Environment.IsDevelopment())
+                {
+                    options.AddDevelopmentEncryptionCertificate()
+                           .AddDevelopmentSigningCertificate();
+                }
+                else
+                {
+                    options.AddSigningCertificate(CertificateProvider.GetSigningCertificate(builder.Configuration, builder.Environment))
+                           .AddEncryptionCertificate(CertificateProvider.GetEncryptionCertificate(builder.Configuration, builder.Environment));
+                }
+
+                // Issue access tokens as JWTs so the feed can validate them as Bearer tokens.
+                options.DisableAccessTokenEncryption();
+
+                options.UseAspNetCore()
+                       .EnableAuthorizationEndpointPassthrough()
+                       .EnableTokenEndpointPassthrough()
+                       .EnableUserInfoEndpointPassthrough()
+                       .EnableStatusCodePagesIntegration();
+            })
+            .AddValidation(options =>
+            {
+                options.UseLocalServer();
+                options.UseAspNetCore();
+            });
+
+        // Honor X-Forwarded-Proto / X-Forwarded-Host / X-Forwarded-For when running behind a
+        // reverse proxy (e.g. Traefik) that terminates TLS. Without this, Request.Scheme/Host are
+        // the internal http://… values, so the absolute URLs in the RDWeb feed (FeedUrl and the
+        // per-resource .rdp URLs) would be wrong and the client would reject the workspace.
+        builder.Services.Configure<ForwardedHeadersOptions>(options =>
+        {
+            options.ForwardedHeaders = ForwardedHeaders.XForwardedFor
+                | ForwardedHeaders.XForwardedProto
+                | ForwardedHeaders.XForwardedHost;
+            // The app is only reachable through the trusted proxy, so accept its forwarded headers.
+            // (Tighten KnownProxies/KnownNetworks if the app is ever exposed directly.)
+            options.KnownNetworks.Clear();
+            options.KnownProxies.Clear();
+        });
+
         var app = builder.Build();
+
+        // Must run before any middleware that inspects scheme/host (RDPGW, HTTPS redirect, auth).
+        app.UseForwardedHeaders();
 
         using (var scope = app.Services.CreateScope())
         {
@@ -88,6 +160,42 @@ public class Program
                 {
                     userManager.AddToRoleAsync(adminUser, "Admin").Wait();
                 }
+            }
+
+            // Seed the OAuth client used by Remote Desktop / OAuth-capable clients to subscribe.
+            // A public client (PKCE, no secret) with the redirect URIs MSRDC and generic OAuth
+            // clients use. Adjust RedirectUris for your client if needed.
+            var appManager = scope.ServiceProvider.GetService<OpenIddict.Abstractions.IOpenIddictApplicationManager>();
+            if (appManager != null && appManager.FindByClientIdAsync("rdgateway-client").AsTask().Result == null)
+            {
+                appManager.CreateAsync(new OpenIddict.Abstractions.OpenIddictApplicationDescriptor
+                {
+                    ClientId = "rdgateway-client",
+                    ClientType = OpenIddict.Abstractions.OpenIddictConstants.ClientTypes.Public,
+                    ConsentType = OpenIddict.Abstractions.OpenIddictConstants.ConsentTypes.Implicit,
+                    DisplayName = "KSol.IT RDP Gateway Client",
+                    RedirectUris =
+                    {
+                        new Uri("http://localhost"),
+                        new Uri("http://localhost:0"),
+                        new Uri("ms-appx-web://Microsoft.AAD.BrokerPlugin/rdgateway-client"),
+                    },
+                    Permissions =
+                    {
+                        OpenIddict.Abstractions.OpenIddictConstants.Permissions.Endpoints.Authorization,
+                        OpenIddict.Abstractions.OpenIddictConstants.Permissions.Endpoints.Token,
+                        OpenIddict.Abstractions.OpenIddictConstants.Permissions.GrantTypes.AuthorizationCode,
+                        OpenIddict.Abstractions.OpenIddictConstants.Permissions.GrantTypes.RefreshToken,
+                        OpenIddict.Abstractions.OpenIddictConstants.Permissions.ResponseTypes.Code,
+                        OpenIddict.Abstractions.OpenIddictConstants.Permissions.Scopes.Email,
+                        OpenIddict.Abstractions.OpenIddictConstants.Permissions.Scopes.Profile,
+                        OpenIddict.Abstractions.OpenIddictConstants.Permissions.Prefixes.Scope + "rdgateway",
+                    },
+                    Requirements =
+                    {
+                        OpenIddict.Abstractions.OpenIddictConstants.Requirements.Features.ProofKeyForCodeExchange,
+                    }
+                }).AsTask().Wait();
             }
         }
 

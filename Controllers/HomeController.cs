@@ -15,13 +15,29 @@ public class HomeController : Controller
     private readonly ApplicationDbContext _context;
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly RdpFileGenerator _rdpGenerator;
+    private readonly PaaTokenService _paa;
 
-    public HomeController(ILogger<HomeController> logger, ApplicationDbContext context, UserManager<ApplicationUser> userManager, RdpFileGenerator rdpGenerator)
+    public HomeController(ILogger<HomeController> logger, ApplicationDbContext context, UserManager<ApplicationUser> userManager, RdpFileGenerator rdpGenerator, PaaTokenService paa)
     {
         _logger = logger;
         _context = context;
         _userManager = userManager;
         _rdpGenerator = rdpGenerator;
+        _paa = paa;
+    }
+
+    /// <summary>
+    /// Issues a short-lived PAA pre-auth token for the signed-in user. Clients that support the
+    /// extended HTTP_EXTENDED_AUTH_PAA flow can present this token to open a tunnel without
+    /// re-entering credentials.
+    /// </summary>
+    [Microsoft.AspNetCore.Authorization.Authorize]
+    public IActionResult PaaToken()
+    {
+        var userId = _userManager.GetUserId(User);
+        if (userId == null)
+            return Unauthorized();
+        return Content(_paa.Issue(userId), "text/plain");
     }
 
     public async Task<IActionResult> Index()

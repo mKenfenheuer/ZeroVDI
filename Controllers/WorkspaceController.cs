@@ -1,11 +1,13 @@
 using System.Text;
 using System.Xml;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using KSol.RDPGateway.Data;
 using KSol.RDPGateway.Models;
 using KSol.RDPGateway.RDP;
+using OpenIddict.Abstractions;
 
 namespace KSol.RDPGateway.Controllers;
 
@@ -70,10 +72,10 @@ public class WorkspaceController : Controller
     [HttpPost("rdweb/feed/webfeed.aspx")]
     public async Task<IActionResult> WebFeed()
     {
-        var user = await AuthenticateBasicAsync();
+        var user = await ResolveUserAsync();
         if (user == null)
         {
-            return ChallengeBasic();
+            return ChallengeFeed();
         }
 
         var resources = await _context.RDPResourceUserAuthorizations
@@ -94,10 +96,10 @@ public class WorkspaceController : Controller
     [HttpGet("rdweb/feed/rdp/{id}.rdp")]
     public async Task<IActionResult> ResourceRdp(string id)
     {
-        var user = await AuthenticateBasicAsync();
+        var user = await ResolveUserAsync();
         if (user == null)
         {
-            return ChallengeBasic();
+            return ChallengeFeed();
         }
 
         var authorization = await _context.RDPResourceUserAuthorizations
@@ -111,6 +113,43 @@ public class WorkspaceController : Controller
 
         var rdp = _rdpGenerator.Generate(authorization.RDPResource, Request.Host.Host, user.UserName);
         return File(Encoding.UTF8.GetBytes(rdp), "application/x-rdp");
+    }
+
+    /// <summary>
+    /// Resolves the authenticated user for a feed request, trying every flow MSRDC / RD Web Access
+    /// may use, in order:
+    /// <list type="number">
+    /// <item>The ASP.NET Identity auth cookie (RD Web Access forms flow) — what MSRDC uses for
+    ///       non-Azure subscriptions after the user signs in at the login page.</item>
+    /// <item>An OAuth/OIDC Bearer token (validated by the configured JWT bearer scheme).</item>
+    /// <item>HTTP Basic credentials (legacy clients / scripts).</item>
+    /// </list>
+    /// Returns the user, or null if none of the flows authenticated the request.
+    /// </summary>
+    private async Task<ApplicationUser?> ResolveUserAsync()
+    {
+        // 1) Identity cookie (RD Web Access forms flow) — surfaces on User via the default scheme.
+        if (User?.Identity?.IsAuthenticated == true)
+        {
+            var user = await _userManager.GetUserAsync(User);
+            if (user != null)
+                return user;
+        }
+
+        // 2) OAuth/OIDC Bearer token — validated by the OpenIddict validation scheme.
+        var bearer = await HttpContext.AuthenticateAsync(
+            OpenIddict.Validation.AspNetCore.OpenIddictValidationAspNetCoreDefaults.AuthenticationScheme);
+        if (bearer.Succeeded && bearer.Principal != null)
+        {
+            // The OIDC subject ("sub") carries the user id.
+            var subject = bearer.Principal.GetClaim(OpenIddict.Abstractions.OpenIddictConstants.Claims.Subject);
+            var user = subject != null ? await _userManager.FindByIdAsync(subject) : null;
+            if (user != null)
+                return user;
+        }
+
+        // 3) HTTP Basic fallback.
+        return await AuthenticateBasicAsync();
     }
 
     /// <summary>
@@ -175,9 +214,26 @@ public class WorkspaceController : Controller
         return userName;
     }
 
-    private IActionResult ChallengeBasic()
+    /// <summary>
+    /// Issues an authentication challenge for the feed. A browser is redirected to the Identity
+    /// login page (RD Web Access forms flow); a non-browser client receives a 401 advertising the
+    /// Bearer (OAuth) and Basic schemes, with a Bearer authorization_uri pointing at the OAuth
+    /// authorize endpoint so OAuth-capable clients can start an interactive login.
+    /// </summary>
+    private IActionResult ChallengeFeed()
     {
-        Response.Headers.WWWAuthenticate = "Basic realm=\"KSol.IT RDP Gateway\"";
+        var accept = Request.Headers.Accept.ToString();
+        var isBrowser = accept.Contains("text/html", StringComparison.OrdinalIgnoreCase);
+        if (isBrowser)
+        {
+            var returnUrl = Request.Path + Request.QueryString;
+            return Redirect($"/Identity/Account/Login?ReturnUrl={Uri.EscapeDataString(returnUrl)}");
+        }
+
+        var baseUrl = $"{Request.Scheme}://{Request.Host}";
+        Response.Headers.Append("WWW-Authenticate",
+            $"Bearer authorization_uri=\"{baseUrl}/connect/authorize\", realm=\"{AuthCrypto.Realm}\"");
+        Response.Headers.Append("WWW-Authenticate", $"Basic realm=\"{AuthCrypto.Realm}\"");
         return StatusCode(StatusCodes.Status401Unauthorized);
     }
 

@@ -35,44 +35,44 @@
                 </div>
             </div>
         </div>
-    }
-    else if (!Model.Any())
-    {
-        <div class="alert alert-warning">
-            <strong>No Resources Available</strong> You don't have access to any RDP resources yet. Please contact an administrator.
-        </div>
-    }
-    else
-    {
-        <div class="row">
-            @foreach (var resource in Model)
-            {
-                <div class="col-md-6 col-lg-4 mb-4">
-                    <div class="card h-100 shadow-sm">
-                        <div class="card-body">
-                            <h5 class="card-title">@resource.Name</h5>
-                            @if (!string.IsNullOrEmpty(resource.Description))
-                            {
-                                <p class="card-text text-muted">@resource.Description</p>
-                            }
-                            <p class="card-text">
-                                <small class="text-secondary">
-                                    <strong>Resource ID:</strong> @resource.ResourceIdentifier
-                                </small>
-                            </p>
-                        </div>
-                        <div class="card-footer bg-light d-grid gap-2">
-                            <a href="rdp://full%20address=s:@resource.ResourceIdentifier&gatewayhostname=s:@Context.Request.Host.Host" class="btn btn-primary btn-sm">
-                                <i class="bi bi-play-circle"></i> Start Session
-                            </a>
-                            <a asp-action="DownloadRdpFile" asp-route-id="@resource.ResourceIdentifier" class="btn btn-secondary btn-sm">
-                                <i class="bi bi-download"></i> Download .RDP File
-                            </a>
+        @if (!Model.Any())
+        {
+            <div class="alert alert-warning">
+                <strong>No Resources Available</strong> You don't have access to any RDP resources yet. Please contact an administrator.
+            </div>
+        }
+        else
+        {
+            <div class="row">
+                @foreach (var resource in Model)
+                {
+                    <div class="col-md-6 col-lg-4 mb-4">
+                        <div class="card h-100 shadow-sm">
+                            <div class="card-body">
+                                <h5 class="card-title">@resource.Name</h5>
+                                @if (!string.IsNullOrEmpty(resource.Description))
+                                {
+                                    <p class="card-text text-muted">@resource.Description</p>
+                                }
+                                <p class="card-text">
+                                    <small class="text-secondary">
+                                        <strong>Resource ID:</strong> @resource.ResourceIdentifier
+                                    </small>
+                                </p>
+                            </div>
+                            <div class="card-footer bg-light d-grid gap-2">
+                                <a href="rdp://full%20address=s:@resource.ResourceIdentifier&gatewayhostname=s:@Context.Request.Host.Host" class="btn btn-primary btn-sm">
+                                    <i class="bi bi-play-circle"></i> Start Session
+                                </a>
+                                <a asp-action="DownloadRdpFile" asp-route-id="@resource.ResourceIdentifier" class="btn btn-secondary btn-sm">
+                                    <i class="bi bi-download"></i> Download .RDP File
+                                </a>
+                            </div>
                         </div>
                     </div>
-                </div>
-            }
-        </div>
+                }
+            </div>
+        }
     }
 </div>
 
