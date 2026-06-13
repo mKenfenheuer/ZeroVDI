@@ -18,6 +18,24 @@
             <strong>Welcome!</strong> Please <a asp-area="Identity" asp-page="/Account/Login">sign in</a> to access RDP resources.
         </div>
     }
+    else
+    {
+        var feedUrl = $"{Context.Request.Scheme}://{Context.Request.Host}/rdweb/feed/webfeed.aspx";
+        <div class="alert alert-secondary d-flex flex-column flex-md-row align-items-md-center gap-2">
+            <div class="flex-grow-1">
+                <strong>Use the Windows Remote Desktop app:</strong>
+                add a <em>Workspace</em> / <em>Remote Resource Feed</em> with the URL below to see these
+                resources directly in the app — no browser required.
+                <div class="input-group input-group-sm mt-2">
+                    <input type="text" class="form-control" id="feedUrl" value="@feedUrl" readonly />
+                    <button class="btn btn-outline-secondary" type="button"
+                            onclick="navigator.clipboard.writeText(document.getElementById('feedUrl').value)">
+                        Copy
+                    </button>
+                </div>
+            </div>
+        </div>
+    }
     else if (!Model.Any())
     {
         <div class="alert alert-warning">

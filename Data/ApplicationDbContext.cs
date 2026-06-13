@@ -4,15 +4,11 @@ using Microsoft.EntityFrameworkCore;
 
 namespace KSol.RDPGateway.Data;
 
-public class ApplicationDbContext : IdentityDbContext
+public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
 {
     public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options)
         : base(options)
     {
-        if(Database.GetPendingMigrations().Count() > 0)
-        {
-            Database.Migrate();
-        }
     }
 
     public DbSet<RDPResource> RDPResources { get; set; }

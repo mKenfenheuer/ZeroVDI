@@ -11,7 +11,7 @@ public class RDPResourceUserAuthorization
     public string? Id { get; set; }
     public string? UserId { get; set; }
     [ForeignKey(nameof(UserId))]
-    public IdentityUser? User { get; set; }
+    public ApplicationUser? User { get; set; }
     public string? RDPResourceId { get; set; }
     [ForeignKey(nameof(RDPResourceId))]
     public RDPResource? RDPResource { get; set; }

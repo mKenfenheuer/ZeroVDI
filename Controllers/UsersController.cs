@@ -12,10 +12,10 @@ namespace KSol.RDPGateway.Controllers
     [Authorize(Roles = "Admin")]
     public class UsersController : Controller
     {
-        private readonly UserManager<IdentityUser> _userManager;
+        private readonly UserManager<ApplicationUser> _userManager;
         private readonly RoleManager<IdentityRole> _roleManager;
 
-        public UsersController(UserManager<IdentityUser> userManager, RoleManager<IdentityRole> roleManager)
+        public UsersController(UserManager<ApplicationUser> userManager, RoleManager<IdentityRole> roleManager)
         {
             _userManager = userManager;
             _roleManager = roleManager;
@@ -56,7 +56,7 @@ namespace KSol.RDPGateway.Controllers
         // POST: Users/Create
         [HttpPost]
         [ValidateAntiForgeryToken]
-        public async Task<IActionResult> Create([Bind("UserName,Email")] IdentityUser user, string password)
+        public async Task<IActionResult> Create([Bind("UserName,Email")] ApplicationUser user, string password)
         {
             if (ModelState.IsValid)
             {
@@ -102,7 +102,7 @@ namespace KSol.RDPGateway.Controllers
         // POST: Users/Edit/5
         [HttpPost]
         [ValidateAntiForgeryToken]
-        public async Task<IActionResult> Edit(string id, [Bind("Id,UserName,Email")] IdentityUser user)
+        public async Task<IActionResult> Edit(string id, [Bind("Id,UserName,Email")] ApplicationUser user)
         {
             if (id != user.Id)
             {

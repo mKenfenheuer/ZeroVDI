@@ -4,6 +4,7 @@ using KSol.RDPGateway.Data;
 using RDPGW.Extensions;
 using RDPGW.AspNetCore;
 using KSol.RDPGateway.RDP;
+using KSol.RDPGateway.Models;
 
 namespace KSol.RDPGateway;
 
@@ -19,22 +20,36 @@ public class Program
             options.UseSqlite(connectionString));
         builder.Services.AddDatabaseDeveloperPageExceptionFilter();
 
-        builder.Services.AddDefaultIdentity<IdentityUser>(options => options.SignIn.RequireConfirmedAccount = true)
+        builder.Services.AddDefaultIdentity<ApplicationUser>(options => options.SignIn.RequireConfirmedAccount = true)
             .AddRoles<IdentityRole>()
             .AddEntityFrameworkStores<ApplicationDbContext>();
+
+        // Replace the default password hasher with one that also derives the Digest HA1 and NTLM
+        // NT hash on every password set, enabling Digest and NTLM/Negotiate gateway auth without
+        // asking the user for anything extra.
+        builder.Services.AddScoped<IPasswordHasher<ApplicationUser>, DerivingPasswordHasher>();
+
         builder.Services.AddControllersWithViews();
 
         builder.Services.AddRDPGW();
         builder.Services.AddSingleton<IRDPGWAuthenticationHandler, RDPAuthenticationHandler>();
         builder.Services.AddSingleton<IRDPGWAuthorizationHandler, RDPAutorizationHandler>();
+        builder.Services.AddSingleton<RDP.RdpFileGenerator>();
+        builder.Services.AddSingleton<RDP.PaaTokenService>();
 
         var app = builder.Build();
 
         using (var scope = app.Services.CreateScope())
         {
-            var userManager = scope.ServiceProvider.GetService<UserManager<IdentityUser>>();
+            var userManager = scope.ServiceProvider.GetService<UserManager<ApplicationUser>>();
             var roleManager = scope.ServiceProvider.GetService<RoleManager<IdentityRole>>();
             var context = scope.ServiceProvider.GetService<ApplicationDbContext>();
+
+            // Apply any pending EF Core migrations at startup.
+            if (context != null && context.Database.GetPendingMigrations().Any())
+            {
+                context.Database.Migrate();
+            }
             
             // Create roles if they don't exist
             var roles = new[] { "Admin", "User" };
@@ -48,7 +63,7 @@ public class Program
             
             if (userManager?.Users.Count() == 0)
             {
-                IdentityUser user = new IdentityUser()
+                ApplicationUser user = new ApplicationUser()
                 {
                     UserName = "admin@example.com",
                     NormalizedEmail = "admin@example.com".ToUpper(),
