@@ -1,0 +1,62 @@
+@model IEnumerable<KSol.RDPGateway.Models.ProxmoxBackend>
+
+@{
+    ViewData["Title"] = "Proxmox backends";
+}
+
+<partial name="_StatusMessage" />
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0">Proxmox backends</h1>
+    <a asp-action="Create" class="btn btn-primary btn-sm">+ Add backend</a>
+</div>
+
+<div class="card shadow-sm">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+            <thead class="table-light">
+                <tr>
+                    <th>Name</th>
+                    <th>Host</th>
+                    <th>Status</th>
+                    <th>Idle policy</th>
+                    <th class="text-end">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+            @if (!Model.Any())
+            {
+                <tr><td colspan="5" class="text-center text-muted py-4">No backends configured yet.</td></tr>
+            }
+            @foreach (var b in Model)
+            {
+                <tr>
+                    <td class="fw-semibold">@b.Name</td>
+                    <td class="text-muted">@(b.Host ?? "—")</td>
+                    <td>
+                        @if (b.IsConfigured)
+                        {
+                            <span class="badge bg-success">Configured</span>
+                        }
+                        else
+                        {
+                            <span class="badge bg-warning text-dark">Incomplete</span>
+                        }
+                    </td>
+                    <td class="text-muted small">
+                        @b.IdleTimeoutHours h → @b.PauseAction
+                    </td>
+                    <td class="text-end">
+                        <form asp-action="Discover" asp-route-id="@b.Id" method="post" class="d-inline">
+                            @Html.AntiForgeryToken()
+                            <button type="submit" class="btn btn-sm btn-outline-success">Discover</button>
+                        </form>
+                        <a asp-action="Edit" asp-route-id="@b.Id" class="btn btn-sm btn-outline-primary">Edit</a>
+                        <a asp-action="Delete" asp-route-id="@b.Id" class="btn btn-sm btn-outline-danger">Delete</a>
+                    </td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
+</div>

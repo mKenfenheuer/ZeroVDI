@@ -1,37 +1,73 @@
 @model KSol.RDPGateway.Models.RDPResource
+@using KSol.RDPGateway.Models
 
 @{
-    ViewData["Title"] = "Edit";
+    ViewData["Title"] = "Edit resource";
+    var isProxmox = Model.Source == ResourceSource.Proxmox;
 }
 
-<h1>Edit</h1>
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+        <h1 class="h3 mb-1">@Model.Name</h1>
+        <span class="badge @(isProxmox ? "bg-info text-dark" : "bg-secondary")">@Model.Source</span>
+        <partial name="_PowerStateBadge" model="Model.PowerState" />
+    </div>
+    <a asp-action="Index" class="btn btn-outline-secondary btn-sm">Back to list</a>
+</div>
 
-<h4>RDPResource</h4>
-<hr />
-<div class="row">
-    <div class="col-md-4">
+@if (isProxmox)
+{
+    <div class="alert alert-info">
+        This resource is managed by a Proxmox backend. Its address and RDP options are synced from the
+        VM (notes) and shown read-only here. You can still adjust its display name and description.
+    </div>
+}
+
+<div class="card shadow-sm">
+    <div class="card-body">
         <form asp-action="Edit">
             <div asp-validation-summary="ModelOnly" class="text-danger"></div>
-            <input type="hidden" asp-for="ResourceIdentifier" />
-            <div class="form-group">
-                <label asp-for="Name" class="control-label"></label>
-                <input asp-for="Name" class="form-control" />
-                <span asp-validation-for="Name" class="text-danger"></span>
+            <input type="hidden" asp-for="Id" />
+
+            <h2 class="h6 text-uppercase text-muted mb-3">General</h2>
+            <div class="row g-3 mb-4">
+                <div class="col-md-6">
+                    <label asp-for="Name" class="form-label"></label>
+                    <input asp-for="Name" class="form-control" />
+                </div>
+                <div class="col-md-6">
+                    <label asp-for="Description" class="form-label"></label>
+                    <input asp-for="Description" class="form-control" />
+                </div>
             </div>
-            <div class="form-group">
-                <label asp-for="Description" class="control-label"></label>
-                <input asp-for="Description" class="form-control" />
-                <span asp-validation-for="Description" class="text-danger"></span>
+
+            <h2 class="h6 text-uppercase text-muted mb-3">Connection</h2>
+            <div class="row g-3 mb-4">
+                <div class="col-md-8">
+                    <label asp-for="IpAddress" class="form-label">IP address / host</label>
+                    <input asp-for="IpAddress" class="form-control" readonly="@isProxmox" />
+                </div>
+                <div class="col-md-4">
+                    <label asp-for="Port" class="form-label">RDP port</label>
+                    <input asp-for="Port" class="form-control" type="number" readonly="@isProxmox" />
+                </div>
             </div>
-            <div class="form-group">
-                <input type="submit" value="Save" class="btn btn-primary" />
+
+            @if (isProxmox)
+            {
+                <p class="text-muted small">RDP options are defined in the VM notes and are not editable here.</p>
+            }
+            else
+            {
+                <partial name="_RdpOptionsEditor" for="RdpOptions" />
+            }
+
+            <div class="d-flex gap-2">
+                <button type="submit" class="btn btn-primary">Save</button>
+                <a asp-action="Index" class="btn btn-link">Cancel</a>
             </div>
         </form>
     </div>
-</div>
-
-<div>
-    <a asp-action="Index">Back to List</a>
 </div>
 
 @section Scripts {

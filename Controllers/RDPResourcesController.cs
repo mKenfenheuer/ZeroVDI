@@ -36,7 +36,7 @@ namespace KSol.RDPGateway.Controllers
             }
 
             var rDPResource = await _context.RDPResources
-                .FirstOrDefaultAsync(m => m.ResourceIdentifier == id);
+                .FirstOrDefaultAsync(m => m.Id == id);
             if (rDPResource == null)
             {
                 return NotFound();
@@ -48,18 +48,19 @@ namespace KSol.RDPGateway.Controllers
         // GET: RDPResources/Create
         public IActionResult Create()
         {
-            return View();
+            return View(new RDPResource());
         }
 
         // POST: RDPResources/Create
-        // To protect from overposting attacks, enable the specific properties you want to bind to.
-        // For more details, see http://go.microsoft.com/fwlink/?LinkId=317598.
+        // Manual resources only: an admin supplies the address and options. Proxmox-backed resources
+        // are created by the sync service, not here. Id is server-generated (GUID).
         [HttpPost]
         [ValidateAntiForgeryToken]
-        public async Task<IActionResult> Create([Bind("ResourceIdentifier,Name,Description")] RDPResource rDPResource)
+        public async Task<IActionResult> Create([Bind("Name,Description,IpAddress,Port,RdpOptions")] RDPResource rDPResource)
         {
             if (ModelState.IsValid)
             {
+                rDPResource.Source = ResourceSource.Manual;
                 _context.Add(rDPResource);
                 await _context.SaveChangesAsync();
                 return RedirectToAction(nameof(Index));
@@ -84,38 +85,38 @@ namespace KSol.RDPGateway.Controllers
         }
 
         // POST: RDPResources/Edit/5
-        // To protect from overposting attacks, enable the specific properties you want to bind to.
-        // For more details, see http://go.microsoft.com/fwlink/?LinkId=317598.
+        // Load the tracked entity and apply only the editable fields. For Proxmox resources the
+        // address/options are owned by the sync (read-only here), so only name/description are
+        // applied; for Manual resources the address, port and RDP options are editable too.
         [HttpPost]
         [ValidateAntiForgeryToken]
-        public async Task<IActionResult> Edit(string id, [Bind("ResourceIdentifier,Name,Description")] RDPResource rDPResource)
+        public async Task<IActionResult> Edit(string id, [Bind("Id,Name,Description,IpAddress,Port,RdpOptions")] RDPResource input)
         {
-            if (id != rDPResource.ResourceIdentifier)
+            if (id != input.Id)
+            {
+                return NotFound();
+            }
+
+            var existing = await _context.RDPResources.FirstOrDefaultAsync(r => r.Id == id);
+            if (existing == null)
             {
                 return NotFound();
             }
 
             if (ModelState.IsValid)
             {
-                try
+                existing.Name = input.Name;
+                existing.Description = input.Description;
+                if (existing.Source == ResourceSource.Manual)
                 {
-                    _context.Update(rDPResource);
-                    await _context.SaveChangesAsync();
+                    existing.IpAddress = input.IpAddress;
+                    existing.Port = input.Port;
+                    existing.RdpOptions = input.RdpOptions ?? existing.RdpOptions;
                 }
-                catch (DbUpdateConcurrencyException)
-                {
-                    if (!RDPResourceExists(rDPResource.ResourceIdentifier))
-                    {
-                        return NotFound();
-                    }
-                    else
-                    {
-                        throw;
-                    }
-                }
+                await _context.SaveChangesAsync();
                 return RedirectToAction(nameof(Index));
             }
-            return View(rDPResource);
+            return View(existing);
         }
 
         // GET: RDPResources/Delete/5
@@ -127,7 +128,7 @@ namespace KSol.RDPGateway.Controllers
             }
 
             var rDPResource = await _context.RDPResources
-                .FirstOrDefaultAsync(m => m.ResourceIdentifier == id);
+                .FirstOrDefaultAsync(m => m.Id == id);
             if (rDPResource == null)
             {
                 return NotFound();
@@ -153,7 +154,7 @@ namespace KSol.RDPGateway.Controllers
 
         private bool RDPResourceExists(string id)
         {
-            return _context.RDPResources.Any(e => e.ResourceIdentifier == id);
+            return _context.RDPResources.Any(e => e.Id == id);
         }
     }
 }

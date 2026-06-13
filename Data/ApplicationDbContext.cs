@@ -13,10 +13,16 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
 
     public DbSet<RDPResource> RDPResources { get; set; }
     public DbSet<RDPResourceUserAuthorization> RDPResourceUserAuthorizations { get; set; }
+    public DbSet<ProxmoxBackend> ProxmoxBackends { get; set; }
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
         base.OnModelCreating(builder);
+
+        // Persist the per-resource RDP options as a single JSON column rather than a side table,
+        // so the option set can evolve without a migration per field.
+        builder.Entity<RDPResource>().OwnsOne(r => r.RdpOptions, b => b.ToJson());
+
         // Register the OpenIddict applications/authorizations/scopes/tokens entity sets so the
         // self-hosted OAuth/OIDC server persists its state in the same database.
         builder.UseOpenIddict();

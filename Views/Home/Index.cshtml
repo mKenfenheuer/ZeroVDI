@@ -49,22 +49,28 @@
                     <div class="col-md-6 col-lg-4 mb-4">
                         <div class="card h-100 shadow-sm">
                             <div class="card-body">
-                                <h5 class="card-title">@resource.Name</h5>
+                                <div class="d-flex justify-content-between align-items-start">
+                                    <h5 class="card-title mb-1">@resource.Name</h5>
+                                    <partial name="_PowerStateBadge" model="resource.PowerState" />
+                                </div>
                                 @if (!string.IsNullOrEmpty(resource.Description))
                                 {
                                     <p class="card-text text-muted">@resource.Description</p>
                                 }
-                                <p class="card-text">
-                                    <small class="text-secondary">
-                                        <strong>Resource ID:</strong> @resource.ResourceIdentifier
-                                    </small>
-                                </p>
+                                @if (resource.PowerState == KSol.RDPGateway.Models.ResourcePowerState.Stopped
+                                    || resource.PowerState == KSol.RDPGateway.Models.ResourcePowerState.Suspended)
+                                {
+                                    <p class="card-text"><small class="text-secondary">
+                                        This desktop will be started when you connect — the client will show
+                                        “starting remote computer” for a moment.
+                                    </small></p>
+                                }
                             </div>
                             <div class="card-footer bg-light d-grid gap-2">
-                                <a href="rdp://full%20address=s:@resource.ResourceIdentifier&gatewayhostname=s:@Context.Request.Host.Host" class="btn btn-primary btn-sm">
+                                <a href="rdp://full%20address=s:@resource.Id&gatewayhostname=s:@Context.Request.Host.Host" class="btn btn-primary btn-sm">
                                     <i class="bi bi-play-circle"></i> Start Session
                                 </a>
-                                <a asp-action="DownloadRdpFile" asp-route-id="@resource.ResourceIdentifier" class="btn btn-secondary btn-sm">
+                                <a asp-action="DownloadRdpFile" asp-route-id="@resource.Id" class="btn btn-secondary btn-sm">
                                     <i class="bi bi-download"></i> Download .RDP File
                                 </a>
                             </div>

@@ -1,41 +1,59 @@
 @model IEnumerable<KSol.RDPGateway.Models.RDPResource>
+@using KSol.RDPGateway.Models
 
 @{
-    ViewData["Title"] = "Index";
+    ViewData["Title"] = "Resources";
 }
 
-<h1>Index</h1>
+<partial name="_StatusMessage" />
 
-<p>
-    <a asp-action="Create">Create New</a>
-</p>
-<table class="table">
-    <thead>
-        <tr>
-            <th>
-                @Html.DisplayNameFor(model => model.Name)
-            </th>
-            <th>
-                @Html.DisplayNameFor(model => model.Description)
-            </th>
-            <th></th>
-        </tr>
-    </thead>
-    <tbody>
-@foreach (var item in Model) {
-        <tr>
-            <td>
-                @Html.DisplayFor(modelItem => item.Name)
-            </td>
-            <td>
-                @Html.DisplayFor(modelItem => item.Description)
-            </td>
-            <td>
-                <a asp-action="Edit" asp-route-id="@item.ResourceIdentifier">Edit</a> |
-                <a asp-action="Details" asp-route-id="@item.ResourceIdentifier">Details</a> |
-                <a asp-action="Delete" asp-route-id="@item.ResourceIdentifier">Delete</a>
-            </td>
-        </tr>
-}
-    </tbody>
-</table>
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0">Resources</h1>
+    <a asp-action="Create" class="btn btn-primary btn-sm">+ New resource</a>
+</div>
+
+<div class="card shadow-sm">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+            <thead class="table-light">
+                <tr>
+                    <th>Name</th>
+                    <th>Source</th>
+                    <th>State</th>
+                    <th>Address</th>
+                    <th class="text-end">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+            @if (!Model.Any())
+            {
+                <tr><td colspan="5" class="text-center text-muted py-4">No resources yet.</td></tr>
+            }
+            @foreach (var item in Model)
+            {
+                <tr>
+                    <td>
+                        <div class="fw-semibold">@item.Name</div>
+                        @if (!string.IsNullOrEmpty(item.Description))
+                        {
+                            <div class="text-muted small">@item.Description</div>
+                        }
+                    </td>
+                    <td>
+                        <span class="badge @(item.Source == ResourceSource.Proxmox ? "bg-info text-dark" : "bg-secondary")">@item.Source</span>
+                    </td>
+                    <td><partial name="_PowerStateBadge" model="item.PowerState" /></td>
+                    <td class="text-muted">
+                        @(string.IsNullOrEmpty(item.IpAddress) ? "—" : $"{item.IpAddress}:{item.Port}")
+                    </td>
+                    <td class="text-end">
+                        <a asp-action="Details" asp-route-id="@item.Id" class="btn btn-sm btn-outline-secondary">Details</a>
+                        <a asp-action="Edit" asp-route-id="@item.Id" class="btn btn-sm btn-outline-primary">Edit</a>
+                        <a asp-action="Delete" asp-route-id="@item.Id" class="btn btn-sm btn-outline-danger">Delete</a>
+                    </td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
+</div>

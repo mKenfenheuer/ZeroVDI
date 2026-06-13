@@ -1,41 +1,55 @@
 @model KSol.RDPGateway.Models.RDPResource
 
 @{
-    ViewData["Title"] = "Create";
+    ViewData["Title"] = "New resource";
 }
 
-<h1>Create</h1>
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0">New resource</h1>
+    <a asp-action="Index" class="btn btn-outline-secondary btn-sm">Back to list</a>
+</div>
 
-<h4>RDPResource</h4>
-<hr />
-<div class="row">
-    <div class="col-md-4">
+<div class="card shadow-sm">
+    <div class="card-body">
         <form asp-action="Create">
             <div asp-validation-summary="ModelOnly" class="text-danger"></div>
-            <div class="form-group">
-                <label asp-for="ResourceIdentifier" class="control-label"></label>
-                <input asp-for="ResourceIdentifier" class="form-control" />
-                <span asp-validation-for="ResourceIdentifier" class="text-danger"></span>
+
+            <h2 class="h6 text-uppercase text-muted mb-3">General</h2>
+            <div class="row g-3 mb-4">
+                <div class="col-md-6">
+                    <label asp-for="Name" class="form-label"></label>
+                    <input asp-for="Name" class="form-control" />
+                    <span asp-validation-for="Name" class="text-danger"></span>
+                </div>
+                <div class="col-md-6">
+                    <label asp-for="Description" class="form-label"></label>
+                    <input asp-for="Description" class="form-control" />
+                    <span asp-validation-for="Description" class="text-danger"></span>
+                </div>
             </div>
-            <div class="form-group">
-                <label asp-for="Name" class="control-label"></label>
-                <input asp-for="Name" class="form-control" />
-                <span asp-validation-for="Name" class="text-danger"></span>
+
+            <h2 class="h6 text-uppercase text-muted mb-3">Connection</h2>
+            <div class="row g-3 mb-4">
+                <div class="col-md-8">
+                    <label asp-for="IpAddress" class="form-label">IP address / host</label>
+                    <input asp-for="IpAddress" class="form-control" placeholder="10.0.0.10" />
+                    <span asp-validation-for="IpAddress" class="text-danger"></span>
+                </div>
+                <div class="col-md-4">
+                    <label asp-for="Port" class="form-label">RDP port</label>
+                    <input asp-for="Port" class="form-control" type="number" />
+                    <span asp-validation-for="Port" class="text-danger"></span>
+                </div>
             </div>
-            <div class="form-group">
-                <label asp-for="Description" class="control-label"></label>
-                <input asp-for="Description" class="form-control" />
-                <span asp-validation-for="Description" class="text-danger"></span>
-            </div>
-            <div class="form-group">
-                <input type="submit" value="Create" class="btn btn-primary" />
+
+            <partial name="_RdpOptionsEditor" for="RdpOptions" />
+
+            <div class="d-flex gap-2">
+                <button type="submit" class="btn btn-primary">Create resource</button>
+                <a asp-action="Index" class="btn btn-link">Cancel</a>
             </div>
         </form>
     </div>
-</div>
-
-<div>
-    <a asp-action="Index">Back to List</a>
 </div>
 
 @section Scripts {

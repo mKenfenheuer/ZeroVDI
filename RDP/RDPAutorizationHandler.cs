@@ -20,6 +20,8 @@ public class RDPAutorizationHandler : IRDPGWAuthorizationHandler
         using var scope = _scopeFactory.CreateScope();
         using var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
 
+        // The client connects to a resource by its stable id (the GUID written as the .rdp full
+        // address), so authorization keys on RDPResourceId == resource id. Strip any stray nulls.
         resource = resource.Trim().Replace("\0","");
 
         var authorized = await dbContext.RDPResourceUserAuthorizations.AnyAsync(a => a.UserId == userId && a.RDPResourceId == resource);

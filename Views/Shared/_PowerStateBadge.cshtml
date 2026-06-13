@@ -1,0 +1,12 @@
+@model KSol.RDPGateway.Models.ResourcePowerState
+@{
+    var (cls, text) = Model switch
+    {
+        KSol.RDPGateway.Models.ResourcePowerState.Running => ("bg-success", "Running"),
+        KSol.RDPGateway.Models.ResourcePowerState.Stopped => ("bg-secondary", "Stopped"),
+        KSol.RDPGateway.Models.ResourcePowerState.Suspended => ("bg-warning text-dark", "Suspended"),
+        KSol.RDPGateway.Models.ResourcePowerState.Starting => ("bg-info text-dark", "Starting…"),
+        _ => ("bg-light text-dark border", "Unknown"),
+    };
+}
+<span class="badge @cls">@text</span>

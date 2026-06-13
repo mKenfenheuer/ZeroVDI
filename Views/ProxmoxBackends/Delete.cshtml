@@ -1,0 +1,26 @@
+@model KSol.RDPGateway.Models.ProxmoxBackend
+
+@{
+    ViewData["Title"] = "Delete Proxmox backend";
+}
+
+<h1 class="h3 mb-3">Delete Proxmox backend</h1>
+
+<div class="card shadow-sm">
+    <div class="card-body">
+        <p class="lead">Are you sure you want to delete the backend <strong>@Model.Name</strong>?</p>
+        <div class="alert alert-warning">
+            Resources discovered from this backend will no longer start or pause automatically. The
+            VMs and their <code>ksol-rdpgw-id</code> notes are not changed.
+        </div>
+        <dl class="row">
+            <dt class="col-sm-2">Host</dt>
+            <dd class="col-sm-10">@(Model.Host ?? "—")</dd>
+        </dl>
+        <form asp-action="Delete">
+            <input type="hidden" asp-for="Id" />
+            <button type="submit" class="btn btn-danger">Delete</button>
+            <a asp-action="Index" class="btn btn-link">Cancel</a>
+        </form>
+    </div>
+</div>

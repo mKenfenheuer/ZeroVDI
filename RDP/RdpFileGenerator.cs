@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using KSol.RDPGateway.Models;
 
@@ -7,6 +8,11 @@ namespace KSol.RDPGateway.RDP;
 /// Builds the contents of a Windows .rdp connection file for an <see cref="RDPResource"/>,
 /// pre-configured to route through this gateway. Shared by the web UI download endpoint and the
 /// RemoteApp &amp; Desktop Connections (RDWeb) workspace feed.
+///
+/// The display/redirection/experience lines are driven by the resource's <see cref="RdpOptions"/>;
+/// the routing lines (<c>full address</c>, the gateway* keys) are always emitted. The
+/// <c>full address</c> is the resource's stable <see cref="RDPResource.Id"/> (a GUID) — the gateway
+/// resolves that id to the backing machine's current address at connect time.
 /// </summary>
 public class RdpFileGenerator
 {
@@ -18,65 +24,92 @@ public class RdpFileGenerator
     /// <param name="userName">The username to pre-fill, if known.</param>
     public string Generate(RDPResource resource, string gatewayHost, string? userName = null)
     {
-        var fullAddress = resource.ResourceIdentifier ?? string.Empty;
+        var o = resource.RdpOptions ?? new RdpOptions();
+
+        // The client connects to the resource by its stable id; the gateway maps it to the real host.
+        var fullAddress = resource.Id;
 
         var sb = new StringBuilder();
-        sb.AppendLine("screen mode id:i:2");
-        sb.AppendLine("use multimon:i:0");
-        sb.AppendLine("desktopwidth:i:1920");
-        sb.AppendLine("desktopheight:i:1080");
-        sb.AppendLine("session bpp:i:32");
-        sb.AppendLine("winposstr:s:0,1,0,0,800,600");
-        sb.AppendLine("compression:i:1");
-        sb.AppendLine("keyboardhook:i:2");
-        sb.AppendLine("audiocapturemode:i:0");
-        sb.AppendLine("videoplaybackmode:i:1");
-        sb.AppendLine("connection type:i:7");
-        sb.AppendLine("networkautodetect:i:1");
-        sb.AppendLine("bandwidthautodetect:i:1");
-        sb.AppendLine("displayconnectionbar:i:1");
-        sb.AppendLine("enableworkspacereconnect:i:0");
-        sb.AppendLine("remoteappmousemoveinject:i:1");
-        sb.AppendLine("disable wallpaper:i:0");
-        sb.AppendLine("allow font smoothing:i:0");
-        sb.AppendLine("allow desktop composition:i:0");
-        sb.AppendLine("disable full window drag:i:1");
-        sb.AppendLine("disable menu anims:i:1");
-        sb.AppendLine("disable themes:i:0");
-        sb.AppendLine("disable cursor setting:i:0");
-        sb.AppendLine("bitmapcachepersistenable:i:1");
-        sb.AppendLine("full address:s:" + fullAddress);
-        sb.AppendLine("audiomode:i:0");
-        sb.AppendLine("redirectprinters:i:1");
-        sb.AppendLine("redirectlocation:i:0");
-        sb.AppendLine("redirectcomports:i:0");
-        sb.AppendLine("redirectsmartcards:i:1");
-        sb.AppendLine("redirectwebauthn:i:1");
-        sb.AppendLine("redirectclipboard:i:1");
-        sb.AppendLine("redirectposdevices:i:0");
-        sb.AppendLine("drivestoredirect:s:");
-        sb.AppendLine("autoreconnection enabled:i:1");
-        sb.AppendLine("authentication level:i:2");
-        sb.AppendLine("prompt for credentials:i:0");
-        sb.AppendLine("negotiate security layer:i:1");
-        sb.AppendLine("remoteapplicationmode:i:0");
-        sb.AppendLine("alternate shell:s:");
-        sb.AppendLine("shell working directory:s:");
-        sb.AppendLine("gatewayhostname:s:" + gatewayHost);
-        sb.AppendLine("gatewayusagemethod:i:1");
-        sb.AppendLine("gatewaycredentialssource:i:4");
-        sb.AppendLine("gatewayprofileusagemethod:i:1");
-        sb.AppendLine("promptcredentialonce:i:1");
-        sb.AppendLine("gatewaybrokeringtype:i:0");
-        sb.AppendLine("use redirection server name:i:0");
-        sb.AppendLine("rdgiskdcproxy:i:0");
-        sb.AppendLine("kdcproxyname:s:");
-        sb.AppendLine("enablerdsaadauth:i:0");
+
+        // Display
+        Line(sb, "screen mode id", o.ScreenModeId);
+        Line(sb, "use multimon", Bit(o.UseMultimon));
+        Line(sb, "desktopwidth", o.DesktopWidth);
+        Line(sb, "desktopheight", o.DesktopHeight);
+        Line(sb, "session bpp", o.SessionBpp);
+        Line(sb, "winposstr", "s", "0,1,0,0,800,600");
+
+        // Experience
+        Line(sb, "compression", Bit(o.Compression));
+        Line(sb, "keyboardhook", 2);
+        Line(sb, "audiocapturemode", Bit(o.AudioCaptureMode));
+        Line(sb, "videoplaybackmode", 1);
+        Line(sb, "connection type", o.ConnectionType);
+        Line(sb, "networkautodetect", Bit(o.NetworkAutodetect));
+        Line(sb, "bandwidthautodetect", Bit(o.BandwidthAutodetect));
+        Line(sb, "displayconnectionbar", 1);
+        Line(sb, "enableworkspacereconnect", 0);
+        Line(sb, "remoteappmousemoveinject", 1);
+        Line(sb, "disable wallpaper", Bit(o.DisableWallpaper));
+        Line(sb, "allow font smoothing", Bit(o.AllowFontSmoothing));
+        Line(sb, "allow desktop composition", Bit(o.AllowDesktopComposition));
+        Line(sb, "disable full window drag", Bit(o.DisableFullWindowDrag));
+        Line(sb, "disable menu anims", Bit(o.DisableMenuAnims));
+        Line(sb, "disable themes", Bit(o.DisableThemes));
+        Line(sb, "disable cursor setting", 0);
+        Line(sb, "bitmapcachepersistenable", 1);
+
+        // Target. The gateway resolves this id to the backing machine's real host and port at
+        // connect time, so no :port is appended here.
+        Line(sb, "full address", "s", fullAddress);
+
+        // Redirections
+        Line(sb, "audiomode", o.AudioMode);
+        Line(sb, "redirectprinters", Bit(o.RedirectPrinters));
+        Line(sb, "redirectlocation", Bit(o.RedirectLocation));
+        Line(sb, "redirectcomports", Bit(o.RedirectComPorts));
+        Line(sb, "redirectsmartcards", Bit(o.RedirectSmartCards));
+        Line(sb, "redirectwebauthn", Bit(o.RedirectWebAuthn));
+        Line(sb, "redirectclipboard", Bit(o.RedirectClipboard));
+        Line(sb, "redirectposdevices", Bit(o.RedirectPosDevices));
+        Line(sb, "drivestoredirect", "s", o.DriveStoreRedirect ?? string.Empty);
+
+        // Session
+        Line(sb, "autoreconnection enabled", Bit(o.AutoReconnectionEnabled));
+        Line(sb, "authentication level", 2);
+        Line(sb, "prompt for credentials", 0);
+        Line(sb, "negotiate security layer", 1);
+        Line(sb, "remoteapplicationmode", Bit(o.RemoteApplicationMode));
+        Line(sb, "alternate shell", "s", o.AlternateShell ?? string.Empty);
+        Line(sb, "shell working directory", "s", string.Empty);
+
+        // Gateway routing (always)
+        Line(sb, "gatewayhostname", "s", gatewayHost);
+        Line(sb, "gatewayusagemethod", 1);
+        Line(sb, "gatewaycredentialssource", 4);
+        Line(sb, "gatewayprofileusagemethod", 1);
+        Line(sb, "promptcredentialonce", 1);
+        Line(sb, "gatewaybrokeringtype", 0);
+        Line(sb, "use redirection server name", 0);
+        Line(sb, "rdgiskdcproxy", 0);
+        Line(sb, "kdcproxyname", "s", string.Empty);
+        Line(sb, "enablerdsaadauth", 0);
+
         if (!string.IsNullOrEmpty(userName))
         {
-            sb.AppendLine("username:s:" + userName);
+            Line(sb, "username", "s", userName);
         }
 
         return sb.ToString();
     }
+
+    private static int Bit(bool value) => value ? 1 : 0;
+
+    /// <summary>Writes an integer (<c>i</c>) setting line.</summary>
+    private static void Line(StringBuilder sb, string key, int value)
+        => sb.AppendLine($"{key}:i:{value.ToString(CultureInfo.InvariantCulture)}");
+
+    /// <summary>Writes a setting line of the given type (<c>s</c> string or <c>i</c> int).</summary>
+    private static void Line(StringBuilder sb, string key, string type, string value)
+        => sb.AppendLine($"{key}:{type}:{value}");
 }

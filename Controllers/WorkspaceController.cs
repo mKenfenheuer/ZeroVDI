@@ -600,8 +600,8 @@ public class WorkspaceController : Controller
             foreach (var resource in resources)
             {
                 writer.WriteStartElement("TerminalServer");
-                writer.WriteAttributeString("ID", ToNcName(resource.ResourceIdentifier));
-                writer.WriteAttributeString("Name", resource.ResourceIdentifier ?? "");
+                writer.WriteAttributeString("ID", ToNcName(resource.Id));
+                writer.WriteAttributeString("Name", resource.Id);
                 writer.WriteAttributeString("LastUpdated", now);
                 writer.WriteEndElement(); // TerminalServer
             }
@@ -617,13 +617,21 @@ public class WorkspaceController : Controller
 
     private static void WriteResource(XmlWriter writer, RDPResource resource, string now, string baseUrl)
     {
-        var realId = resource.ResourceIdentifier ?? Guid.NewGuid().ToString();
+        var realId = resource.Id;
         // The feed's ID/Alias/Ref linkage is typed xs:ID/xs:IDREF in the TSWF schema, so it must be a
-        // valid NCName (letter/underscore start, no dots/colons). A raw IP like "10.1.250.121" fails
-        // validation ("could not parse the XML"), so use an NCName-safe token for the in-document
-        // identifiers. The real IP stays in the .rdp URL path (and the .rdp full address).
+        // valid NCName (letter/underscore start, no dots/colons). The resource id is a GUID, which is
+        // not a valid NCName on its own, so use an NCName-safe token for the in-document identifiers.
+        // The GUID itself stays in the .rdp URL path (and is the .rdp full address).
         var ncId = ToNcName(realId);
-        var title = string.IsNullOrEmpty(resource.Name) ? realId : resource.Name!;
+        // Surface the backing machine's power state as a secondary cue in the resource title.
+        var baseTitle = string.IsNullOrEmpty(resource.Name) ? realId : resource.Name!;
+        var title = resource.PowerState switch
+        {
+            Models.ResourcePowerState.Stopped => $"{baseTitle} (stopped)",
+            Models.ResourcePowerState.Suspended => $"{baseTitle} (suspended)",
+            Models.ResourcePowerState.Starting => $"{baseTitle} (starting…)",
+            _ => baseTitle,
+        };
         var rdpUrl = $"{baseUrl}/rdweb/feed/rdp/{Uri.EscapeDataString(realId)}.rdp";
 
         writer.WriteStartElement("Resource");

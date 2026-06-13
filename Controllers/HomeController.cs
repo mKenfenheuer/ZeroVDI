@@ -82,7 +82,7 @@ public class HomeController : Controller
         var rdpContent = _rdpGenerator.Generate(resource, host, _userManager.GetUserName(User));
         var fileBytes = Encoding.UTF8.GetBytes(rdpContent);
 
-        return File(fileBytes, "application/x-rdp", $"{resource.Name ?? resource.ResourceIdentifier}.rdp");
+        return File(fileBytes, "application/x-rdp", $"{resource.Name ?? resource.Id}.rdp");
     }
 
     public IActionResult Privacy()

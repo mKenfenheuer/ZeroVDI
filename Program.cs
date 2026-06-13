@@ -50,6 +50,17 @@ public class Program
         builder.Services.AddSingleton<RDP.RdpFileGenerator>();
         builder.Services.AddSingleton<RDP.PaaTokenService>();
 
+        // Proxmox VE backend (VDI): settings provider, REST client, session tracking, the gateway
+        // resource resolver (GUID -> current host, start-on-connect), and the background services
+        // that sync the VM inventory and pause idle VMs.
+        builder.Services.AddSingleton<RDP.ProxmoxBackendProvider>();
+        builder.Services.AddSingleton<RDP.ProxmoxClient>();
+        builder.Services.AddSingleton<RDP.SessionTracker>();
+        builder.Services.AddSingleton<IRDPGWResourceResolver, RDP.VdiResourceResolver>();
+        builder.Services.AddSingleton<RDP.ProxmoxSyncService>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<RDP.ProxmoxSyncService>());
+        builder.Services.AddHostedService<RDP.IdleReaperService>();
+
         // Self-hosted OAuth 2.0 / OpenID Connect server (OpenIddict), backed by the Identity users.
         // Lets OAuth-capable clients obtain a Bearer token via an interactive login and present it
         // to the RDWeb feed. OpenIddict's ASP.NET validation also populates HttpContext.User from a

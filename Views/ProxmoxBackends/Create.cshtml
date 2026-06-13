@@ -1,0 +1,27 @@
+@model KSol.RDPGateway.Models.ProxmoxBackend
+
+@{
+    ViewData["Title"] = "Add Proxmox backend";
+}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0">Add Proxmox backend</h1>
+    <a asp-action="Index" class="btn btn-outline-secondary btn-sm">Back to list</a>
+</div>
+
+<div class="card shadow-sm">
+    <div class="card-body">
+        <form asp-action="Create">
+            <div asp-validation-summary="ModelOnly" class="text-danger"></div>
+            <partial name="_BackendFields" model="Model" />
+            <div class="d-flex gap-2">
+                <button type="submit" class="btn btn-primary">Add backend</button>
+                <a asp-action="Index" class="btn btn-link">Cancel</a>
+            </div>
+        </form>
+    </div>
+</div>
+
+@section Scripts {
+    @{await Html.RenderPartialAsync("_ValidationScriptsPartial");}
+}

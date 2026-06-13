@@ -1,0 +1,84 @@
+@model KSol.RDPGateway.Models.RdpOptions
+@{
+    // Rendered inside a parent form whose model exposes RdpOptions; the name prefix is set by the
+    // caller via an EditorViewData/template-name so the inputs post back as RdpOptions.<field>.
+}
+<div class="accordion mb-3" id="rdpOptionsAccordion">
+    <div class="accordion-item">
+        <h2 class="accordion-header">
+            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse"
+                    data-bs-target="#rdpOptionsBody" aria-expanded="false" aria-controls="rdpOptionsBody">
+                RDP options
+            </button>
+        </h2>
+        <div id="rdpOptionsBody" class="accordion-collapse collapse" data-bs-parent="#rdpOptionsAccordion">
+            <div class="accordion-body">
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label asp-for="ScreenModeId" class="form-label">Screen mode</label>
+                        <select asp-for="ScreenModeId" class="form-select">
+                            <option value="1">Windowed</option>
+                            <option value="2">Full screen</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label asp-for="DesktopWidth" class="form-label">Width</label>
+                        <input asp-for="DesktopWidth" class="form-control" type="number" />
+                    </div>
+                    <div class="col-md-4">
+                        <label asp-for="DesktopHeight" class="form-label">Height</label>
+                        <input asp-for="DesktopHeight" class="form-control" type="number" />
+                    </div>
+                    <div class="col-md-4">
+                        <label asp-for="SessionBpp" class="form-label">Colour depth (bpp)</label>
+                        <select asp-for="SessionBpp" class="form-select">
+                            <option value="15">15</option>
+                            <option value="16">16</option>
+                            <option value="24">24</option>
+                            <option value="32">32</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label asp-for="AudioMode" class="form-label">Audio</label>
+                        <select asp-for="AudioMode" class="form-select">
+                            <option value="0">Play on this computer</option>
+                            <option value="1">Play on remote</option>
+                            <option value="2">Do not play</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label asp-for="DriveStoreRedirect" class="form-label">Redirect drives</label>
+                        <input asp-for="DriveStoreRedirect" class="form-control" placeholder="* for all, blank for none" />
+                    </div>
+                </div>
+
+                <hr />
+                <div class="row g-2">
+                    <div class="col-md-3 form-check ms-2"><input asp-for="UseMultimon" class="form-check-input" /> <label asp-for="UseMultimon" class="form-check-label">Use all monitors</label></div>
+                    <div class="col-md-3 form-check ms-2"><input asp-for="RedirectClipboard" class="form-check-input" /> <label asp-for="RedirectClipboard" class="form-check-label">Clipboard</label></div>
+                    <div class="col-md-3 form-check ms-2"><input asp-for="RedirectPrinters" class="form-check-input" /> <label asp-for="RedirectPrinters" class="form-check-label">Printers</label></div>
+                    <div class="col-md-3 form-check ms-2"><input asp-for="RedirectSmartCards" class="form-check-input" /> <label asp-for="RedirectSmartCards" class="form-check-label">Smart cards</label></div>
+                    <div class="col-md-3 form-check ms-2"><input asp-for="RedirectWebAuthn" class="form-check-input" /> <label asp-for="RedirectWebAuthn" class="form-check-label">WebAuthn</label></div>
+                    <div class="col-md-3 form-check ms-2"><input asp-for="RedirectComPorts" class="form-check-input" /> <label asp-for="RedirectComPorts" class="form-check-label">COM ports</label></div>
+                    <div class="col-md-3 form-check ms-2"><input asp-for="RedirectPosDevices" class="form-check-input" /> <label asp-for="RedirectPosDevices" class="form-check-label">POS devices</label></div>
+                    <div class="col-md-3 form-check ms-2"><input asp-for="RedirectLocation" class="form-check-input" /> <label asp-for="RedirectLocation" class="form-check-label">Location</label></div>
+                    <div class="col-md-3 form-check ms-2"><input asp-for="AudioCaptureMode" class="form-check-input" /> <label asp-for="AudioCaptureMode" class="form-check-label">Microphone</label></div>
+                </div>
+
+                <hr />
+                <div class="row g-2">
+                    <div class="col-md-4 form-check ms-2"><input asp-for="NetworkAutodetect" class="form-check-input" /> <label asp-for="NetworkAutodetect" class="form-check-label">Network autodetect</label></div>
+                    <div class="col-md-4 form-check ms-2"><input asp-for="BandwidthAutodetect" class="form-check-input" /> <label asp-for="BandwidthAutodetect" class="form-check-label">Bandwidth autodetect</label></div>
+                    <div class="col-md-4 form-check ms-2"><input asp-for="Compression" class="form-check-input" /> <label asp-for="Compression" class="form-check-label">Compression</label></div>
+                    <div class="col-md-4 form-check ms-2"><input asp-for="AutoReconnectionEnabled" class="form-check-input" /> <label asp-for="AutoReconnectionEnabled" class="form-check-label">Auto-reconnect</label></div>
+                    <div class="col-md-4 form-check ms-2"><input asp-for="DisableWallpaper" class="form-check-input" /> <label asp-for="DisableWallpaper" class="form-check-label">Disable wallpaper</label></div>
+                    <div class="col-md-4 form-check ms-2"><input asp-for="DisableThemes" class="form-check-input" /> <label asp-for="DisableThemes" class="form-check-label">Disable themes</label></div>
+                    <div class="col-md-4 form-check ms-2"><input asp-for="DisableMenuAnims" class="form-check-input" /> <label asp-for="DisableMenuAnims" class="form-check-label">Disable menu anims</label></div>
+                    <div class="col-md-4 form-check ms-2"><input asp-for="DisableFullWindowDrag" class="form-check-input" /> <label asp-for="DisableFullWindowDrag" class="form-check-label">Disable full window drag</label></div>
+                    <div class="col-md-4 form-check ms-2"><input asp-for="AllowFontSmoothing" class="form-check-input" /> <label asp-for="AllowFontSmoothing" class="form-check-label">Font smoothing</label></div>
+                    <div class="col-md-4 form-check ms-2"><input asp-for="AllowDesktopComposition" class="form-check-input" /> <label asp-for="AllowDesktopComposition" class="form-check-label">Desktop composition</label></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>

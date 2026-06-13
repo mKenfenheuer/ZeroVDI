@@ -51,7 +51,7 @@ namespace KSol.RDPGateway.Controllers
         // GET: RDPResourceUserAuthorizations/Create
         public IActionResult Create()
         {
-            ViewData["RDPResourceId"] = new SelectList(_context.RDPResources, "ResourceIdentifier", "ResourceIdentifier");
+            ViewData["RDPResourceId"] = new SelectList(_context.RDPResources, "Id", "Name");
             ViewData["UserId"] = new SelectList(_context.Users, "Id", "UserName");
             return View();
         }
@@ -69,7 +69,7 @@ namespace KSol.RDPGateway.Controllers
                 await _context.SaveChangesAsync();
                 return RedirectToAction(nameof(Index));
             }
-            ViewData["RDPResourceId"] = new SelectList(_context.RDPResources, "ResourceIdentifier", "ResourceIdentifier", rDPResourceUserAuthorization.RDPResourceId);
+            ViewData["RDPResourceId"] = new SelectList(_context.RDPResources, "Id", "Name", rDPResourceUserAuthorization.RDPResourceId);
             ViewData["UserId"] = new SelectList(_context.Users, "Id", "UserName", rDPResourceUserAuthorization.UserId);
             return View(rDPResourceUserAuthorization);
         }
@@ -87,7 +87,7 @@ namespace KSol.RDPGateway.Controllers
             {
                 return NotFound();
             }
-            ViewData["RDPResourceId"] = new SelectList(_context.RDPResources, "ResourceIdentifier", "ResourceIdentifier", rDPResourceUserAuthorization.RDPResourceId);
+            ViewData["RDPResourceId"] = new SelectList(_context.RDPResources, "Id", "Name", rDPResourceUserAuthorization.RDPResourceId);
             ViewData["UserId"] = new SelectList(_context.Users, "Id", "UserName", rDPResourceUserAuthorization.UserId);
             return View(rDPResourceUserAuthorization);
         }
@@ -124,7 +124,7 @@ namespace KSol.RDPGateway.Controllers
                 }
                 return RedirectToAction(nameof(Index));
             }
-            ViewData["RDPResourceId"] = new SelectList(_context.RDPResources, "ResourceIdentifier", "ResourceIdentifier", rDPResourceUserAuthorization.RDPResourceId);
+            ViewData["RDPResourceId"] = new SelectList(_context.RDPResources, "Id", "Name", rDPResourceUserAuthorization.RDPResourceId);
             ViewData["UserId"] = new SelectList(_context.Users, "Id", "UserName", rDPResourceUserAuthorization.UserId);
             return View(rDPResourceUserAuthorization);
         }
