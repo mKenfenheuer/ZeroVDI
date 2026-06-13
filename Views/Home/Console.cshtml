@@ -23,10 +23,12 @@
         #toolbar .spacer { flex: 1 1 auto; }
         #screen-wrap {
             position: absolute; top: 36px; left: 0; right: 0; bottom: 0;
-            overflow: auto; display: flex; align-items: flex-start; justify-content: center;
+            overflow: hidden; display: flex; align-items: center; justify-content: center;
             background: #000;
         }
-        #canvas { background: #000; image-rendering: pixelated; }
+        /* CSS size is set per-connection by client._fit() so the device-pixel backing store maps 1:1
+           on HiDPI displays (crisp, no browser upscaling). */
+        #canvas { background: #000; display: block; }
         #pointer-cache { display: none; }
         .pointer-cache-null { cursor: none; }
         .pointer-cache-default { cursor: default; }
@@ -113,6 +115,7 @@
             var btnDisconnect = document.getElementById("btn-disconnect");
             var btnFullscreen = document.getElementById("btn-fullscreen");
 
+            var screenWrap = document.getElementById("screen-wrap");
             var client = new Client(wsUrl, "canvas");
             client.setStatusCallback(function (status, message) {
                 switch (status) {
@@ -148,17 +151,29 @@
                 if (!user) { loginError.textContent = "Username is required."; return; }
                 btnConnect.disabled = true;
                 btnConnect.textContent = "Connecting…";
+                // Pick a desktop resolution that fills the visible area in *device* pixels (crisp on
+                // HiDPI), bake it into the handshake by sizing the canvas before connecting.
+                var size = client.chooseDesktopSize(screenWrap);
+                client.applyDesktopSize(screenWrap, size);
                 client.connect({ user: user, password: pass, domain: domain });
             });
 
             btnDisconnect.addEventListener("click", function () { client.disconnect(); });
             btnFullscreen.addEventListener("click", function () {
-                var wrap = document.getElementById("screen-wrap");
                 if (!document.fullscreenElement) {
-                    (wrap.requestFullscreen ? wrap.requestFullscreen() : Promise.reject()).catch(function () {});
+                    (screenWrap.requestFullscreen ? screenWrap.requestFullscreen() : Promise.reject()).catch(function () {});
                 } else {
                     document.exitFullscreen();
                 }
+            });
+            // Keep the canvas centered & 1:1 when the viewport changes. The desktop resolution stays
+            // fixed for the session (live resize will arrive with MS-RDPEDISP); the canvas is just
+            // re-fitted (letterboxed) into the new visible area.
+            window.addEventListener("resize", function () {
+                if (client.connected) client._fit(screenWrap);
+            });
+            document.addEventListener("fullscreenchange", function () {
+                if (client.connected) client._fit(screenWrap);
             });
 
             window.addEventListener("beforeunload", function () { client.disconnect(); });

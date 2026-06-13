@@ -37,6 +37,41 @@ function Client(websocketURL, canvasID) {
 Client.prototype.setStatusCallback = function (cb) { this.statusCb = cb; };
 Client.prototype._status = function (status, message) { if (this.statusCb) this.statusCb(status, message); };
 
+// Sizes the canvas backing store to a desktop resolution that fills `wrapEl` in *device* pixels, so
+// the remote desktop renders crisp and 1:1 on HiDPI displays (no browser upscaling/blur). The CSS
+// size of the canvas is then set to the wrapper's CSS size so it fits the visible area exactly.
+// Returns {width, height} in device pixels (the RDP desktop resolution to request).
+//
+// RDP desktop dimensions must be even (bitmap rows are 16bpp; widths are safest as multiples of 4),
+// and are clamped to the [MS-RDPBCGR] valid range (200..8192 px per axis for typical hosts).
+Client.prototype.chooseDesktopSize = function (wrapEl) {
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = Math.max(1, Math.floor(wrapEl.clientWidth));
+    const cssH = Math.max(1, Math.floor(wrapEl.clientHeight));
+    let w = Math.round(cssW * dpr);
+    let h = Math.round(cssH * dpr);
+    w = Math.max(200, Math.min(8192, w - (w % 4)));
+    h = Math.max(200, Math.min(8192, h - (h % 2)));
+    return { width: w, height: h };
+};
+
+// Applies a chosen device-pixel size to the canvas backing store, and fits its on-screen size to the
+// wrapper via CSS. Call before connecting (so the resolution is baked into the RDP handshake).
+Client.prototype.applyDesktopSize = function (wrapEl, size) {
+    this.canvas.width = size.width;
+    this.canvas.height = size.height;
+    this._fit(wrapEl);
+};
+
+// Sets the canvas CSS size so the device-pixel backing store maps 1:1 to device pixels on screen
+// (i.e. cssSize = backingStore / devicePixelRatio), which fills the wrapper exactly when the desktop
+// size was chosen by chooseDesktopSize().
+Client.prototype._fit = function (wrapEl) {
+    const dpr = window.devicePixelRatio || 1;
+    this.canvas.style.width = (this.canvas.width / dpr) + "px";
+    this.canvas.style.height = (this.canvas.height / dpr) + "px";
+};
+
 // creds = {user, password, domain}
 Client.prototype.connect = function (creds) {
     const self = this;
@@ -272,18 +307,23 @@ Client.prototype.handlePointer = function (header, r) {
 };
 
 // ---- input ---------------------------------------------------------------------------------------
-function elementOffset(el) {
-    let x = 0, y = 0;
-    while (el && !isNaN(el.offsetLeft) && !isNaN(el.offsetTop)) {
-        x += el.offsetLeft - el.scrollLeft;
-        y += el.offsetTop - el.scrollTop;
-        el = el.offsetParent;
-    }
-    return { top: y, left: x };
-}
 function mouseButtonMap(button) {
     switch (button) { case 0: return 1; case 2: return 2; case 1: return 3; default: return 0; }
 }
+
+// Maps a DOM mouse event's CSS coordinates to canvas *backing-store* pixels (= RDP desktop pixels).
+// Uses getBoundingClientRect so it stays correct under HiDPI CSS scaling, fullscreen letterboxing,
+// and any container offset. Coordinates are clamped to the desktop bounds.
+Client.prototype._canvasCoords = function (e) {
+    const rect = this.canvas.getBoundingClientRect();
+    const scaleX = this.canvas.width / rect.width;
+    const scaleY = this.canvas.height / rect.height;
+    let x = Math.round((e.clientX - rect.left) * scaleX);
+    let y = Math.round((e.clientY - rect.top) * scaleY);
+    x = Math.max(0, Math.min(this.canvas.width - 1, x));
+    y = Math.max(0, Math.min(this.canvas.height - 1, y));
+    return { x: x, y: y };
+};
 
 Client.prototype._sendEvent = function (eventArrayBuffer) {
     if (this.proto) this.proto.sendInputEvent(new Uint8Array(eventArrayBuffer));
@@ -307,32 +347,32 @@ Client.prototype.handleKeyUp = function (e) {
 };
 Client.prototype.handleMouseMove = function (e) {
     if (!this.connected) return;
-    const o = elementOffset(this.canvas);
-    this._sendEvent(new MouseMoveEvent(e.clientX - o.left, e.clientY - o.top).serialize());
+    const p = this._canvasCoords(e);
+    this._sendEvent(new MouseMoveEvent(p.x, p.y).serialize());
     e.preventDefault();
     return false;
 };
 Client.prototype.handleMouseDown = function (e) {
     if (!this.connected) return;
-    const o = elementOffset(this.canvas);
-    this._sendEvent(new MouseDownEvent(e.clientX - o.left, e.clientY - o.top, mouseButtonMap(e.button)).serialize());
+    const p = this._canvasCoords(e);
+    this._sendEvent(new MouseDownEvent(p.x, p.y, mouseButtonMap(e.button)).serialize());
     e.preventDefault();
     return false;
 };
 Client.prototype.handleMouseUp = function (e) {
     if (!this.connected) return;
-    const o = elementOffset(this.canvas);
-    this._sendEvent(new MouseUpEvent(e.clientX - o.left, e.clientY - o.top, mouseButtonMap(e.button)).serialize());
+    const p = this._canvasCoords(e);
+    this._sendEvent(new MouseUpEvent(p.x, p.y, mouseButtonMap(e.button)).serialize());
     e.preventDefault();
     return false;
 };
 Client.prototype.handleWheel = function (e) {
     if (!this.connected) return;
-    const o = elementOffset(this.canvas);
+    const p = this._canvasCoords(e);
     const isHorizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY);
     const delta = isHorizontal ? e.deltaX : e.deltaY;
     const step = Math.round(Math.abs(delta) * 15 / 8);
-    this._sendEvent(new MouseWheelEvent(e.clientX - o.left, e.clientY - o.top, step, delta > 0, isHorizontal).serialize());
+    this._sendEvent(new MouseWheelEvent(p.x, p.y, step, delta > 0, isHorizontal).serialize());
     e.preventDefault();
     return false;
 };
