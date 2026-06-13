@@ -25,43 +25,89 @@ public static class Ntlm
         return (MessageType)BinaryPrimitives.ReadUInt32LittleEndian(msg.AsSpan(8, 4));
     }
 
+    // NTLM NEGOTIATE flag bits ([MS-NLMP] 2.2.2.5).
+    private const uint NEGOTIATE_UNICODE                = 0x00000001;
+    private const uint REQUEST_TARGET                   = 0x00000004;
+    private const uint NEGOTIATE_SIGN                   = 0x00000010;
+    private const uint NEGOTIATE_SEAL                   = 0x00000020;
+    private const uint NEGOTIATE_NTLM                   = 0x00000200;
+    private const uint NEGOTIATE_ALWAYS_SIGN            = 0x00008000;
+    private const uint NEGOTIATE_EXTENDED_SESSIONSECURITY= 0x00080000;
+    private const uint TARGET_TYPE_DOMAIN               = 0x00010000;
+    private const uint NEGOTIATE_TARGET_INFO            = 0x00800000;
+    private const uint NEGOTIATE_VERSION                = 0x02000000;
+    private const uint NEGOTIATE_128                    = 0x20000000;
+    private const uint NEGOTIATE_KEY_EXCH               = 0x40000000;
+    private const uint NEGOTIATE_56                     = 0x80000000;
+
+    /// <summary>
+    /// Extracts the NegotiateFlags from a Type 1 (Negotiate) message, or 0 if it can't be read.
+    /// </summary>
+    public static uint GetNegotiateFlags(byte[] type1)
+    {
+        if (GetMessageType(type1) != MessageType.Negotiate || type1.Length < 16)
+            return 0;
+        return BinaryPrimitives.ReadUInt32LittleEndian(type1.AsSpan(12, 4));
+    }
+
     /// <summary>
     /// Builds an NTLM Type 2 (Challenge) message carrying the given 8-byte server challenge.
+    /// <paramref name="clientFlags"/> are the flags from the client's Type 1, used to mirror the
+    /// session-security and key options the client requested (Heimdal/macOS GSS-NTLM aborts silently
+    /// if the challenge omits NTLM2 extended session security, so we always assert it).
     /// </summary>
-    public static byte[] BuildChallenge(byte[] serverChallenge, string targetName = "KSOL")
+    public static byte[] BuildChallenge(byte[] serverChallenge, uint clientFlags = 0, string targetName = "KSOL")
     {
         var target = Encoding.Unicode.GetBytes(targetName);
 
-        // Target info (AV pairs): NetBIOS domain name + EOL. Required for NTLMv2.
+        // Target info (AV pairs). NTLMv2 requires at least NbDomain + NbComputer; macOS GSS-NTLM
+        // also wants a timestamp. Terminate with EOL.
+        var timestamp = (DateTime.UtcNow.ToFileTimeUtc());
+        var tsBytes = BitConverter.GetBytes(timestamp); // little-endian FILETIME
         using var avMem = new MemoryStream();
-        WriteAvPair(avMem, 0x0002, target);           // MsvAvNbDomainName
+        WriteAvPair(avMem, 0x0002, target);              // MsvAvNbDomainName
+        WriteAvPair(avMem, 0x0001, target);              // MsvAvNbComputerName
+        WriteAvPair(avMem, 0x0007, tsBytes);             // MsvAvTimestamp
         WriteAvPair(avMem, 0x0000, Array.Empty<byte>()); // MsvAvEOL
         var targetInfo = avMem.ToArray();
 
-        // Negotiate flags: Unicode | NTLM | TargetInfo | Target type domain | Request target.
-        const uint flags = 0x00000001 /*Unicode*/ | 0x00000200 /*NTLM*/ | 0x00800000 /*TargetInfo*/
-            | 0x00010000 /*TargetTypeDomain*/ | 0x00000004 /*RequestTarget*/ | 0x80000000 /*Negotiate56*/;
+        // Base flags we always set, OR'd with the session-security/size flags the client asked for.
+        uint flags = NEGOTIATE_UNICODE | REQUEST_TARGET | NEGOTIATE_NTLM | TARGET_TYPE_DOMAIN
+            | NEGOTIATE_TARGET_INFO | NEGOTIATE_VERSION | NEGOTIATE_EXTENDED_SESSIONSECURITY;
+        // Mirror the session-security/signing/size flags the client requested. macOS GSS-NTLM sends
+        // a Type 1 with SIGN/SEAL/ALWAYS_SIGN and refuses to emit a Type 3 if the challenge doesn't
+        // confirm them, so we echo them back rather than silently dropping them.
+        flags |= clientFlags & (NEGOTIATE_SIGN | NEGOTIATE_SEAL | NEGOTIATE_ALWAYS_SIGN
+            | NEGOTIATE_56 | NEGOTIATE_128 | NEGOTIATE_KEY_EXCH);
+        // Ensure 56/128 are advertised even if the (sometimes minimal) Type 1 omitted them.
+        flags |= NEGOTIATE_56 | NEGOTIATE_128;
 
+        // Header is 56 bytes when the 8-byte Version field is present (NEGOTIATE_VERSION).
+        const int headerSize = 56;
         using var ms = new MemoryStream();
         var w = new BinaryWriter(ms);
         w.Write(Signature);
         w.Write((uint)2); // Type 2
 
-        int payloadOffset = 48; // fixed header size for this message layout
-        // TargetName fields
+        // TargetName fields (len, maxlen, offset)
         w.Write((ushort)target.Length);
         w.Write((ushort)target.Length);
-        w.Write((uint)payloadOffset);
+        w.Write((uint)headerSize);
         // Flags
         w.Write(flags);
         // Server challenge (8 bytes)
         w.Write(serverChallenge);
         // Reserved (8 bytes)
         w.Write(0L);
-        // TargetInfo fields
+        // TargetInfo fields (len, maxlen, offset)
         w.Write((ushort)targetInfo.Length);
         w.Write((ushort)targetInfo.Length);
-        w.Write((uint)(payloadOffset + target.Length));
+        w.Write((uint)(headerSize + target.Length));
+        // Version (8 bytes): 6.1.7601, NTLM revision 15 — a plausible Windows version.
+        w.Write((byte)6); w.Write((byte)1);          // major.minor
+        w.Write((ushort)7601);                        // build
+        w.Write((byte)0); w.Write((byte)0); w.Write((byte)0); // reserved
+        w.Write((byte)15);                            // NTLM revision current
 
         // Payload
         w.Write(target);

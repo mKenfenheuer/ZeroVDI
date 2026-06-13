@@ -15,6 +15,18 @@ public class Program
     {
         var builder = WebApplication.CreateBuilder(args);
 
+        // Force HTTP/1.1 on all Kestrel endpoints. The RemoteApp & Desktop Connections client
+        // authenticates to the feed with NTLM, which is a connection-bound auth scheme and is
+        // incompatible with HTTP/2's stream multiplexing: over h2 the NTLM handshake appears to
+        // complete but the client mishandles the response body, surfacing as "the workspace failed
+        // to parse the XML". Restricting to HTTP/1.1 keeps the handshake and the body on one
+        // connection. (Behind a reverse proxy, also ensure the proxy speaks HTTP/1.1 to the client.)
+        builder.WebHost.ConfigureKestrel(options =>
+        {
+            options.ConfigureEndpointDefaults(lo =>
+                lo.Protocols = Microsoft.AspNetCore.Server.Kestrel.Core.HttpProtocols.Http1);
+        });
+
         // Add services to the container.
         var connectionString = builder.Configuration.GetConnectionString("DefaultConnection") ?? throw new InvalidOperationException("Connection string 'DefaultConnection' not found.");
         builder.Services.AddDbContext<ApplicationDbContext>(options =>
