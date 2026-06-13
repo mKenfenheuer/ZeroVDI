@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Mvc.Rendering;
 using Microsoft.EntityFrameworkCore;
 using KSol.RDPGateway.Data;
 using KSol.RDPGateway.Models;
+using KSol.RDPGateway.RDP;
 
 namespace KSol.RDPGateway.Controllers
 {
@@ -15,10 +16,14 @@ namespace KSol.RDPGateway.Controllers
     public class RDPResourcesController : Controller
     {
         private readonly ApplicationDbContext _context;
+        private readonly ProxmoxClient _proxmox;
+        private readonly ProxmoxBackendProvider _backends;
 
-        public RDPResourcesController(ApplicationDbContext context)
+        public RDPResourcesController(ApplicationDbContext context, ProxmoxClient proxmox, ProxmoxBackendProvider backends)
         {
             _context = context;
+            _proxmox = proxmox;
+            _backends = backends;
         }
 
         // GET: RDPResources
@@ -149,6 +154,55 @@ namespace KSol.RDPGateway.Controllers
             }
 
             await _context.SaveChangesAsync();
+            return RedirectToAction(nameof(Index));
+        }
+
+        // POST: RDPResources/Exclude/{id}
+        // Excludes a Proxmox VM from indexing: writes the exclude marker into the VM notes (so future
+        // discovers skip it) and deletes the resource row and its authorizations.
+        [HttpPost]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> Exclude(string id)
+        {
+            var res = await _context.RDPResources.FirstOrDefaultAsync(r => r.Id == id);
+            if (res == null)
+            {
+                return NotFound();
+            }
+
+            if (res.Source != ResourceSource.Proxmox || res.ProxmoxBackendId == null
+                || res.ProxmoxNode == null || res.ProxmoxVmId == null)
+            {
+                TempData["Status"] = "Only Proxmox resources can be excluded.";
+                return RedirectToAction(nameof(Index));
+            }
+
+            var backend = await _backends.GetAsync(res.ProxmoxBackendId.Value);
+            if (backend == null || !backend.IsConfigured)
+            {
+                TempData["Status"] = "The resource's Proxmox backend is unavailable; cannot set the exclude marker.";
+                return RedirectToAction(nameof(Index));
+            }
+
+            // Stamp the exclude marker into the VM notes (preserving other content).
+            var notes = await _proxmox.GetNotesAsync(backend, res.ProxmoxNode, res.ProxmoxVmId.Value);
+            var stamped = ProxmoxNotes.WriteExcluded(notes);
+            var ok = await _proxmox.SetNotesAsync(backend, res.ProxmoxNode, res.ProxmoxVmId.Value, stamped);
+            if (!ok)
+            {
+                TempData["Status"] = $"Could not write the exclude marker to VM {res.ProxmoxVmId} (check token permissions). Resource not removed.";
+                return RedirectToAction(nameof(Index));
+            }
+
+            // Remove the row and its authorizations.
+            var auths = await _context.RDPResourceUserAuthorizations
+                .Where(a => a.RDPResourceId == res.Id)
+                .ToListAsync();
+            _context.RDPResourceUserAuthorizations.RemoveRange(auths);
+            _context.RDPResources.Remove(res);
+            await _context.SaveChangesAsync();
+
+            TempData["Status"] = $"Excluded \"{res.Name}\" from indexing.";
             return RedirectToAction(nameof(Index));
         }
 

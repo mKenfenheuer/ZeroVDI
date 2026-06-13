@@ -60,6 +60,10 @@ public class ProxmoxClient
             {
                 // Skip LXC containers; we only drive QEMU VMs.
                 if (item.TryGetProperty("type", out var type) && type.GetString() != "qemu") continue;
+                // Skip template VMs — they aren't bootable desktops. cluster/resources reports
+                // template as 1 for templates (absent/0 otherwise).
+                if (item.TryGetProperty("template", out var tmpl) && tmpl.ValueKind == JsonValueKind.Number
+                    && tmpl.GetInt32() == 1) continue;
                 var vmid = item.TryGetProperty("vmid", out var v) ? v.GetInt32() : 0;
                 var node = item.TryGetProperty("node", out var n) ? n.GetString() ?? "" : "";
                 var name = item.TryGetProperty("name", out var nm) ? nm.GetString() ?? "" : "";
@@ -207,10 +211,15 @@ public class ProxmoxClient
             var resp = await client.PutAsync($"nodes/{node}/qemu/{vmid}/config", content, ct);
             if (!resp.IsSuccessStatusCode)
             {
-                _logger.LogWarning("Proxmox[{Backend}]: set notes for {Node}/{VmId} returned {Status}",
-                    backend.Name, node, vmid, (int)resp.StatusCode);
+                // Surface the Proxmox error body — a failed notes write is almost always a token
+                // permission issue (the token needs VM.Config.Options on the VM), which Proxmox
+                // returns as 403 with an explanatory message we must not swallow.
+                var body = await SafeReadBodyAsync(resp, ct);
+                _logger.LogError("Proxmox[{Backend}]: set notes for {Node}/{VmId} failed {Status}: {Body}",
+                    backend.Name, node, vmid, (int)resp.StatusCode, body);
                 return false;
             }
+            _logger.LogInformation("Proxmox[{Backend}]: stamped notes on {Node}/{VmId}", backend.Name, node, vmid);
             return true;
         }
         catch (Exception ex)
@@ -218,6 +227,12 @@ public class ProxmoxClient
             _logger.LogWarning(ex, "Proxmox[{Backend}]: failed to set notes for {Node}/{VmId}", backend.Name, node, vmid);
             return false;
         }
+    }
+
+    private static async Task<string> SafeReadBodyAsync(HttpResponseMessage resp, CancellationToken ct)
+    {
+        try { return await resp.Content.ReadAsStringAsync(ct); }
+        catch { return "<no body>"; }
     }
 
     private async Task<bool> PostActionAsync(ProxmoxBackend backend, string node, int vmid, string action, CancellationToken ct)

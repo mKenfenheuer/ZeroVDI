@@ -1,37 +1,37 @@
 @model KSol.RDPGateway.Models.RDPResourceUserAuthorization
 
 @{
-    ViewData["Title"] = "Edit";
+    ViewData["Title"] = "Edit authorization";
 }
 
-<h1>Edit</h1>
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0">Edit authorization</h1>
+    <a asp-action="Index" class="btn btn-outline-secondary btn-sm">Back to list</a>
+</div>
 
-<h4>RDPResourceUserAuthorization</h4>
-<hr />
-<div class="row">
-    <div class="col-md-4">
+<div class="card shadow-sm">
+    <div class="card-body">
         <form asp-action="Edit">
             <div asp-validation-summary="ModelOnly" class="text-danger"></div>
             <input type="hidden" asp-for="Id" />
-            <div class="form-group">
-                <label asp-for="UserId" class="control-label"></label>
-                <select asp-for="UserId" class="form-control" asp-items="ViewBag.UserId"></select>
-                <span asp-validation-for="UserId" class="text-danger"></span>
+            <div class="row g-3 mb-3">
+                <div class="col-md-6">
+                    <label asp-for="UserId" class="form-label">User</label>
+                    <select asp-for="UserId" class="form-select" asp-items="ViewBag.UserId"></select>
+                    <span asp-validation-for="UserId" class="text-danger"></span>
+                </div>
+                <div class="col-md-6">
+                    <label asp-for="RDPResourceId" class="form-label">Resource</label>
+                    <select asp-for="RDPResourceId" class="form-select" asp-items="ViewBag.RDPResourceId"></select>
+                    <span asp-validation-for="RDPResourceId" class="text-danger"></span>
+                </div>
             </div>
-            <div class="form-group">
-                <label asp-for="RDPResourceId" class="control-label"></label>
-                <select asp-for="RDPResourceId" class="form-control" asp-items="ViewBag.RDPResourceId"></select>
-                <span asp-validation-for="RDPResourceId" class="text-danger"></span>
-            </div>
-            <div class="form-group">
-                <input type="submit" value="Save" class="btn btn-primary" />
+            <div class="d-flex gap-2">
+                <button type="submit" class="btn btn-primary">Save</button>
+                <a asp-action="Index" class="btn btn-link">Cancel</a>
             </div>
         </form>
     </div>
-</div>
-
-<div>
-    <a asp-action="Index">Back to List</a>
 </div>
 
 @section Scripts {

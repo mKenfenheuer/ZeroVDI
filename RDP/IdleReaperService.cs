@@ -76,6 +76,22 @@ public class IdleReaperService : BackgroundService
             var cutoff = DateTime.UtcNow.AddHours(-Math.Max(1, backend.IdleTimeoutHours));
             if (res.LastActivityUtc == null || res.LastActivityUtc > cutoff) continue;
 
+            // Never touch an excluded VM. Exclusion normally deletes the row, but a VM marked
+            // excluded out-of-band (in its notes) may still have a row until the next discover —
+            // check the live marker and, if set, leave the VM running and drop the stale row.
+            var notes = await _proxmox.GetNotesAsync(backend, res.ProxmoxNode!, res.ProxmoxVmId!.Value, ct);
+            if (ProxmoxNotes.ReadExcluded(notes))
+            {
+                var auths = await db.RDPResourceUserAuthorizations
+                    .Where(a => a.RDPResourceId == res.Id).ToListAsync(ct);
+                db.RDPResourceUserAuthorizations.RemoveRange(auths);
+                db.RDPResources.Remove(res);
+                await db.SaveChangesAsync(ct);
+                _logger.LogInformation("Idle reaper: skipping excluded VM {Node}/{VmId}; removed stale row",
+                    res.ProxmoxNode, res.ProxmoxVmId);
+                continue;
+            }
+
             _logger.LogInformation("Idle reaper: pausing {Name} ({Backend}:{Node}/{VmId}) via {Action}",
                 res.Name, backend.Name, res.ProxmoxNode, res.ProxmoxVmId, backend.PauseAction);
 

@@ -18,6 +18,7 @@ namespace KSol.RDPGateway.RDP;
 public static class ProxmoxNotes
 {
     public const string IdProperty = "ksol-rdpgw-id";
+    public const string ExcludeProperty = "ksol-rdpgw-exclude";
 
     private static readonly JsonSerializerOptions ReadOptions = new()
     {
@@ -34,6 +35,43 @@ public static class ProxmoxNotes
             return id;
         }
         return null;
+    }
+
+    /// <summary>
+    /// True if the VM notes mark it as excluded from indexing (<c>"ksol-rdpgw-exclude": true</c>).
+    /// Discovery skips excluded VMs entirely and removes any existing resource row for them.
+    /// </summary>
+    public static bool ReadExcluded(string? notes)
+    {
+        var obj = TryParseObject(notes);
+        if (obj != null && obj.TryGetPropertyValue(ExcludeProperty, out var n) && n is JsonValue v
+            && v.TryGetValue<bool>(out var b))
+        {
+            return b;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Returns notes JSON identical to <paramref name="existingNotes"/> but with
+    /// <c>ksol-rdpgw-exclude</c> set to true, preserving existing content. Free-text notes are moved
+    /// under <c>description</c>.
+    /// </summary>
+    public static string WriteExcluded(string? existingNotes)
+    {
+        var obj = TryParseObject(existingNotes);
+        if (obj == null)
+        {
+            obj = new JsonObject();
+            if (!string.IsNullOrWhiteSpace(existingNotes))
+            {
+                obj["description"] = existingNotes;
+            }
+        }
+        obj[ExcludeProperty] = true;
+        // Drop the binding id: the row is being deleted, so the marker alone keeps it out.
+        obj.Remove(IdProperty);
+        return obj.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
     }
 
     /// <summary>The "description" string from the notes JSON, if present.</summary>

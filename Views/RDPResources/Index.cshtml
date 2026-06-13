@@ -49,7 +49,18 @@
                     <td class="text-end">
                         <a asp-action="Details" asp-route-id="@item.Id" class="btn btn-sm btn-outline-secondary">Details</a>
                         <a asp-action="Edit" asp-route-id="@item.Id" class="btn btn-sm btn-outline-primary">Edit</a>
-                        <a asp-action="Delete" asp-route-id="@item.Id" class="btn btn-sm btn-outline-danger">Delete</a>
+                        @if (item.Source == ResourceSource.Proxmox)
+                        {
+                            <form asp-action="Exclude" asp-route-id="@item.Id" method="post" class="d-inline"
+                                  onsubmit="return confirm('Exclude this VM from indexing? It will be marked in the VM notes and removed from the gateway.');">
+                                @Html.AntiForgeryToken()
+                                <button type="submit" class="btn btn-sm btn-outline-warning">Exclude</button>
+                            </form>
+                        }
+                        else
+                        {
+                            <a asp-action="Delete" asp-route-id="@item.Id" class="btn btn-sm btn-outline-danger">Delete</a>
+                        }
                     </td>
                 </tr>
             }

@@ -1,41 +1,47 @@
 @model IEnumerable<KSol.RDPGateway.Models.RDPResourceUserAuthorization>
 
 @{
-    ViewData["Title"] = "Index";
+    ViewData["Title"] = "Authorizations";
 }
 
-<h1>Index</h1>
+<partial name="_StatusMessage" />
 
-<p>
-    <a asp-action="Create">Create New</a>
-</p>
-<table class="table">
-    <thead>
-        <tr>
-            <th>
-                @Html.DisplayNameFor(model => model.User)
-            </th>
-            <th>
-                @Html.DisplayNameFor(model => model.RDPResource)
-            </th>
-            <th></th>
-        </tr>
-    </thead>
-    <tbody>
-@foreach (var item in Model) {
-        <tr>
-            <td>
-                @Html.DisplayFor(modelItem => item.User!.UserName)
-            </td>
-            <td>
-                @Html.DisplayFor(modelItem => item.RDPResource!.Name)
-            </td>
-            <td>
-                <a asp-action="Edit" asp-route-id="@item.Id">Edit</a> |
-                <a asp-action="Details" asp-route-id="@item.Id">Details</a> |
-                <a asp-action="Delete" asp-route-id="@item.Id">Delete</a>
-            </td>
-        </tr>
-}
-    </tbody>
-</table>
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+        <h1 class="h3 mb-0">Authorizations</h1>
+        <p class="text-muted mb-0">Which users may connect to which resources.</p>
+    </div>
+    <a asp-action="Create" class="btn btn-primary btn-sm">+ Grant access</a>
+</div>
+
+<div class="card shadow-sm">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+            <thead class="table-light">
+                <tr>
+                    <th>User</th>
+                    <th>Resource</th>
+                    <th class="text-end">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+            @if (!Model.Any())
+            {
+                <tr><td colspan="3" class="text-center text-muted py-4">No authorizations yet.</td></tr>
+            }
+            @foreach (var item in Model)
+            {
+                <tr>
+                    <td class="fw-semibold">@item.User?.UserName</td>
+                    <td>@(item.RDPResource?.Name ?? item.RDPResourceId)</td>
+                    <td class="text-end">
+                        <a asp-action="Details" asp-route-id="@item.Id" class="btn btn-sm btn-outline-secondary">Details</a>
+                        <a asp-action="Edit" asp-route-id="@item.Id" class="btn btn-sm btn-outline-primary">Edit</a>
+                        <a asp-action="Delete" asp-route-id="@item.Id" class="btn btn-sm btn-outline-danger">Revoke</a>
+                    </td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
+</div>

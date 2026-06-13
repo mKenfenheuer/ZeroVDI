@@ -81,18 +81,48 @@ public class ProxmoxSyncService : BackgroundService
 
         foreach (var vm in vms)
         {
-            // The notes carry the binding id (and any rdp options / description).
+            // The notes carry the binding id, exclusion marker, and any rdp options / description.
             var notes = await _proxmox.GetNotesAsync(backend, vm.Node, vm.VmId, ct);
+
+            // Excluded VMs are not indexed: skip creating a row and delete any existing row (and its
+            // authorizations) for this VM.
+            if (ProxmoxNotes.ReadExcluded(notes))
+            {
+                await DeleteResourcesForVmAsync(db, backend.Id, vm.VmId, ct);
+                continue;
+            }
+
             var id = ProxmoxNotes.ReadId(notes);
 
-            RDPResource? res = id != null
-                ? await db.RDPResources.FirstOrDefaultAsync(r => r.Id == id, ct)
-                : null;
+            // Find every existing row that represents this VM: the one bound by the notes id, plus
+            // any rows matching backend+VMID (these arise if a previous notes stamp failed and the
+            // VM was re-discovered as a fresh row). Keep one and collapse the rest so duplicates from
+            // earlier runs self-heal on each discover.
+            var matches = await db.RDPResources
+                .Where(r => (id != null && r.Id == id)
+                            || (r.Source == ResourceSource.Proxmox
+                                && r.ProxmoxBackendId == backend.Id && r.ProxmoxVmId == vm.VmId))
+                .ToListAsync(ct);
+
+            // Prefer the notes-id row as the survivor (it matches issued .rdp files / authorizations).
+            RDPResource? res = matches.FirstOrDefault(r => r.Id == id) ?? matches.FirstOrDefault();
+
+            if (matches.Count > 1)
+            {
+                var dupes = matches.Where(r => r.Id != res!.Id).ToList();
+                var dupeIds = dupes.Select(r => r.Id).ToList();
+                var dupeAuths = await db.RDPResourceUserAuthorizations
+                    .Where(a => a.RDPResourceId != null && dupeIds.Contains(a.RDPResourceId))
+                    .ToListAsync(ct);
+                db.RDPResourceUserAuthorizations.RemoveRange(dupeAuths);
+                db.RDPResources.RemoveRange(dupes);
+                _logger.LogInformation("Proxmox sync[{Backend}]: collapsed {Count} duplicate row(s) for VM {VmId}",
+                    backend.Name, dupes.Count, vm.VmId);
+            }
 
             if (res == null)
             {
-                // First time we see this VM (no id, or the id points at a deleted row): create a row
-                // and stamp the new id back into the VM notes so the binding is durable.
+                // First time we see this VM: create a row.
                 res = new RDPResource
                 {
                     Source = ResourceSource.Proxmox,
@@ -101,12 +131,17 @@ public class ProxmoxSyncService : BackgroundService
                 };
                 db.RDPResources.Add(res);
                 await db.SaveChangesAsync(ct); // materialize the GUID
-
-                var stamped = ProxmoxNotes.WriteId(notes, res.Id);
-                await _proxmox.SetNotesAsync(backend, vm.Node, vm.VmId, stamped, ct);
-                notes = stamped;
                 _logger.LogInformation("Proxmox sync[{Backend}]: discovered VM {VmId} on {Node} -> {Id}",
                     backend.Name, vm.VmId, vm.Node, res.Id);
+            }
+
+            // Ensure the VM notes carry this resource's id (durable binding that survives migration
+            // and re-discovery). Re-attempt whenever the stamped id is missing or stale.
+            if (id != res.Id)
+            {
+                var stamped = ProxmoxNotes.WriteId(notes, res.Id);
+                var ok = await _proxmox.SetNotesAsync(backend, vm.Node, vm.VmId, stamped, ct);
+                if (ok) notes = stamped;
             }
 
             // Refresh mutable data. Node and backend are updated every time so a migrated VM
@@ -130,9 +165,50 @@ public class ProxmoxSyncService : BackgroundService
             }
         }
 
+        // Prune resources for this backend whose VM no longer exists in the inventory (deleted in
+        // Proxmox). The early return above when the inventory is empty guards against wiping every
+        // resource on a transient API blip, so we only reach here with a non-empty, trusted list.
+        var liveVmIds = vms.Select(v => v.VmId).ToHashSet();
+        var stale = await db.RDPResources
+            .Where(r => r.Source == ResourceSource.Proxmox && r.ProxmoxBackendId == backend.Id
+                        && r.ProxmoxVmId != null && !liveVmIds.Contains(r.ProxmoxVmId.Value))
+            .ToListAsync(ct);
+        if (stale.Count > 0)
+        {
+            // Remove dependent authorizations first (the FK is NO ACTION, not cascade), then the
+            // resources themselves.
+            var staleIds = stale.Select(r => r.Id).ToList();
+            var auths = await db.RDPResourceUserAuthorizations
+                .Where(a => a.RDPResourceId != null && staleIds.Contains(a.RDPResourceId))
+                .ToListAsync(ct);
+            db.RDPResourceUserAuthorizations.RemoveRange(auths);
+            db.RDPResources.RemoveRange(stale);
+            _logger.LogInformation("Proxmox sync[{Backend}]: pruned {Count} removed VM(s)",
+                backend.Name, stale.Count);
+        }
+
         await db.SaveChangesAsync(ct);
         _logger.LogInformation("Proxmox sync[{Backend}]: processed {Count} VMs", backend.Name, vms.Count);
         return vms.Count;
+    }
+
+    /// <summary>Deletes every resource row for the given backend+VMID and their authorizations.</summary>
+    private async Task DeleteResourcesForVmAsync(ApplicationDbContext db, int backendId, int vmid, CancellationToken ct)
+    {
+        var rows = await db.RDPResources
+            .Where(r => r.Source == ResourceSource.Proxmox
+                        && r.ProxmoxBackendId == backendId && r.ProxmoxVmId == vmid)
+            .ToListAsync(ct);
+        if (rows.Count == 0) return;
+
+        var ids = rows.Select(r => r.Id).ToList();
+        var auths = await db.RDPResourceUserAuthorizations
+            .Where(a => a.RDPResourceId != null && ids.Contains(a.RDPResourceId))
+            .ToListAsync(ct);
+        db.RDPResourceUserAuthorizations.RemoveRange(auths);
+        db.RDPResources.RemoveRange(rows);
+        _logger.LogInformation("Proxmox sync[{BackendId}]: removed {Count} excluded/template row(s) for VM {VmId}",
+            backendId, rows.Count, vmid);
     }
 
     private static ResourcePowerState MapState(string status) => status.ToLowerInvariant() switch

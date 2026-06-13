@@ -152,12 +152,16 @@ public class WorkspaceController : Controller
                 var clientFlags = Ntlm.GetNegotiateFlags(token);
                 var challenge = Ntlm.NewServerChallenge();
                 var type2 = Ntlm.BuildChallenge(challenge, clientFlags);
-                var key = Convert.ToBase64String(token[..Math.Min(16, token.Length)]);
+                // Key the stored challenge by the server challenge itself (unique per handshake).
+                // Keying by the Type1 token bytes collides across concurrent handshakes — a client
+                // refreshing a feed with many resources opens several .rdp requests in parallel, and
+                // every Type1 it sends is byte-identical, so they would overwrite each other.
+                var key = Convert.ToHexString(challenge);
                 _ntlmWebChallenges[key] = (challenge, DateTimeOffset.UtcNow);
                 HttpContext.Items["NtlmChallenge"] = Convert.ToBase64String(type2);
                 _logger.LogInformation("NTLM Type1 flags=0x{Flags:X8}; replying Type2 ({Len}B): {Hex}",
                     clientFlags, type2.Length, Convert.ToHexString(type2));
-                // Prune old challenges
+                // Prune expired challenges (do NOT remove live ones — concurrent handshakes need them).
                 foreach (var k in _ntlmWebChallenges.Keys.ToList())
                     if (_ntlmWebChallenges.TryGetValue(k, out var v) && v.Issued < DateTimeOffset.UtcNow.AddMinutes(-5))
                         _ntlmWebChallenges.TryRemove(k, out _);
@@ -170,22 +174,25 @@ public class WorkspaceController : Controller
                 _logger.LogInformation("NTLM Type3 user={Domain}\\{User} ws={Ws} ntLen={NtLen}",
                     t3.Domain, t3.User, t3.Workstation, t3.NtChallengeResponse.Length);
 
-                // Find most recent challenge
-                var entry = _ntlmWebChallenges.Values.OrderByDescending(v => v.Issued).FirstOrDefault();
-                if (entry.Challenge == null) return false;
-                // Remove all old challenges
-                foreach (var k in _ntlmWebChallenges.Keys.ToList()) _ntlmWebChallenges.TryRemove(k, out _);
-
                 var userName = StripDomain(t3.User);
                 var user = await _userManager.FindByNameAsync(userName);
                 if (user?.NtHash == null) return false;
-
                 var ntHash = Convert.FromHexString(user.NtHash);
-                if (!Ntlm.VerifyNtlmV2(ntHash, t3.User, t3.Domain, entry.Challenge, t3.NtChallengeResponse))
-                    return false;
 
-                HttpContext.Items["NtlmUserId"] = user.Id;
-                return true;
+                // Verify against each outstanding challenge (concurrent handshakes each issued their
+                // own). The NTLMv2 response is bound to the specific server challenge, so only the
+                // matching one verifies. Remove just that challenge on success.
+                foreach (var (k, entry) in _ntlmWebChallenges.ToArray())
+                {
+                    if (Ntlm.VerifyNtlmV2(ntHash, t3.User, t3.Domain, entry.Challenge, t3.NtChallengeResponse))
+                    {
+                        _ntlmWebChallenges.TryRemove(k, out _);
+                        HttpContext.Items["NtlmUserId"] = user.Id;
+                        return true;
+                    }
+                }
+                _logger.LogWarning("NTLM Type3 did not match any outstanding challenge for {User}", userName);
+                return false;
             }
             default: return false;
         }
