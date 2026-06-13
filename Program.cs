@@ -111,6 +111,60 @@ public class Program
         // Must run before any middleware that inspects scheme/host (RDPGW, HTTPS redirect, auth).
         app.UseForwardedHeaders();
 
+        // Diagnostic request/response logging for the subscription-related endpoints. MSRDC ("Windows
+        // App"/Remote Desktop) probes several paths during a workspace subscription; when it reports
+        // "the authentication method for the host is not currently supported" we need to see exactly
+        // which path it hit, what auth it presented, and what we replied (status + WWW-Authenticate).
+        // Scoped to the relevant prefixes to avoid noise; logged at Information so it shows in prod.
+        {
+            var diagLogger = app.Services.GetRequiredService<ILoggerFactory>()
+                .CreateLogger("KSol.RDPGateway.SubscribeDiagnostics");
+
+            app.Use(async (context, next) =>
+            {
+                var path = context.Request.Path.Value ?? string.Empty;
+                var watched = path.StartsWith("/rdweb", StringComparison.OrdinalIgnoreCase)
+                    || path.StartsWith("/connect", StringComparison.OrdinalIgnoreCase)
+                    || path.StartsWith("/.well-known", StringComparison.OrdinalIgnoreCase)
+                    || path.StartsWith("/Identity", StringComparison.OrdinalIgnoreCase);
+
+                if (!watched)
+                {
+                    await next(context);
+                    return;
+                }
+
+                var req = context.Request;
+                string AuthScheme()
+                {
+                    var h = req.Headers.Authorization.ToString();
+                    if (string.IsNullOrEmpty(h)) return "(none)";
+                    var sp = h.IndexOf(' ');
+                    return sp > 0 ? h[..sp] : h; // log the scheme only, never the credential
+                }
+
+                diagLogger.LogInformation(
+                    "SUBSCRIBE >> {Method} {Scheme}://{Host}{Path}{Query} | Auth={Auth} UA={UserAgent} Accept={Accept} XFwdProto={XFwdProto} XFwdHost={XFwdHost} XFwdFor={XFwdFor}",
+                    req.Method, req.Scheme, req.Host.Value, req.Path.Value, req.QueryString.Value,
+                    AuthScheme(),
+                    req.Headers.UserAgent.ToString(),
+                    req.Headers.Accept.ToString(),
+                    req.Headers["X-Forwarded-Proto"].ToString(),
+                    req.Headers["X-Forwarded-Host"].ToString(),
+                    req.Headers["X-Forwarded-For"].ToString());
+
+                await next(context);
+
+                var res = context.Response;
+                diagLogger.LogInformation(
+                    "SUBSCRIBE << {Method} {Path} -> {Status} | WWW-Authenticate={WwwAuth} Location={Location} ContentType={ContentType}",
+                    req.Method, req.Path.Value, res.StatusCode,
+                    res.Headers.WWWAuthenticate.ToString(),
+                    res.Headers.Location.ToString(),
+                    res.ContentType ?? string.Empty);
+            });
+        }
+
         using (var scope = app.Services.CreateScope())
         {
             var userManager = scope.ServiceProvider.GetService<UserManager<ApplicationUser>>();

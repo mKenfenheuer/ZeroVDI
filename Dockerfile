@@ -20,4 +20,7 @@ FROM base AS final
 WORKDIR /app
 COPY --from=publish /app/publish .
 ENV ASPNETCORE_HTTP_PORTS=80
+# Persist the SQLite database and the generated OAuth/OIDC signing & encryption certificates.
+# Both live in /app/Data so issued tokens survive container restarts/recreation.
+VOLUME ["/app/Data"]
 ENTRYPOINT ["dotnet", "KSol.RDPGateway.dll"]
