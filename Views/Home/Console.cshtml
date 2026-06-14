@@ -109,12 +109,11 @@
             <form id="login-form" autocomplete="off">
                 <div class="mb-2">
                     <label for="vm-user">Username</label>
-                    <input class="form-control form-control-sm" id="vm-user" value="max" autocomplete="username" />
+                    <input class="form-control form-control-sm" id="vm-user" autocomplete="username" />
                 </div>
                 <div class="mb-2">
                     <label for="vm-pass">Password</label>
-                    <input class="form-control form-control-sm" id="vm-pass" type="password" 
-                    value="Start1234" autocomplete="current-password" />
+                    <input class="form-control form-control-sm" id="vm-pass" type="password" autocomplete="current-password" />
                 </div>
                 <div class="mb-2">
                     <label for="vm-domain">Domain <span class="text-muted">(optional)</span></label>
@@ -269,7 +268,17 @@
                     if (invert ? !cb.checked : cb.checked) perf |= bit;
                 });
 
-                client.setAudioEnabled(document.getElementById("opt-audio").checked);
+                client.setAudioEnabled(true);
+                client.setMuted(document.getElementById("opt-audio").checked);
+                var muted = !(client.muted);
+                client.setMuted(muted);
+                if(muted) {
+                    btnMute.classList.add("fa-red");
+                } else {
+                    btnMute.classList.remove("fa-red");
+                }
+                btnMute.innerHTML = muted ? '<i class="fa-solid fa-volume-xmark"></i>' : '<i class="fa-solid fa-volume"></i>';
+
                 client.setClipboardEnabled(document.getElementById("opt-clipboard").checked);
                 // Create/resume the AudioContext now, inside this user gesture — browsers block audio
                 // that starts without one, and the first wave arrives long after the click.
