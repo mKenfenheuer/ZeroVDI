@@ -65,11 +65,12 @@
             <form id="login-form" autocomplete="off">
                 <div class="mb-2">
                     <label for="vm-user">Username</label>
-                    <input class="form-control form-control-sm" id="vm-user" value="@defaultUser" autocomplete="username" />
+                    <input class="form-control form-control-sm" id="vm-user" value="max" autocomplete="username" />
                 </div>
                 <div class="mb-2">
                     <label for="vm-pass">Password</label>
-                    <input class="form-control form-control-sm" id="vm-pass" type="password" autocomplete="current-password" />
+                    <input class="form-control form-control-sm" id="vm-pass" type="password" 
+                    value="Start1234" autocomplete="current-password" />
                 </div>
                 <div class="mb-2">
                     <label for="vm-domain">Domain <span class="text-muted">(optional)</span></label>
@@ -166,15 +167,25 @@
                     document.exitFullscreen();
                 }
             });
-            // Keep the canvas centered & 1:1 when the viewport changes. The desktop resolution stays
-            // fixed for the session (live resize will arrive with MS-RDPEDISP); the canvas is just
-            // re-fitted (letterboxed) into the new visible area.
-            window.addEventListener("resize", function () {
-                if (client.connected) client._fit(screenWrap);
-            });
-            document.addEventListener("fullscreenchange", function () {
-                if (client.connected) client._fit(screenWrap);
-            });
+            // Live remote resolution changes (MS-RDPEDISP). On a *genuine, settled* viewport change we
+            // ask the server for a new resolution that fills the area. Guards against the spurious
+            // resize/reflow events that fire right after connect (which must NOT trigger a layout —
+            // doing so mid-stream changes the server's resolution and stalls output):
+            //   - only after the session has been active for a moment,
+            //   - debounced long enough to ignore transient settles,
+            //   - only when the requested size differs meaningfully from what we last applied.
+            var resizeTimer = null;
+            function onViewportChange() {
+                if (!client.connected) return;
+                client._fit(screenWrap);                 // keep the current canvas fitted (cheap, no RDP)
+                if (resizeTimer) clearTimeout(resizeTimer);
+                resizeTimer = setTimeout(function () {
+                    resizeTimer = null;
+                    client.maybeResize(screenWrap);
+                }, 600);
+            }
+            window.addEventListener("resize", onViewportChange);
+            document.addEventListener("fullscreenchange", onViewportChange);
 
             window.addEventListener("beforeunload", function () { client.disconnect(); });
         })();

@@ -58,6 +58,9 @@ Client.prototype.chooseDesktopSize = function (wrapEl) {
 // Applies a chosen device-pixel size to the canvas backing store, and fits its on-screen size to the
 // wrapper via CSS. Call before connecting (so the resolution is baked into the RDP handshake).
 Client.prototype.applyDesktopSize = function (wrapEl, size) {
+    this._wrapEl = wrapEl; // remembered for re-fitting after live resolution changes
+    this._appliedW = size.width;   // last resolution we asked the server for (resize jitter guard)
+    this._appliedH = size.height;
     this.canvas.width = size.width;
     this.canvas.height = size.height;
     this._fit(wrapEl);
@@ -135,6 +138,17 @@ Client.prototype._onControlFrame = function (text) {
     }
 };
 
+// Maps a CSS devicePixelRatio to the nearest RDP DesktopScaleFactor (% per [MS-RDPEDISP], 100..500),
+// so the remote Windows UI renders at a comfortable size on HiDPI displays instead of tiny-at-100%.
+Client.prototype.desktopScaleForDpr = function (dpr) {
+    const pct = Math.round((dpr || 1) * 100);
+    // Snap to the values Windows commonly uses; clamp to the legal range.
+    const allowed = [100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500];
+    let best = allowed[0], bestErr = Infinity;
+    for (const a of allowed) { const e = Math.abs(a - pct); if (e < bestErr) { bestErr = e; best = a; } }
+    return best;
+};
+
 Client.prototype._startProtocol = function () {
     const self = this;
     const transport = {
@@ -144,6 +158,7 @@ Client.prototype._startProtocol = function () {
             }
         },
     };
+    const dpr = window.devicePixelRatio || 1;
     this.proto = new RdpProtocol(transport, {
         username: this.creds.user,
         password: this.creds.password,
@@ -151,19 +166,113 @@ Client.prototype._startProtocol = function () {
         width: this.canvas.width,
         height: this.canvas.height,
         selectedProtocol: 2, // HYBRID (NLA) — matches the gateway's X.224 negotiation
+        desktopScaleFactor: this.desktopScaleForDpr(dpr),
+        deviceScaleFactor: 100,
     }, {
         onUpdate: this.onUpdate,
         onActive: function () { self._onActive(); },
         onError: function (m) { console.error("rdp:", m); self._status("error", m); },
         onLog: function (m) { console.log("rdp:", m); },
+        onResize: function (w, h) { self._onRemoteResize(w, h); },
+        onDisplayControlReady: function () { self._displayControlReady = true; self._applyInitialScale(); },
     });
     this.proto.start();
 };
 
+// Resize the canvas backing store to a device-pixel size and re-fit it to the viewport. Setting
+// canvas.width/height clears the canvas, so the server's repaint at the new size refills it.
+Client.prototype._resizeCanvas = function (w, h) {
+    if (this.canvas.width === w && this.canvas.height === h) {
+        if (this._wrapEl) this._fit(this._wrapEl);
+        return;
+    }
+    this._appliedW = w;
+    this._appliedH = h;
+    this.canvas.width = w;
+    this.canvas.height = h;
+    if (this._wrapEl) this._fit(this._wrapEl);
+};
+
+// Called when the remote desktop resolution changes via a Deactivation-Reactivation (hosts that
+// reactivate). Idempotent with the immediate resize done in requestResize/maybeResize.
+Client.prototype._onRemoteResize = function (w, h) {
+    this._resizeCanvas(w, h);
+};
+
+// Requests a live resolution change to fill `wrapEl` at the current DPI. Falls back to a no-op (the
+// caller may choose to reconnect) if Display Control isn't available on this host.
+Client.prototype.requestResize = function (wrapEl) {
+    if (!this.proto || !this.proto.canResize()) return false;
+    const size = this.chooseDesktopSize(wrapEl);
+    const sent = this.proto.sendMonitorLayout(size.width, size.height, this._scaleForSession(), 100);
+    // This server applies the new resolution without a Deactivation-Reactivation, so resize the
+    // canvas to the requested size now; the server's repaint refills it. (Idempotent if the host
+    // does later reactivate via _onRemoteResize.) Use the protocol's clamped dimensions (not the
+    // requested ones) so the canvas backing store exactly matches the server's desktop — otherwise
+    // mouse coordinate scaling drifts after a resize.
+    if (sent) this._resizeCanvas(this.proto.width, this.proto.height);
+    return sent;
+};
+
+// Conservatively requests a live resolution change only on a GENUINE, settled viewport change. This
+// guards against the spurious resize/reflow events that fire right after connect — sending a layout
+// mid-stream changes the server's resolution and (on hosts that don't reactivate) stalls output.
+// Conditions: Display Control available, session active for >1.5s, and the new size differs from the
+// last-applied size by more than a small threshold (so rounding jitter never triggers a layout).
+Client.prototype.maybeResize = function (wrapEl) {
+    if (!this.proto || !this.proto.canResize()) return false;
+    if (!this._activeSince || (performance.now() - this._activeSince) < 1500) return false;
+
+    const size = this.chooseDesktopSize(wrapEl);
+    const curW = this._appliedW || this.canvas.width;
+    const curH = this._appliedH || this.canvas.height;
+    const THRESH = 16; // px — ignore sub-threshold jitter from layout settles
+    if (Math.abs(size.width - curW) < THRESH && Math.abs(size.height - curH) < THRESH) return false;
+
+    const sent = this.proto.sendMonitorLayout(size.width, size.height, this._scaleForSession(), 100);
+    // Use the protocol's clamped dimensions so the canvas matches the server's desktop exactly (keeps
+    // mouse coordinate scaling accurate after a resize).
+    if (sent) { this._resizeCanvas(this.proto.width, this.proto.height); this._bmpLogBudget = 8; }
+    return sent;
+};
+
+// The RDP handshake (CS_CORE) carries no DesktopScaleFactor, so the session always starts at 100%
+// scale regardless of the display's DPI — making the remote UI tiny on HiDPI screens. The only way
+// to set scale is an MS-RDPEDISP MONITOR_LAYOUT, so once Display Control is ready AND the session is
+// active we send one at the SAME resolution but the real DPR scale. This applies correct scaling
+// (e.g. 200%) from the start instead of only after a manual resize. Fires once per session.
+Client.prototype._applyInitialScale = function () {
+    if (this._initialScaleApplied) return;
+    if (!this.proto || !this.proto.canResize()) return; // not active yet; retried from _onActive
+    const dpr = window.devicePixelRatio || 1;
+    // Capture the session scale ONCE. Resizes reuse this instead of re-reading devicePixelRatio, which
+    // is unreliable during a window resize (it can momentarily read 1, which would send a 200%→100%
+    // scale change mid-session — this host stalls its stream on that, going black after the resize).
+    this._sessionScale = this.desktopScaleForDpr(dpr);
+    if (this._sessionScale <= 100) { this._initialScaleApplied = true; return; } // nothing to scale
+    this._initialScaleApplied = true;
+    // Same backing-store resolution, only the DPI scale — no canvas resize/clear needed.
+    this.proto.sendMonitorLayout(this.canvas.width, this.canvas.height, this._sessionScale, 100);
+};
+
+// The fixed DPI scale for this session (captured at connect). Resizes must reuse it so they only ever
+// change resolution, never scale — see _applyInitialScale for why re-reading dpr per resize is unsafe.
+Client.prototype._scaleForSession = function () {
+    if (this._sessionScale) return this._sessionScale;
+    return this.desktopScaleForDpr(window.devicePixelRatio || 1);
+};
+
 Client.prototype._onActive = function () {
-    if (this.connected) return;
+    if (this.connected) {
+        // Reached again after a reactivation; Display Control may only now be usable.
+        this._applyInitialScale();
+        return;
+    }
     this.connected = true;
+    this._activeSince = performance.now(); // for maybeResize's settle guard
     this._status("ready", null);
+    // Display Control may have signalled ready before the session was ACTIVE; now canResize() is true.
+    this._applyInitialScale();
 
     window.addEventListener("keydown", this.handleKeyDown);
     window.addEventListener("keyup", this.handleKeyUp);
@@ -202,35 +311,84 @@ Client.prototype.onUpdate = function (arrayBuffer) {
 
     while (r.offset < total) {
         const header = parseUpdateHeader(r);
+        const bodyStart = r.offset;
+        if (bodyStart + header.size > total) break; // truncated; shouldn't happen for valid PDUs
+        const body = new Uint8Array(arrayBuffer, bodyStart, header.size);
 
-        if (header.isCompressed()) {
-            // Fastpath-level compression of the update wrapper is not supported; skip its payload.
-            r.skip(header.size);
+        // Fragmentation ([MS-RDPBCGR] 2.2.9.1.2.1): a large update is split across PDUs as
+        // FIRST → NEXT* → LAST; SINGLE is a self-contained update. Reassemble the payload by
+        // updateCode before dispatching, otherwise large screen redraws never render.
+        let updateCode = header.updateCode;
+        let payload;
+        if (header.isSingleFragment()) {
+            payload = body;
+        } else if (header.isFirstFragment()) {
+            this._frag = { code: updateCode, parts: [body.slice()], len: body.length };
+            r.offset = bodyStart + header.size;
+            continue;
+        } else { // NEXT or LAST
+            if (!this._frag) { r.offset = bodyStart + header.size; continue; }
+            this._frag.parts.push(body.slice());
+            this._frag.len += body.length;
+            if (header.isLastFragment()) {
+                payload = new Uint8Array(this._frag.len);
+                let off = 0;
+                for (const part of this._frag.parts) { payload.set(part, off); off += part.length; }
+                updateCode = this._frag.code;
+                this._frag = null;
+            } else {
+                r.offset = bodyStart + header.size;
+                continue; // more fragments to come
+            }
+        }
+
+        if (header.compression === FASTPATH_OUTPUT_COMPRESSION_USED) {
+            // Fastpath-level wrapper compression is not supported; skip.
+            r.offset = bodyStart + header.size;
             continue;
         }
 
-        const bodyStart = r.offset;
         try {
-            if (header.isBitmap()) {
-                this.handleBitmap(r);
-            } else if (header.isPointer()) {
-                this.handlePointer(header, r);
-            } else if (header.isSynchronize()) {
-                // [T128] artifact; ignore.
-            } else {
-                // Orders / surface commands / palette not implemented in v1.
-            }
+            this._dispatchUpdate(updateCode, header, payload);
         } catch (e) {
             console.warn("update render error:", e);
         }
-        // Always advance exactly past this update's declared size, regardless of how much each
-        // handler consumed (robust against partially-handled update types).
         r.offset = bodyStart + header.size;
     }
 };
 
+// Dispatch a fully-reassembled update payload by its update code.
+Client.prototype._dispatchUpdate = function (updateCode, header, payload) {
+    const r = new BinaryReader(payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength));
+    if (updateCode === FASTPATH_UPDATETYPE_BITMAP) {
+        this.handleBitmap(r);
+    } else if (updateCode === FASTPATH_UPDATETYPE_PTR_NULL || updateCode === FASTPATH_UPDATETYPE_PTR_DEFAULT
+        || updateCode === FASTPATH_UPDATETYPE_PTR_POSITION || updateCode === FASTPATH_UPDATETYPE_PTR_COLOR
+        || updateCode === FASTPATH_UPDATETYPE_PTR_CACHED || updateCode === FASTPATH_UPDATETYPE_PTR_NEW
+        || updateCode === FASTPATH_UPDATETYPE_LARGE_POINTER) {
+        // Rebuild a header carrying this updateCode for the pointer handler's is*() checks.
+        const h = new UpdateHeader();
+        h.updateCode = updateCode;
+        this.handlePointer(h, r);
+    }
+    // SYNCHRONIZE / ORDERS / SURFCMDS / PALETTE: not rendered in v1.
+};
+
 Client.prototype.handleBitmap = function (r) {
     const bitmap = parseBitmapUpdate(r);
+
+    // DIAGNOSTIC: after a resize, log the extent of incoming bitmaps so we can tell what resolution the
+    // server is actually painting at (vs. the canvas size we requested). Remove once resize is solid.
+    if (this._bmpLogBudget > 0) {
+        this._bmpLogBudget--;
+        let maxR = 0, maxB = 0;
+        bitmap.rectangles.forEach((b) => {
+            if (b.destLeft + b.width > maxR) maxR = b.destLeft + b.width;
+            if (b.destTop + b.height > maxB) maxB = b.destTop + b.height;
+        });
+        console.log("rdp: bitmap extent right=" + maxR + " bottom=" + maxB
+            + " (canvas " + this.canvas.width + "x" + this.canvas.height + ")");
+    }
 
     bitmap.rectangles.forEach((bitmapData) => {
         const size = bitmapData.width * bitmapData.height;
@@ -246,31 +404,36 @@ Client.prototype.handleBitmap = function (r) {
             return;
         }
 
-        // Compressed (interleaved RLE) — decompress via the wasm module.
-        const inputPtr = Module._malloc(bitmapData.bitmapLength);
-        const outputPtr = Module._malloc(resultSize);
-        const inputHeap = new Uint8Array(Module.HEAPU8.buffer, inputPtr, bitmapData.bitmapDataStream.byteLength);
-        inputHeap.set(new Uint8Array(bitmapData.bitmapDataStream));
+        // Compressed (interleaved RLE) — decompress via the wasm module. Background/FgBg runs on the
+        // FIRST scanline read the "previous row" at (pbDest - rowDelta), i.e. `rowDelta` bytes BEFORE
+        // the destination. Allocate a one-row zero pad in front and decode into outputPtr = padded +
+        // rowDelta so that prior-row read is guaranteed zero (the MS RLE reference's implicit all-zero
+        // first previous-line).
+        const srcBytes = new Uint8Array(bitmapData.bitmapDataStream);
+        const inputPtr = Module._malloc(srcBytes.length);
+        const padded = Module._malloc(resultSize + rowDelta);
+        const outputPtr = padded + rowDelta;
+        new Uint8Array(Module.HEAPU8.buffer, inputPtr, srcBytes.length).set(srcBytes);
+        new Uint8Array(Module.HEAPU8.buffer, padded, resultSize + rowDelta).fill(0);
 
         const ok = Module.ccall("RleDecompress", "number",
             ["number", "number", "number", "number"],
             [inputPtr, bitmapData.bitmapLength, outputPtr, rowDelta]);
-
         if (!ok) {
-            console.warn("bad RLE decompress", bitmapData);
             Module._free(inputPtr);
-            Module._free(outputPtr);
+            Module._free(padded);
             return;
         }
 
-        let rgb = new Uint8ClampedArray(Module.HEAP8.buffer.slice(outputPtr, outputPtr + resultSize));
+        let rgb = new Uint8ClampedArray(resultSize);
+        rgb.set(new Uint8Array(Module.HEAPU8.buffer, outputPtr, resultSize));
         let rgba = new Uint8ClampedArray(size * 4);
         flipV(rgb, bitmapData.width, bitmapData.height);
         rgb2rgba(rgb, resultSize, rgba);
         this.ctx.putImageData(new ImageData(rgba, bitmapData.width, bitmapData.height), bitmapData.destLeft, bitmapData.destTop);
 
         Module._free(inputPtr);
-        Module._free(outputPtr);
+        Module._free(padded);
     });
 };
 
