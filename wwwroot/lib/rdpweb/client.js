@@ -75,7 +75,9 @@ Client.prototype._fit = function (wrapEl) {
     this.canvas.style.height = (this.canvas.height / dpr) + "px";
 };
 
-// creds = {user, password, domain}
+// creds = {user, password, domain, performanceFlags}
+// performanceFlags (optional) is the RDP ExtendedInfoPacket performanceFlags value; omit for the
+// default (best visual fidelity — font smoothing + desktop composition).
 Client.prototype.connect = function (creds) {
     const self = this;
     this.creds = creds;
@@ -168,6 +170,9 @@ Client.prototype._startProtocol = function () {
         selectedProtocol: 2, // HYBRID (NLA) — matches the gateway's X.224 negotiation
         desktopScaleFactor: this.desktopScaleForDpr(dpr),
         deviceScaleFactor: 100,
+        performanceFlags: this.creds.performanceFlags, // undefined → protocol default (best visuals)
+        audio: !!this.audioEnabled,        // request the rdpsnd channel for remote sound
+        clipboard: !!this.clipboardEnabled, // request the cliprdr channel for clipboard sync
     }, {
         onUpdate: this.onUpdate,
         onActive: function () { self._onActive(); },
@@ -175,8 +180,101 @@ Client.prototype._startProtocol = function () {
         onLog: function (m) { console.log("rdp:", m); },
         onResize: function (w, h) { self._onRemoteResize(w, h); },
         onDisplayControlReady: function () { self._displayControlReady = true; self._applyInitialScale(); },
+        onAudio: function (fmt, pcm) { self._playPcm(fmt, pcm); },
+        onClipboardText: function (text) { self._onRemoteClipboardText(text); },
     });
     this.proto.start();
+};
+
+// ---- remote audio playback (Web Audio) -----------------------------------------------------------
+// Enable/disable remote sound. Must be set before connect() so the rdpsnd channel is advertised.
+Client.prototype.setAudioEnabled = function (on) { this.audioEnabled = !!on; };
+
+// Mute/unmute playback at runtime (the channel stays open; we just drop or pass the waves).
+Client.prototype.setMuted = function (muted) { this.muted = !!muted; };
+
+// Enable/disable camera video redirection at runtime (the channel stays open; we just drop or pass the video).
+Client.prototype.setCameraEnabled = function (cameraEnabled) { this.cameraEnabled = !!cameraEnabled; };
+
+// Enable/disable mic audio redirection at runtime (the channel stays open; we just drop or pass the audio).
+Client.prototype.setMicrophoneEnabled = function (microphoneEnabled) { this.microphoneEnabled = !!microphoneEnabled; };
+
+// Create (and resume) the AudioContext. Call from a user gesture (e.g. the connect click) so the
+// browser's autoplay policy lets audio start; the first wave arrives well after the gesture ends.
+Client.prototype.primeAudio = function () {
+    if (!this.audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return null;
+        this.audioCtx = new AC();
+        this._audioTime = 0;
+    }
+    if (this.audioCtx.state === "suspended") this.audioCtx.resume();
+    return this.audioCtx;
+};
+
+// Play one decoded PCM wave. fmt = {rate, bits, channels}; pcm = little-endian interleaved samples.
+// Schedules buffers back-to-back on a shared timeline so consecutive waves play gaplessly.
+Client.prototype._playPcm = function (fmt, pcm) {
+    if (this.muted) return;
+    try {
+        const ctx = this.primeAudio();
+        if (!ctx) return;
+
+        const bytesPerSample = (fmt.bits / 8) || 2;
+        const channels = fmt.channels || 2;
+        const frameBytes = bytesPerSample * channels;
+        const frames = Math.floor(pcm.length / frameBytes);
+        if (frames <= 0) return;
+
+        const buf = ctx.createBuffer(channels, frames, fmt.rate || 44100);
+        const view = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+        // De-interleave to float [-1, 1]. Only 16-bit and 8-bit PCM are produced by our negotiated
+        // formats; 16-bit is the common case.
+        for (let ch = 0; ch < channels; ch++) {
+            const out = buf.getChannelData(ch);
+            for (let i = 0; i < frames; i++) {
+                const off = i * frameBytes + ch * bytesPerSample;
+                if (bytesPerSample === 2) out[i] = view.getInt16(off, true) / 32768;
+                else out[i] = (pcm[off] - 128) / 128; // 8-bit unsigned
+            }
+        }
+
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+        const now = ctx.currentTime;
+        // Keep a running playhead so waves queue seamlessly; if we've fallen behind (underrun), jump
+        // back to now to avoid an ever-growing latency.
+        const start = Math.max(now, this._audioTime || now);
+        src.start(start);
+        this._audioTime = start + buf.duration;
+    } catch (e) {
+        console.warn("audio play error:", e);
+    }
+};
+
+// ---- clipboard sync ------------------------------------------------------------------------------
+// Enable/disable clipboard redirection. Set before connect() to advertise the cliprdr channel.
+Client.prototype.setClipboardEnabled = function (on) { this.clipboardEnabled = !!on; };
+
+// Remote session copied text → write it to the browser clipboard (best effort; needs a secure
+// context + permission). We suppress our own change echo so it isn't sent straight back.
+Client.prototype._onRemoteClipboardText = function (text) {
+    this._lastRemoteClip = text;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(function () { /* permission/denied — ignore */ });
+    }
+};
+
+// Offer local browser clipboard text to the remote session (so it can paste). Call from a user
+// gesture (clipboard read requires one). No-op if the text is what the remote just sent us.
+Client.prototype.pushLocalClipboard = function () {
+    const self = this;
+    if (!this.proto || !navigator.clipboard || !navigator.clipboard.readText) return;
+    navigator.clipboard.readText().then(function (text) {
+        if (text == null || text === self._lastRemoteClip) return;
+        self.proto.sendClipboardText(text);
+    }).catch(function () { /* permission/denied — ignore */ });
 };
 
 // Resize the canvas backing store to a device-pixel size and re-fit it to the viewport. Setting
@@ -299,6 +397,10 @@ Client.prototype.deinitialize = function () {
     });
     this.pointerCache = {};
     this.canvas.classList = [];
+
+    // Tear down the audio timeline so a later reconnect starts fresh (the AudioContext is reused).
+    this._audioTime = 0;
+
     this._status("closed", null);
 };
 

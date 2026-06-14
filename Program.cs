@@ -42,7 +42,8 @@ public class Program
         // asking the user for anything extra.
         builder.Services.AddScoped<IPasswordHasher<ApplicationUser>, DerivingPasswordHasher>();
 
-        builder.Services.AddControllersWithViews();
+        builder.Services.AddControllersWithViews()
+            .AddRazorRuntimeCompilation();
 
         builder.Services.AddRDPGW();
         builder.Services.AddSingleton<IRDPGWAuthenticationHandler, RDPAuthenticationHandler>();

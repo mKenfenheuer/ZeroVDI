@@ -1,0 +1,191 @@
+// cliprdr.js — client side of the Clipboard Virtual Channel Extension (MS-RDPECLIP).
+//
+// protocol.js joins the static "cliprdr" channel and hands complete (reassembled) channel payloads
+// to ClipRdr.onData(). This implements two-way *Unicode text* clipboard sync:
+//   - remote → browser: when the remote session copies text, we request it and deliver it via
+//     onRemoteText(text); client.js writes it to the browser clipboard.
+//   - browser → remote: client.js calls setLocalText(text) (e.g. from a paste/refresh action); we
+//     advertise CF_UNICODETEXT and serve the text when the remote session pastes.
+//
+// Only CF_UNICODETEXT is negotiated — images and rich formats are out of scope for this pass.
+//
+// References: [MS-RDPECLIP] 2.2.* (Clipboard Capabilities, Monitor Ready, Format List, Format List
+// Response, Format Data Request, Format Data Response).
+
+// CLIPRDR_HEADER.msgType ([MS-RDPECLIP] 2.2.1).
+const CB_MONITOR_READY = 0x0001;
+const CB_FORMAT_LIST = 0x0002;
+const CB_FORMAT_LIST_RESPONSE = 0x0003;
+const CB_FORMAT_DATA_REQUEST = 0x0004;
+const CB_FORMAT_DATA_RESPONSE = 0x0005;
+const CB_CLIP_CAPS = 0x0007;
+
+// msgFlags.
+const CB_RESPONSE_OK = 0x0001;
+const CB_RESPONSE_FAIL = 0x0002;
+
+// Standard Windows clipboard format id for UTF-16LE text.
+const CF_UNICODETEXT = 13;
+
+// Capability set type / general flags ([MS-RDPECLIP] 2.2.2.1.1).
+const CB_CAPSTYPE_GENERAL = 0x0001;
+const CB_USE_LONG_FORMAT_NAMES = 0x00000002;
+
+// transport.send(payload Uint8Array) ships the payload on the cliprdr MCS channel (the
+// CHANNEL_PDU_HEADER is added by protocol.js). callbacks: { onLog(msg), onRemoteText(text) }.
+function ClipRdr(send, callbacks) {
+    this.send = send;
+    this.cb = callbacks || {};
+    this.localText = null;       // text we offer to the remote (browser → remote)
+    this._haveOffered = false;   // whether we've sent a non-empty format list
+}
+
+ClipRdr.prototype._log = function (m) { if (this.cb.onLog) this.cb.onLog(m); };
+
+// ---- small writer ---------------------------------------------------------------------------------
+function ClipWriter() { this.b = []; }
+ClipWriter.prototype.u8 = function (v) { this.b.push(v & 0xff); return this; };
+ClipWriter.prototype.u16 = function (v) { this.b.push(v & 0xff, (v >> 8) & 0xff); return this; };
+ClipWriter.prototype.u32 = function (v) { this.b.push(v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff); return this; };
+ClipWriter.prototype.bytes = function (a) { for (let i = 0; i < a.length; i++) this.b.push(a[i] & 0xff); return this; };
+ClipWriter.prototype.arr = function () { return new Uint8Array(this.b); };
+
+function utf16leBytes(s) {
+    const w = new ClipWriter();
+    for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); w.u16(c); }
+    return w.arr();
+}
+function utf16leToString(u8) {
+    let s = "";
+    for (let i = 0; i + 1 < u8.length; i += 2) {
+        const c = u8[i] | (u8[i + 1] << 8);
+        if (c === 0) break; // stop at the terminating NUL
+        s += String.fromCharCode(c);
+    }
+    return s;
+}
+
+// Wrap a body in CLIPRDR_HEADER (msgType, msgFlags, dataLen) and send.
+ClipRdr.prototype._sendPdu = function (msgType, msgFlags, body) {
+    const w = new ClipWriter();
+    w.u16(msgType);
+    w.u16(msgFlags || 0);
+    w.u32(body ? body.length : 0);
+    if (body) w.bytes(body);
+    this.send(w.arr());
+};
+
+// ---- outbound: offer local text to the remote ----------------------------------------------------
+// Called by client.js when the browser has new clipboard text the remote should be able to paste.
+ClipRdr.prototype.setLocalText = function (text) {
+    this.localText = (text == null) ? null : String(text);
+    this._sendFormatList();
+};
+
+// Format List PDU ([MS-RDPECLIP] 2.2.3.1) advertising CF_UNICODETEXT (long-format-name form: id +
+// double-NUL-terminated UTF-16 name; we use an empty name).
+ClipRdr.prototype._sendFormatList = function () {
+    const body = new ClipWriter();
+    if (this.localText != null) {
+        body.u32(CF_UNICODETEXT); // formatId
+        body.u16(0x0000);         // empty wszFormatName (just the terminating NUL)
+        this._haveOffered = true;
+    } // else: empty list = "clipboard cleared / nothing on offer"
+    this._sendPdu(CB_FORMAT_LIST, 0, body.arr());
+};
+
+// ---- inbound dispatch -----------------------------------------------------------------------------
+ClipRdr.prototype.onData = function (payload) {
+    if (!payload || payload.length < 8) return;
+    const r = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+    const msgType = r.getUint16(0, true);
+    const msgFlags = r.getUint16(2, true);
+    const dataLen = r.getUint32(4, true);
+    const body = payload.subarray(8, 8 + Math.min(dataLen, payload.length - 8));
+
+    switch (msgType) {
+        case CB_MONITOR_READY: return this._onMonitorReady();
+        case CB_CLIP_CAPS: return; // we don't need to parse the server caps for text-only sync
+        case CB_FORMAT_LIST: return this._onFormatList(body);
+        case CB_FORMAT_LIST_RESPONSE: return; // ack of our format list; nothing to do
+        case CB_FORMAT_DATA_REQUEST: return this._onFormatDataRequest(body);
+        case CB_FORMAT_DATA_RESPONSE: return this._onFormatDataResponse(msgFlags, body);
+        default: this._log("ignoring msgType 0x" + msgType.toString(16));
+    }
+};
+
+// Monitor Ready ([MS-RDPECLIP] 2.2.2.2): the channel is up. Send our capabilities, then an initial
+// (empty) format list to complete the handshake.
+ClipRdr.prototype._onMonitorReady = function () {
+    this._log("monitor ready");
+    this._sendCapabilities();
+    this._sendFormatList(); // empty unless setLocalText was already called
+};
+
+// Clipboard Capabilities PDU ([MS-RDPECLIP] 2.2.2.1) advertising long format names.
+ClipRdr.prototype._sendCapabilities = function () {
+    const body = new ClipWriter();
+    body.u16(1);                 // cCapabilitiesSets
+    body.u16(0);                 // pad1
+    // CLIPRDR_GENERAL_CAPABILITY ([MS-RDPECLIP] 2.2.2.1.1).
+    body.u16(CB_CAPSTYPE_GENERAL); // capabilitySetType
+    body.u16(12);                  // lengthCapability (header 4 + version 4 + flags 4)
+    body.u32(0x00000002);          // version 2
+    body.u32(CB_USE_LONG_FORMAT_NAMES);
+    this._sendPdu(CB_CLIP_CAPS, 0, body.arr());
+};
+
+// Remote announced new clipboard formats. Ack, then if it offers Unicode/ASCII text, request it.
+ClipRdr.prototype._onFormatList = function (body) {
+    // Ack the list ([MS-RDPECLIP] 2.2.3.2).
+    this._sendPdu(CB_FORMAT_LIST_RESPONSE, CB_RESPONSE_OK, null);
+
+    // Parse format ids (long-format-name form: formatId(4) + double-NUL-terminated UTF-16 name).
+    let wantId = null;
+    let o = 0;
+    while (o + 4 <= body.length) {
+        const formatId = body[o] | (body[o + 1] << 8) | (body[o + 2] << 16) | (body[o + 3] << 24);
+        o += 4;
+        // Skip the UTF-16 name up to and including its double-NUL terminator.
+        while (o + 1 < body.length && !(body[o] === 0 && body[o + 1] === 0)) o += 2;
+        o += 2;
+        if (formatId === CF_UNICODETEXT) { wantId = CF_UNICODETEXT; break; }
+        if (formatId === 1 && wantId == null) wantId = 1; // CF_TEXT (ASCII) as a fallback
+    }
+
+    if (wantId != null) {
+        this._requestId = wantId;
+        const req = new ClipWriter();
+        req.u32(wantId); // requestedFormatId
+        this._sendPdu(CB_FORMAT_DATA_REQUEST, 0, req.arr());
+    }
+};
+
+// The remote is pasting our offered text — serve it as the requested format ([MS-RDPECLIP] 2.2.5.1).
+ClipRdr.prototype._onFormatDataRequest = function (body) {
+    const r = new DataView(body.buffer, body.byteOffset, body.byteLength);
+    const requestedFormatId = body.length >= 4 ? r.getUint32(0, true) : 0;
+    if (requestedFormatId === CF_UNICODETEXT && this.localText != null) {
+        // Format Data Response: UTF-16LE text + terminating NUL.
+        const text = utf16leBytes(this.localText);
+        const resp = new ClipWriter();
+        resp.bytes(text);
+        resp.u16(0); // terminating NUL
+        this._sendPdu(CB_FORMAT_DATA_RESPONSE, CB_RESPONSE_OK, resp.arr());
+    } else {
+        this._sendPdu(CB_FORMAT_DATA_RESPONSE, CB_RESPONSE_FAIL, null);
+    }
+};
+
+// The remote returned the clipboard contents we requested — deliver text to the browser.
+ClipRdr.prototype._onFormatDataResponse = function (msgFlags, body) {
+    if (!(msgFlags & CB_RESPONSE_OK)) return;
+    let text;
+    if (this._requestId === CF_UNICODETEXT) text = utf16leToString(body);
+    else { // CF_TEXT (ASCII/ANSI)
+        text = "";
+        for (let i = 0; i < body.length; i++) { if (body[i] === 0) break; text += String.fromCharCode(body[i]); }
+    }
+    this._requestId = null;
+    if (text && this.cb.onRemoteText) this.cb.onRemoteText(text);
+};

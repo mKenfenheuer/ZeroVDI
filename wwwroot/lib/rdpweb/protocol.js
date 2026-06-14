@@ -19,6 +19,17 @@
 
 const PROJECT_NAME = "rdpweb";
 
+// Test toggle: advertise SUPPORT_DYNVC_GFX_PROTOCOL (and the matching extra GCC blocks) only when
+// the page URL carries ?gfx=1. Lets us bisect the GFX-advertising RST without editing files.
+function rdpTryGfx() {
+    if (typeof window === "undefined") return false;
+    if (window.RDP_TRY_GFX != null) return !!window.RDP_TRY_GFX;
+    try {
+        var v = new URLSearchParams(window.location.search).get("gfx");
+        return v === "1" || v === "true";
+    } catch (e) { return false; }
+}
+
 // ---- small byte writer (grows automatically; big-endian/little-endian helpers) -------------------
 function ByteWriter() {
     this._bytes = [];
@@ -362,13 +373,13 @@ function clientCoreData(selectedProtocol, width, height) {
     const w = new ByteWriter();
     w.u16le(0xC001); // CS_CORE
     w.u16le(216);    // length
-    w.u32le(0x00080004); // version 5+
+    w.u32le(0x00080011); // RDP_VERSION_10_12 (modern client — matches mstsc/FreeRDP)
     w.u16le(width);
     w.u16le(height);
     w.u16le(0xCA01); // colorDepth RNS_UD_COLOR_8BPP
     w.u16le(0xAA03); // SASSequence
     w.u32le(0x00000409); // keyboardLayout US
-    w.u32le(0xece);  // clientBuild
+    w.u32le(18363);  // clientBuild (Windows 10 1909, matching modern clients)
     // clientName[32] (UTF-16LE, padded)
     const nameW = new ByteWriter().utf16le(PROJECT_NAME).toArray();
     const name32 = new Uint8Array(32);
@@ -381,11 +392,24 @@ function clientCoreData(selectedProtocol, width, height) {
     w.u16le(0xCA03);     // postBeta2ColorDepth
     w.u16le(0x0001);     // clientProductId
     w.u32le(0x00000000); // serialNumber
-    w.u16le(0x0010);     // highColorDepth HIGH_COLOR_16BPP
-    w.u16le(0x0002);     // supportedColorDepths RNS_UD_16BPP_SUPPORT
-    w.u16le(0x0001);     // earlyCapabilityFlags ECF_SUPPORT_ERRINFO_PDU
+    var gfx = rdpTryGfx();
+    // highColorDepth / supportedColorDepths: when advertising GFX we mirror FreeRDP's working values
+    // (24bpp high color, all depths supported). The no-GFX baseline keeps the conservative 16bpp set.
+    w.u16le(gfx ? 0x0018 : 0x0010);     // highColorDepth: HIGH_COLOR_24BPP vs 16BPP
+    w.u16le(gfx ? 0x000F : 0x0002);     // supportedColorDepths: 15/16/24/32 vs 16BPP only
+    // earlyCapabilityFlags ([MS-RDPBCGR] 2.2.1.3.2).
+    // CRITICAL (verified against a wire dump of FreeRDP `+gfx` connecting to this host): the GFX flag
+    // (SUPPORT_DYNVC_GFX_PROTOCOL 0x100) MUST be advertised together with its prerequisites, or the
+    // host RSTs right after CredSSP. FreeRDP sends 0x05E3 =
+    //   ERRINFO_PDU(0x01) | WANT_32BPP(0x02) | VALID_CONNECTION_TYPE(0x20) | MONITOR_LAYOUT(0x40) |
+    //   NETCHAR_AUTODETECT(0x80) | DYNVC_GFX(0x100) | HEARTBEAT(0x400).
+    // The host gates its rich dynamic-channel set — including AUDIO_PLAYBACK_DVC (remote sound) and the
+    // Graphics DVC — behind this set. The no-GFX baseline stays at the minimal ERRINFO only.
+    w.u16le(gfx ? 0x05E3 : 0x0001);
     w.zeros(64);         // clientDigProductId[64]
-    w.u8(0x00);          // connectionType
+    // connectionType: MUST be 0 unless VALID_CONNECTION_TYPE is set. With GFX we send 0x06
+    // (CONNECTION_TYPE_AUTODETECT), matching FreeRDP — required alongside NETCHAR_AUTODETECT.
+    w.u8(gfx ? 0x06 : 0x00);
     w.u8(0x00);          // pad
     w.u32le(selectedProtocol >>> 0); // serverSelectedProtocol
     return w.toArray();
@@ -398,33 +422,92 @@ function clientSecurityData() {
     w.u32le(0); // extEncryptionMethods
     return w.toArray();
 }
-// The static virtual channels we request, in order. The server returns one MCS channel id per entry
-// (positionally) in SC_NET. We need "drdynvc" to carry dynamic virtual channels (MS-RDPEDYC), which
-// in turn carries Display Control (MS-RDPEDISP) for live resolution/scale changes.
-const STATIC_CHANNELS = ["drdynvc"];
-// CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_COMPRESS_RDP | CHANNEL_OPTION_SHOW_PROTOCOL
-const DRDYNVC_OPTIONS = 0x80000000 | 0x00800000 | 0x00200000;
+// CHANNEL_OPTION_* ([MS-RDPBCGR] 2.2.1.3.4.1).
+const CHANNEL_OPTION_INITIALIZED = 0x80000000;
+const CHANNEL_OPTION_ENCRYPT_RDP = 0x40000000;
+const CHANNEL_OPTION_COMPRESS_RDP = 0x00800000;
+const CHANNEL_OPTION_SHOW_PROTOCOL = 0x00200000;
 
-function clientNetworkData() {
+// The static virtual channels we request, in order. The server returns one MCS channel id per entry
+// (positionally) in SC_NET. Each entry's `options` is the CHANNEL_OPTION_* flags for that channel.
+//   - "drdynvc": dynamic virtual channels (MS-RDPEDYC) → Display Control (MS-RDPEDISP) live resize.
+//   - "rdpsnd":  remote audio output (MS-RDPEA).
+//   - "cliprdr": clipboard redirection (MS-RDPECLIP).
+// The set is built per-connection (see RdpProtocol options audio/clipboard) so we only advertise the
+// channels we actually service — advertising a channel we don't answer can stall the host.
+const CHANNEL_DEFS = {
+    drdynvc: { options: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_COMPRESS_RDP | CHANNEL_OPTION_SHOW_PROTOCOL },
+    rdpsnd: { options: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP },
+    cliprdr: { options: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP | CHANNEL_OPTION_SHOW_PROTOCOL },
+    // rdpdr (device redirection, MS-RDPEFS): FreeRDP advertises this with /sound, and the host appears
+    // to gate the AUDIO_PLAYBACK_DVC dynamic channel (where modern audio rides) on its presence.
+    // FreeRDP options for rdpdr = INITIALIZED | COMPRESS_RDP (0x00800000).
+    rdpdr: { options: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_COMPRESS_RDP },
+};
+
+function clientNetworkData(channels) {
     const w = new ByteWriter();
-    const count = STATIC_CHANNELS.length;
+    const count = channels.length;
     w.u16le(0xC003);            // CS_NET
     w.u16le(8 + count * 12);    // header(4) + channelCount(4) + count*ChannelDef(12)
     w.u32le(count);             // channelCount
-    for (const name of STATIC_CHANNELS) {
+    for (const name of channels) {
         // ChannelDef: 7 ANSI chars + NUL (8 bytes) then options(4)
         const nameBytes = new Uint8Array(8);
         for (let i = 0; i < name.length && i < 7; i++) nameBytes[i] = name.charCodeAt(i) & 0xff;
         w.bytes(nameBytes);
-        w.u32le(DRDYNVC_OPTIONS >>> 0);
+        w.u32le((CHANNEL_DEFS[name] ? CHANNEL_DEFS[name].options : CHANNEL_OPTION_INITIALIZED) >>> 0);
     }
     return w.toArray();
 }
-function clientUserData(selectedProtocol, width, height) {
+// CS_MCS_MSGCHANNEL (0xC006) and CS_MULTITRANSPORT (0xC00A) client data blocks. A host that
+// advertises EXTENDED_CLIENT_DATA_SUPPORTED + DYNVC_GFX_PROTOCOL in its negotiation response expects
+// a GFX-capable client to include BOTH blocks in the GCC user data; if we set the GFX early-cap flag
+// but omit them, the host rejects our MCS Connect Initial (TCP drop right after we send it). Each is
+// a 4-byte header (type + length=8) + a 4-byte flags field. We advertise the blocks with flags=0 —
+// structurally present (so the GFX path is satisfied) while requesting no UDP multitransport (which
+// we don't implement; the relay is TCP-only).
+// CS_CLUSTER (0xC004): FreeRDP sends this unconditionally with flags = 0x0D (verified by wire dump) =
+// REDIRECTION_SUPPORTED(0x01) | (REDIRECTION_VERSION4 (3) << 2 = 0x0C). redirectedSessionId 0.
+function clientClusterData() {
+    const w = new ByteWriter();
+    w.u16le(0xC004); // CS_CLUSTER
+    w.u16le(12);     // length
+    w.u32le(0x00000001 | (0x03 << 2)); // REDIRECTION_SUPPORTED | REDIRECTION_VERSION4<<2 = 0x0D
+    w.u32le(0);      // redirectedSessionId
+    return w.toArray();
+}
+function clientMcsMsgChannelData() {
+    const w = new ByteWriter();
+    w.u16le(0xC006); // CS_MCS_MSGCHANNEL
+    w.u16le(8);      // length
+    w.u32le(0);      // flags
+    return w.toArray();
+}
+function clientMultitransportData() {
+    const w = new ByteWriter();
+    w.u16le(0xC00A); // CS_MULTITRANSPORT
+    w.u16le(8);      // length
+    // Match FreeRDP's default (TRANSPORT_TYPE_UDP_FECR = 0x01). We never actually establish a UDP
+    // side-channel — so we advertise flags=0 (no UDP transports), exactly matching the verified
+    // FreeRDP wire dump. Advertising a UDP transport we can't honor risks the host attempting UDP
+    // setup over our TCP-only relay; flags=0 keeps the block structurally present without that.
+    w.u32le(0x00000000);
+    return w.toArray();
+}
+
+function clientUserData(selectedProtocol, width, height, channels) {
     const w = new ByteWriter();
     w.bytes(clientCoreData(selectedProtocol, width, height));
+    // Extra GCC blocks for the GFX/extended-client-data path are gated behind the same test toggle so
+    // the default (no-GFX) Connect Initial stays byte-identical to the known-good baseline.
+    if (rdpTryGfx()) w.bytes(clientClusterData());
     w.bytes(clientSecurityData());
-    w.bytes(clientNetworkData());
+    w.bytes(clientNetworkData(channels));
+    if (rdpTryGfx()) {
+        w.bytes(clientMcsMsgChannelData());
+        w.bytes(clientMultitransportData());
+    }
     return w.toArray();
 }
 
@@ -452,7 +535,7 @@ function parseServerUserData(r) {
             case 0x0C03: { // SC_NET
                 out.mcsChannelId = r.u16le();         // global (I/O) channel id
                 const channelCount = r.u16le();
-                // One id per requested static virtual channel, positionally matching STATIC_CHANNELS.
+                // One id per requested static virtual channel, positionally matching staticChannels.
                 for (let i = 0; i < channelCount; i++) out.channelIds.push(r.u16le());
                 break;
             }
@@ -547,7 +630,26 @@ const INFO_AUTOLOGON = 0x00000008;
 const INFO_UNICODE = 0x00000010;
 const INFO_ENABLEWINDOWSKEY = 0x00000100;
 
-function clientInfoPdu(domain, username, password) {
+// Performance flags ([MS-RDPBCGR] 2.2.1.11.1.1.1, the ExtendedInfoPacket performanceFlags field).
+// The DISABLE_* bits turn OFF the named eye-candy to save bandwidth; the ENABLE_* bits turn ON
+// quality features. "Better visuals" = enable font smoothing (ClearType anti-aliasing) + desktop
+// composition (Aero/DWM) and disable nothing. Exposed so the UI can offer them individually.
+const PERF = {
+    DISABLE_WALLPAPER: 0x00000001,
+    DISABLE_FULLWINDOWDRAG: 0x00000002,
+    DISABLE_MENUANIMATIONS: 0x00000004,
+    DISABLE_THEMING: 0x00000008,
+    DISABLE_CURSOR_SHADOW: 0x00000020,
+    DISABLE_CURSORSETTINGS: 0x00000040,
+    ENABLE_FONT_SMOOTHING: 0x00000080,
+    ENABLE_DESKTOP_COMPOSITION: 0x00000100,
+};
+// Default: best visual fidelity (font anti-aliasing + Aero composition, full eye-candy).
+const PERF_DEFAULT = PERF.ENABLE_FONT_SMOOTHING | PERF.ENABLE_DESKTOP_COMPOSITION;
+// Surface the flag table to the page UI (which builds the performanceFlags value from checkboxes).
+if (typeof window !== "undefined") { window.RDP_PERF = PERF; window.RDP_PERF_DEFAULT = PERF_DEFAULT; }
+
+function clientInfoPdu(domain, username, password, performanceFlags) {
     function field(s) {
         if (s && s.length > 0) {
             const w = new ByteWriter().utf16le(s).toArray(); // no NUL
@@ -579,7 +681,7 @@ function clientInfoPdu(domain, username, password) {
     info.u16le(2); info.u16le(0); // cbClientDir + dir
     info.zeros(172); // clientTimeZone
     info.u32le(0);   // clientSessionId
-    info.u32le(0);   // performanceFlags
+    info.u32le((performanceFlags >>> 0)); // performanceFlags (font smoothing, composition, eye-candy)
 
     // Security header: SEC_INFO_PKT (0x0040), flagsHi 0
     const w = new ByteWriter();
@@ -759,15 +861,31 @@ function RdpProtocol(transport, opts, callbacks) {
     this.selectedProtocol = opts.selectedProtocol || 2; // HYBRID
     this.width = opts.width;
     this.height = opts.height;
+    // Performance flags for the client info PDU (font smoothing, desktop composition, eye-candy).
+    // Defaults to best visual fidelity; the UI can override per-connection.
+    this.performanceFlags = (opts.performanceFlags === undefined ? PERF_DEFAULT : opts.performanceFlags) >>> 0;
+
+    // Static virtual channels to request, in positional order. drdynvc is always present (live
+    // resize); rdpsnd/cliprdr are opt-in per the audio/clipboard options.
+    this.staticChannels = ["drdynvc"];
+    if (opts.audio) { this.staticChannels.push("rdpdr"); this.staticChannels.push("rdpsnd"); }
+    if (opts.clipboard) this.staticChannels.push("cliprdr");
 
     this.userId = 0;
     this.shareID = 0;
     this.mcsChannelId = 1003;
     this.skipChannelJoin = false;
     this.joinQueue = [];
-    this.staticChannelIds = {};
+    this.staticChannelIds = {};      // name -> MCS channel id
+    this.staticChannelById = {};     // MCS channel id -> name (inbound routing)
     this.drdynvcChannelId = 0;
     this._lastChannelId = 0;
+    // Per-static-channel inbound reassembly (CHANNEL_PDU_HEADER FIRST..LAST). Keyed by channel name.
+    this._svcReasm = {};
+
+    // Optional virtual-channel handlers, constructed lazily once their channel is joined.
+    this.rdpsnd = null;   // RdpSnd instance when audio is enabled and rdpsnd joined
+    this.cliprdr = null;  // ClipRdr instance when clipboard is enabled and cliprdr joined
 
     // Dynamic virtual channels (MS-RDPEDYC). Maps DVC channelId -> {name}. We only act on the
     // Display Control channel (MS-RDPEDISP) for live resolution/scale changes.
@@ -776,6 +894,17 @@ function RdpProtocol(transport, opts, callbacks) {
     this.displayControlChannelId = null;
     this._dvcFragBuf = null;    // reassembly for fragmented DVC data
     this._dvcFragName = null;
+
+    // Audio output dynamic virtual channel (AUDIO_PLAYBACK_DVC). Modern Windows carries rdpsnd over
+    // a DVC, not the static rdpsnd channel — so audio actually flows through here. Per-channel DVC
+    // data reassembly (waves are large and arrive as DATA_FIRST + DATA*).
+    this.audioDvcChannelId = null;
+    this.audioDvcCbId = 0;
+    this._dvcReasm = {};        // DVC channelId -> {parts, len, total}
+
+    // RDPEGFX graphics DVC. Accepted (to unlock the host's audio DVC) but not yet rendered.
+    this.gfxDvcChannelId = null;
+    this.gfxDvcCbId = 0;
 
     // Desktop scale factor (DPI). The RDP handshake (CS_CORE) carries no scale field, so the session
     // ALWAYS starts at 100% — these track the scale currently in effect on the server, not what the
@@ -798,7 +927,7 @@ RdpProtocol.prototype._err = function (m) { if (this.cb.onError) this.cb.onError
 // Kick off the handshake: send MCS connect-initial. Called once the relay is "ready".
 RdpProtocol.prototype.start = function () {
     this._log("MCS: Connect Initial");
-    const userData = clientUserData(this.selectedProtocol, this.width, this.height);
+    const userData = clientUserData(this.selectedProtocol, this.width, this.height, this.staticChannels);
     const connectInitial = mcsConnectInitialSerialize(userData);
     this.t.send(tpktX224Wrap(connectInitial));
     this.state = ST.BASIC_SETTINGS;
@@ -912,10 +1041,14 @@ RdpProtocol.prototype._onConnectResponse = function (r) {
     const parsed = parseServerUserData(ud);
     this.mcsChannelId = parsed.mcsChannelId;
     this.skipChannelJoin = parsed.skipChannelJoin;
-    // Map the positional SC_NET channel ids back to STATIC_CHANNELS names; remember drdynvc's id.
+    // Map the positional SC_NET channel ids back to our static channel names (both directions).
     this.staticChannelIds = {};
-    for (let i = 0; i < STATIC_CHANNELS.length && i < parsed.channelIds.length; i++) {
-        this.staticChannelIds[STATIC_CHANNELS[i]] = parsed.channelIds[i];
+    this.staticChannelById = {};
+    for (let i = 0; i < this.staticChannels.length && i < parsed.channelIds.length; i++) {
+        const name = this.staticChannels[i];
+        const id = parsed.channelIds[i];
+        this.staticChannelIds[name] = id;
+        this.staticChannelById[id] = name;
     }
     this.drdynvcChannelId = this.staticChannelIds["drdynvc"] || 0;
     this._log("MCS: Connect Response (global " + this.mcsChannelId + ", drdynvc " + this.drdynvcChannelId + ")");
@@ -940,9 +1073,9 @@ RdpProtocol.prototype._onAttachUserConfirm = function (r) {
         this._sendClientInfo();
         return;
     }
-    // Join the user channel, the global I/O channel, then each static virtual channel (drdynvc).
+    // Join the user channel, the global I/O channel, then each static virtual channel.
     this.joinQueue = [this.userId, this.mcsChannelId];
-    for (const name of STATIC_CHANNELS) {
+    for (const name of this.staticChannels) {
         const id = this.staticChannelIds[name];
         if (id) this.joinQueue.push(id);
     }
@@ -966,12 +1099,149 @@ RdpProtocol.prototype._onChannelJoinConfirm = function (r) {
         this._sendNextChannelJoin();
         return;
     }
+    this._initStaticChannelHandlers();
     this._sendClientInfo();
+};
+
+// Construct the rdpsnd/cliprdr handlers once their channels are joined. Each handler is given a
+// `send(payload)` that wraps the payload in a CHANNEL_PDU_HEADER and ships it on its MCS channel.
+RdpProtocol.prototype._initStaticChannelHandlers = function () {
+    const self = this;
+    if (this.opts.audio && this.staticChannelIds["rdpsnd"] && typeof RdpSnd !== "undefined") {
+        const id = this.staticChannelIds["rdpsnd"];
+        this.rdpsnd = new RdpSnd(
+            function (payload) { self._sendOnChannel(id, payload); },
+            { onLog: function (m) { self._log("rdpsnd: " + m); },
+              onWave: function (fmt, pcm) { if (self.cb.onAudio) self.cb.onAudio(fmt, pcm); },
+              onFormats: function (fmts) { if (self.cb.onAudioFormats) self.cb.onAudioFormats(fmts); } });
+    }
+    if (this.opts.clipboard && this.staticChannelIds["cliprdr"] && typeof ClipRdr !== "undefined") {
+        const id = this.staticChannelIds["cliprdr"];
+        this.cliprdr = new ClipRdr(
+            function (payload) { self._sendOnChannel(id, payload); },
+            { onLog: function (m) { self._log("cliprdr: " + m); },
+              onRemoteText: function (text) { if (self.cb.onClipboardText) self.cb.onClipboardText(text); } });
+    }
+};
+
+// ---- rdpdr: device redirection (MS-RDPEFS) -------------------------------------------------------
+// We redirect NO devices (no drives/printers/smartcards). We implement only the minimal init
+// handshake so the host completes device-redirection setup — which is what gates the
+// AUDIO_PLAYBACK_DVC dynamic channel (remote sound). Flow ([MS-RDPEFS] 3.2.5.1 / 3.3.5.1):
+//   server Announce Request → client Announce Reply (Client ID Confirm) → client Name Request →
+//   server Core Capability → client Core Capability Response (General capset only) →
+//   server Client ID Confirm → server User Logged On → client Device List Announce (empty, count 0).
+// rdpdr PDU header: Component(2 LE) + PacketId(2 LE). Values from FreeRDP rdpdr.h.
+const RDPDR_CTYP_CORE = 0x4472;
+const PAKID_CORE_SERVER_ANNOUNCE = 0x496E;
+const PAKID_CORE_CLIENTID_CONFIRM = 0x4343;
+const PAKID_CORE_CLIENT_NAME = 0x434E;
+const PAKID_CORE_DEVICELIST_ANNOUNCE = 0x4441;
+const PAKID_CORE_SERVER_CAPABILITY = 0x5350;
+const PAKID_CORE_CLIENT_CAPABILITY = 0x4350;
+const PAKID_CORE_USER_LOGGEDON = 0x554C;
+const RDPDR_CAP_GENERAL_TYPE = 0x0001;
+const RDPDR_GENERAL_CAPABILITY_VERSION_02 = 0x00000002;
+const RDPDR_VERSION_MAJOR = 0x0001;
+const RDPDR_VERSION_MINOR_RDP10X = 0x000D;
+
+RdpProtocol.prototype._sendRdpdr = function (payload) {
+    const id = this.staticChannelIds["rdpdr"];
+    if (id) this._sendOnChannel(id, payload);
+};
+
+RdpProtocol.prototype._onRdpdrData = function (payload) {
+    if (!payload || payload.length < 4) return;
+    const r = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+    const component = r.getUint16(0, true);
+    const packetId = r.getUint16(2, true);
+    if (component !== RDPDR_CTYP_CORE) return; // ignore printer-cache (RDPDR_CTYP_PRN) etc.
+
+    switch (packetId) {
+        case PAKID_CORE_SERVER_ANNOUNCE: {
+            // body: VersionMajor(2) VersionMinor(2) ClientId(4)
+            this._rdpdrClientId = (payload.length >= 8) ? r.getUint32(4, true) : 0;
+            this._log("rdpdr: server announce (clientId=" + this._rdpdrClientId + ")");
+            this._sendRdpdrAnnounceReply();
+            this._sendRdpdrClientName();
+            break;
+        }
+        case PAKID_CORE_SERVER_CAPABILITY: {
+            this._log("rdpdr: server capability → responding (general only)");
+            this._sendRdpdrCapabilityResponse();
+            break;
+        }
+        case PAKID_CORE_CLIENTID_CONFIRM:
+            this._log("rdpdr: client id confirm");
+            break;
+        case PAKID_CORE_USER_LOGGEDON:
+            this._log("rdpdr: user logged on → announcing empty device list");
+            this._sendRdpdrDeviceListAnnounce();
+            break;
+        default:
+            // device IO requests etc. — we have no devices, so nothing to answer.
+            break;
+    }
+};
+
+RdpProtocol.prototype._sendRdpdrAnnounceReply = function () {
+    const w = new ByteWriter();
+    w.u16le(RDPDR_CTYP_CORE);
+    w.u16le(PAKID_CORE_CLIENTID_CONFIRM);
+    w.u16le(RDPDR_VERSION_MAJOR);
+    w.u16le(RDPDR_VERSION_MINOR_RDP10X);
+    w.u32le(this._rdpdrClientId >>> 0);
+    this._sendRdpdr(w.toArray());
+};
+
+RdpProtocol.prototype._sendRdpdrClientName = function () {
+    const name = (PROJECT_NAME || "rdpweb");
+    const nameW = new ByteWriter().utf16le(name).toArray(); // no NUL
+    const cbName = nameW.length + 2; // include trailing UTF-16 NUL
+    const w = new ByteWriter();
+    w.u16le(RDPDR_CTYP_CORE);
+    w.u16le(PAKID_CORE_CLIENT_NAME);
+    w.u32le(1);        // unicodeFlag
+    w.u32le(0);        // codePage
+    w.u32le(cbName);   // computerNameLen (incl NUL)
+    w.bytes(nameW).u16le(0);
+    this._sendRdpdr(w.toArray());
+};
+
+RdpProtocol.prototype._sendRdpdrCapabilityResponse = function () {
+    const w = new ByteWriter();
+    w.u16le(RDPDR_CTYP_CORE);
+    w.u16le(PAKID_CORE_CLIENT_CAPABILITY);
+    w.u16le(1);  // numCapabilities (General only — we redirect no devices)
+    w.u16le(0);  // pad
+    // GENERAL_CAPS_SET: CAPABILITY_HEADER {type(2), length(2 = 8 header + 36 body), version(4)} + body.
+    w.u16le(RDPDR_CAP_GENERAL_TYPE);
+    w.u16le(8 + 36);
+    w.u32le(RDPDR_GENERAL_CAPABILITY_VERSION_02);
+    w.u32le(0);            // osType (ignored)
+    w.u32le(0);            // osVersion (must be 0)
+    w.u16le(RDPDR_VERSION_MAJOR); // protocolMajorVersion
+    w.u16le(RDPDR_VERSION_MINOR_RDP10X); // protocolMinorVersion
+    w.u32le(0x0000FFFF);   // ioCode1 (all IRP_MJ_*)
+    w.u32le(0);            // ioCode2 (reserved, 0)
+    w.u32le(0x00000007);   // extendedPDU = REMOVE | DISPLAY_NAME | USER_LOGGEDON
+    w.u32le(0x00000001);   // extraFlags1 = ENABLE_ASYNCIO
+    w.u32le(0);            // extraFlags2 (reserved, 0)
+    w.u32le(0);            // SpecialTypeDeviceCap (no special devices)
+    this._sendRdpdr(w.toArray());
+};
+
+RdpProtocol.prototype._sendRdpdrDeviceListAnnounce = function () {
+    const w = new ByteWriter();
+    w.u16le(RDPDR_CTYP_CORE);
+    w.u16le(PAKID_CORE_DEVICELIST_ANNOUNCE);
+    w.u32le(0); // deviceCount = 0 (we redirect nothing)
+    this._sendRdpdr(w.toArray());
 };
 
 RdpProtocol.prototype._sendClientInfo = function () {
     this._log("RDP: Client Info");
-    const info = clientInfoPdu(this.opts.domain, this.opts.username, this.opts.password);
+    const info = clientInfoPdu(this.opts.domain, this.opts.username, this.opts.password, this.performanceFlags);
     this.t.send(tpktX224Wrap(mcsSendDataSerialize(this.userId, this.mcsChannelId, info)));
     this.state = ST.LICENSING;
 };
@@ -1109,6 +1379,17 @@ RdpProtocol.prototype._onActiveSlowPath = function (r) {
         if (this.drdynvcChannelId && this._lastChannelId === this.drdynvcChannelId) {
             return this._onDrdynvcData(r);
         }
+        // rdpsnd / cliprdr static channels: strip+reassemble the CHANNEL_PDU_HEADER, then dispatch
+        // the complete payload to the channel handler.
+        const svcName = this.staticChannelById[this._lastChannelId];
+        if (svcName === "rdpsnd" || svcName === "cliprdr" || svcName === "rdpdr") {
+            const payload = this._reassembleSvc(svcName, r);
+            if (!payload) return; // more fragments pending
+            if (svcName === "rdpsnd" && this.rdpsnd) this.rdpsnd.onData(payload);
+            else if (svcName === "cliprdr" && this.cliprdr) this.cliprdr.onData(payload);
+            else if (svcName === "rdpdr") this._onRdpdrData(payload);
+            return;
+        }
 
         // Peek the share-control PDU type (low nibble of the 2nd u16). Some hosts prefix a 4-byte
         // security header before the ShareControlHeader; if the type at offset+2 isn't a known PDU
@@ -1208,6 +1489,13 @@ const DVC_CMD_CLOSE = 0x04;
 const DVC_CMD_CAPABILITIES = 0x05;
 
 const DISPLAY_CONTROL_CHANNEL_NAME = "Microsoft::Windows::RDS::DisplayControl";
+// Dynamic-channel name for remote audio output (MS-RDPEA over MS-RDPEDYC). Modern Windows streams
+// rdpsnd through this DVC rather than the static "rdpsnd" channel.
+const AUDIO_PLAYBACK_DVC_NAME = "AUDIO_PLAYBACK_DVC";
+// RDPEGFX graphics pipeline DVC ([MS-RDPEGFX]). We accept it (and answer its capability exchange)
+// only to unlock the host's rich DVC set (which carries audio). Surface graphics are not yet
+// rendered — see _onGfxData.
+const RDPGFX_DVC_NAME = "Microsoft::Windows::RDS::Graphics";
 
 // Wrap a virtual-channel payload in a CHANNEL_PDU_HEADER and send it on `channelId` via MCS
 // send-data-request. Payloads here are small (caps/create responses, monitor layout) and fit a
@@ -1218,6 +1506,33 @@ RdpProtocol.prototype._sendOnChannel = function (channelId, payload) {
     w.u32le(CHANNEL_FLAG_FIRST | CHANNEL_FLAG_LAST); // flags
     w.bytes(payload);
     this.t.send(tpktX224Wrap(mcsSendDataSerialize(this.userId, channelId, w.toArray())));
+};
+
+// Reassemble a static virtual channel message ([MS-RDPBCGR] 2.2.6.1): each MCS send carries a
+// CHANNEL_PDU_HEADER {length(4), flags(4)} then a chunk of the message; FIRST..LAST flags delimit a
+// message split across chunks. Returns the complete payload Uint8Array when LAST arrives, else null.
+// `r` is positioned at the CHANNEL_PDU_HEADER.
+RdpProtocol.prototype._reassembleSvc = function (name, r) {
+    const totalLen = r.u32le();          // CHANNEL_PDU_HEADER.length (whole message)
+    const flags = r.u32le();             // CHANNEL_FLAG_FIRST / _LAST
+    const chunk = r.bytes(r.remaining()).slice(); // detach from the rx buffer
+
+    const first = (flags & CHANNEL_FLAG_FIRST) !== 0;
+    const last = (flags & CHANNEL_FLAG_LAST) !== 0;
+
+    if (first && last) return chunk;     // single-chunk (the common case)
+
+    if (first) { this._svcReasm[name] = { parts: [chunk], len: chunk.length, total: totalLen }; return null; }
+    const acc = this._svcReasm[name];
+    if (!acc) return null;               // a NEXT/LAST without a FIRST; drop
+    acc.parts.push(chunk); acc.len += chunk.length;
+    if (!last) return null;
+
+    const out = new Uint8Array(acc.len);
+    let off = 0;
+    for (const p of acc.parts) { out.set(p, off); off += p.length; }
+    this._svcReasm[name] = null;
+    return out;
 };
 
 // Encode a drdynvc channelId field of the smallest size, returning {cbId, bytes}.
@@ -1304,13 +1619,18 @@ RdpProtocol.prototype._dvcOnCreate = function (r, cbId) {
         if (c === 0) break;
         name += String.fromCharCode(c);
     }
-    // Only accept the Display Control channel — it's the one DVC we actually implement (live
-    // resolution/scale via MS-RDPEDISP). EVERY OTHER dynamic channel (ECHO, CoreInput, Video,
+    // Accept the channels we actually implement: Display Control (live resolution/scale via
+    // MS-RDPEDISP) and, when audio is enabled, the audio output channel (AUDIO_PLAYBACK_DVC —
+    // modern Windows streams rdpsnd here). EVERY OTHER dynamic channel (ECHO, CoreInput, Video,
     // Geometry, Input, TextInput, …) is REJECTED with a failure creationStatus, so the server keeps
     // that functionality on the legacy fastpath path (which we render/handle) instead of routing it
     // through a DVC and then stalling while it waits for responses we can't produce (e.g. ECHO
     // keepalives). Accepting channels we don't service is what made the server go silent.
-    const accept = (name === DISPLAY_CONTROL_CHANNEL_NAME);
+    const isAudio = (name === AUDIO_PLAYBACK_DVC_NAME) && this.opts.audio;
+    // Accept the RDPEGFX Graphics channel only to keep the host's rich DVC set (incl. audio) alive.
+    // We answer its capability exchange but do not render its surfaces yet.
+    const isGfx = (name === RDPGFX_DVC_NAME);
+    const accept = (name === DISPLAY_CONTROL_CHANNEL_NAME) || isAudio || isGfx;
 
     // The server REUSES dynamic channel ids: id 11 may be Geometry, then DisplayControl, then Geometry
     // again over the life of the session. A new Create for an id we currently hold means the server has
@@ -1339,13 +1659,67 @@ RdpProtocol.prototype._dvcOnCreate = function (r, cbId) {
     if (accept) {
         this.dvcByName[name] = channelId;
         this.dvcById[channelId] = name;
-        this.displayControlChannelId = channelId;
-        this.displayControlCbId = cbId; // reuse the same channel-id width when we send DATA back
         this._log("drdynvc: accepted '" + name + "' id=" + channelId);
-        if (this.cb.onDisplayControlReady) this.cb.onDisplayControlReady();
+        if (isAudio) {
+            this.audioDvcChannelId = channelId;
+            this.audioDvcCbId = cbId; // echo the same channel-id width when we send DATA back
+            this._initAudioDvc(channelId, cbId);
+        } else if (isGfx) {
+            this.gfxDvcChannelId = channelId;
+            this.gfxDvcCbId = cbId;
+            this._gfxAdvertiseCaps(channelId, cbId);
+        } else {
+            this.displayControlChannelId = channelId;
+            this.displayControlCbId = cbId;
+            if (this.cb.onDisplayControlReady) this.cb.onDisplayControlReady();
+        }
     } else {
         this._log("drdynvc: rejected '" + name + "' id=" + channelId);
     }
+};
+
+// RDPEGFX ([MS-RDPEGFX]) — minimal participation to keep the Graphics channel (and thus the host's
+// audio DVC) alive. We send a single CAPS_ADVERTISE and otherwise ignore inbound surface graphics;
+// rendering over RDPEGFX is a future task. Screen rendering still relies on legacy bitmap fastpath.
+const RDPGFX_CMDID_CAPSADVERTISE = 0x0012;
+const RDPGFX_CAPVERSION_8 = 0x00080004;
+
+// Send RDPGFX_CAPS_ADVERTISE_PDU on the graphics DVC: RDPGFX_HEADER {cmdId, flags, pduLength} then
+// capsSetCount + one RDPGFX_CAPSET {version, capsDataLength, capsData}. We advertise the oldest
+// capset (v8) with a 4-byte all-zero flags blob — the simplest the host accepts.
+RdpProtocol.prototype._gfxAdvertiseCaps = function (channelId, cbId) {
+    const caps = new ByteWriter();
+    caps.u16le(1);                       // capsSetCount
+    caps.u32le(RDPGFX_CAPVERSION_8);     // version
+    caps.u32le(4);                       // capsDataLength
+    caps.u32le(0x00000000);              // capsData: RDPGFX_CAPSET_VERSION8.flags = 0
+    const capsArr = caps.toArray();
+
+    const pdu = new ByteWriter();
+    pdu.u16le(RDPGFX_CMDID_CAPSADVERTISE); // cmdId
+    pdu.u16le(0x0000);                     // flags
+    pdu.u32le(8 + capsArr.length);         // pduLength (header 8 + body)
+    pdu.bytes(capsArr);
+
+    const dvc = dvcBuildPdu(DVC_CMD_DATA, channelId, pdu.toArray(), 0, cbId);
+    this._sendOnChannel(this.drdynvcChannelId, dvc);
+    this._log("rdpgfx: sent caps advertise (v8) — surfaces not rendered yet");
+};
+
+// Build the RdpSnd handler bound to the audio DVC. Its send() wraps each rdpsnd PDU as a drdynvc
+// DATA PDU on the audio channel (then a CHANNEL_PDU_HEADER on drdynvc, added by _sendOnChannel).
+RdpProtocol.prototype._initAudioDvc = function (channelId, cbId) {
+    const self = this;
+    if (typeof RdpSnd === "undefined") return;
+    this.rdpsnd = new RdpSnd(
+        function (payload) {
+            const dvc = dvcBuildPdu(DVC_CMD_DATA, channelId, payload, 0, cbId);
+            self._sendOnChannel(self.drdynvcChannelId, dvc);
+        },
+        { onLog: function (m) { self._log("rdpsnd[dvc]: " + m); },
+          onWave: function (fmt, pcm) { if (self.cb.onAudio) self.cb.onAudio(fmt, pcm); },
+          onFormats: function (fmts) { if (self.cb.onAudioFormats) self.cb.onAudioFormats(fmts); } });
+    this._log("rdpsnd: bound to AUDIO_PLAYBACK_DVC id=" + channelId);
 };
 
 RdpProtocol.prototype._dvcOnClose = function (r, cbId) {
@@ -1353,19 +1727,44 @@ RdpProtocol.prototype._dvcOnClose = function (r, cbId) {
     const name = this.dvcById[channelId];
     if (name) { delete this.dvcByName[name]; delete this.dvcById[channelId]; }
     if (channelId === this.displayControlChannelId) this.displayControlChannelId = null;
+    if (channelId === this.audioDvcChannelId) { this.audioDvcChannelId = null; this.rdpsnd = null; }
+    if (channelId === this.gfxDvcChannelId) this.gfxDvcChannelId = null;
+    delete this._dvcReasm[channelId];
 };
 
-// DVC data (possibly fragmented via DATA_FIRST + DATA). We only interpret data on the Display
-// Control channel (server CAPS); everything else is ignored.
+// DVC data (possibly fragmented via DATA_FIRST + DATA). DisplayControl PDUs are tiny (single-chunk),
+// but audio waves are large and arrive as DATA_FIRST followed by DATA chunks — so reassemble per
+// channel using the DATA_FIRST total-length field before dispatching a complete message.
 RdpProtocol.prototype._dvcOnData = function (r, cbId, isFirst, sp) {
     const channelId = dvcReadChannelId(r, cbId);
+    let total = 0;
     if (isFirst) {
         // DATA_FIRST carries a total length field whose width is encoded in sp (0->1B,1->2B,2->4B).
-        if (sp === 0) r.u8(); else if (sp === 1) r.u16le(); else r.u32le();
+        if (sp === 0) total = r.u8(); else if (sp === 1) total = r.u16le(); else total = r.u32le();
     }
-    const data = r.bytes(r.remaining());
-    if (channelId !== this.displayControlChannelId) return; // only Display Control is interpreted
-    this._onDisplayControlData(data);
+    const chunk = r.bytes(r.remaining()).slice();
+
+    let data;
+    if (isFirst) {
+        if (chunk.length >= total) { data = chunk; }       // whole message in the first PDU
+        else { this._dvcReasm[channelId] = { parts: [chunk], len: chunk.length, total: total }; return; }
+    } else {
+        const acc = this._dvcReasm[channelId];
+        if (acc) {
+            acc.parts.push(chunk); acc.len += chunk.length;
+            if (acc.len < acc.total) return;               // more chunks pending
+            data = new Uint8Array(acc.len);
+            let off = 0;
+            for (const p of acc.parts) { data.set(p, off); off += p.length; }
+            delete this._dvcReasm[channelId];
+        } else {
+            data = chunk;                                   // unfragmented DATA (no prior FIRST)
+        }
+    }
+
+    if (channelId === this.displayControlChannelId) return this._onDisplayControlData(data);
+    if (channelId === this.audioDvcChannelId && this.rdpsnd) return this.rdpsnd.onData(data);
+    if (channelId === this.gfxDvcChannelId) return; // RDPEGFX surfaces: accepted but not rendered yet
 };
 
 // ================================================================================================
@@ -1461,6 +1860,15 @@ RdpProtocol.prototype.sendMonitorLayout = function (width, height, desktopScale,
     // only because our Confirm Active advertises desktopResizeFlag=1 — without that it would silently
     // drop the layout. No refresh rect is needed: the reactivation repaints the whole desktop.
     return true;
+};
+
+// ================================================================================================
+// Virtual-channel client API (clipboard out-bound)
+// ================================================================================================
+// Offer local clipboard text to the remote session (the remote can then paste it). No-op if the
+// clipboard channel isn't active. See ClipRdr.
+RdpProtocol.prototype.sendClipboardText = function (text) {
+    if (this.cliprdr) this.cliprdr.setLocalText(text);
 };
 
 // ================================================================================================

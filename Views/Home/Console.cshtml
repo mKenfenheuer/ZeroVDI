@@ -10,19 +10,39 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>@resourceName — RDP Console</title>
+    <link rel="stylesheet" href="~/lib/fontawesome/css/all.min.css" />
     <link rel="stylesheet" href="~/lib/bootstrap/dist/css/bootstrap.min.css" />
     <style>
         html, body { height: 100%; margin: 0; background: #1a1a1a; color: #eee; overflow: hidden; }
-        #toolbar {
-            position: fixed; top: 0; left: 0; right: 0; height: 36px; z-index: 20;
-            display: flex; align-items: center; gap: .75rem; padding: 0 .75rem;
-            background: #222; border-bottom: 1px solid #000; font-size: .85rem;
+
+        /* Floating session control bar: auto-minimizes to a slim pill at the top center and
+           auto-hides while you work; hovering the top edge (or moving the mouse) reveals it. */
+        #floatbar {
+            position: fixed; top: 8px; left: 50%; transform: translateX(-50%);
+            z-index: 40; display: flex; align-items: center; gap: .4rem;
+            padding: .25rem .4rem; border-radius: 999px;
+            background: rgba(28,28,30,.92); border: 1px solid rgba(255,255,255,.12);
+            box-shadow: 0 4px 18px rgba(0,0,0,.45); backdrop-filter: blur(6px);
+            font-size: .82rem; transition: opacity .25s ease, transform .25s ease;
+            max-width: 92vw;
         }
-        #toolbar .name { font-weight: 600; }
-        #toolbar .status { color: #9bd; }
-        #toolbar .spacer { flex: 1 1 auto; }
+        /* Auto-hidden: slides up out of view and ignores pointer events until revealed. */
+        #floatbar.hidden { opacity: 0; transform: translateX(-50%) translateY(-130%); pointer-events: none; }
+        /* Minimized: collapses to just the grip + name + status; the controls are hidden. */
+        #floatbar.min #floatbar-controls { display: none; }
+        #floatbar .grip {
+            cursor: pointer; padding: 0 .35rem; color: #9aa0a6; user-select: none; font-size: 1rem;
+            line-height: 1;
+        }
+        #floatbar .name { font-weight: 600; white-space: nowrap; overflow: hidden;
+            text-overflow: ellipsis; max-width: 22vw; margin-left: 10px }
+        #floatbar .status { color: #9bd; white-space: nowrap; }
+        #floatbar-controls { display: flex; align-items: center; gap: .35rem; }
+        #floatbar .btn { --bs-btn-padding-y: .15rem; --bs-btn-padding-x: .5rem; --bs-btn-font-size: .78rem; }
+        /* A thin invisible strip along the top edge to reveal the bar when it's auto-hidden. */
+        #reveal-zone { position: fixed; top: 0; left: 0; right: 0; height: 14px; z-index: 39; }
         #screen-wrap {
-            position: absolute; top: 36px; left: 0; right: 0; bottom: 0;
+            position: absolute; top: 0; left: 0; right: 0; bottom: 0;
             overflow: hidden; display: flex; align-items: center; justify-content: center;
             background: #000;
         }
@@ -43,15 +63,39 @@
         .form-control { background: #1e1e1e; color: #eee; border-color: #555; }
         .form-control:focus { background: #1e1e1e; color: #eee; }
         #login-error { color: #f88; font-size: .85rem; min-height: 1.2em; }
+        .btn-session-control {
+            appearance: none;
+            background: transparent;
+            border: none;
+            color: #fff;
+            padding: 6px 10px;
+            cursor: pointer;
+            border-radius: 1rem;
+            transition: background-color 0.2s ease;
+        }
+
+        .btn-session-control:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+
+        .fa-red {
+            color: #f00;
+        }
     </style>
 </head>
 <body>
-    <div id="toolbar">
+    <div id="reveal-zone"></div>
+    <div id="floatbar" class="hidden">
         <span class="name">@resourceName</span>
-        <span class="status" id="status-text">Not connected</span>
-        <span class="spacer"></span>
-        <button class="btn btn-sm btn-outline-light" id="btn-fullscreen" type="button">Fullscreen</button>
-        <button class="btn btn-sm btn-outline-danger" id="btn-disconnect" type="button" disabled>Disconnect</button>
+        <span id="floatbar-controls">
+            <button class="btn-session-control" id="btn-clip" type="button"
+                    title="Send your clipboard to the remote session"><i class="fa-solid fa-clipboard"></i></button>
+            <button class="btn-session-control" id="btn-fullscreen" type="button"><i class="fa-solid fa-expand"></i></button>
+            <button class="btn-session-control" id="btn-mute" type="button" actiontitle="Mute / unmute remote sound"><i class="fa-solid fa-volume"></i></button>
+            <button class="btn-session-control fa-red" id="btn-disable-video" type="button"><i class="fa-solid fa-video-slash"></i></button>
+            <button class="btn-session-control fa-red" id="btn-disable-microphone" type="button"><i class="fa-solid fa-microphone-slash"></i></button>
+            <button class="btn-session-control fa-red" id="btn-disconnect" type="button" disabled><i class="fa-solid fa-link-slash"></i></button>
+        </span>
     </div>
 
     <div id="screen-wrap">
@@ -76,6 +120,58 @@
                     <label for="vm-domain">Domain <span class="text-muted">(optional)</span></label>
                     <input class="form-control form-control-sm" id="vm-domain" />
                 </div>
+
+                <details class="mb-2">
+                    <summary style="cursor:pointer; font-size:.82rem; color:#bbb;">Session options</summary>
+                    <div class="mt-2">
+                        <div class="form-check form-check-sm">
+                            <input class="form-check-input" type="checkbox" id="opt-audio" checked />
+                            <label class="form-check-label" for="opt-audio" style="font-size:.82rem;">Remote sound</label>
+                        </div>
+                        <div class="form-check form-check-sm">
+                            <input class="form-check-input" type="checkbox" id="opt-clipboard" checked />
+                            <label class="form-check-label" for="opt-clipboard" style="font-size:.82rem;">Clipboard sync</label>
+                        </div>
+
+                        <div class="mt-2" style="font-size:.78rem; color:#999;">Visual quality</div>
+                        @* Performance flags. Checked = the named eye-candy / quality feature is ON.
+                           Defaults below favour better visuals (font smoothing + composition, all
+                           eye-candy left on). The data-perf attribute holds the RDP flag bit. *@
+                        <div class="form-check form-check-sm">
+                            <input class="form-check-input perf-flag" type="checkbox" id="perf-font" data-perf="ENABLE_FONT_SMOOTHING" checked />
+                            <label class="form-check-label" for="perf-font" style="font-size:.82rem;">Font smoothing (anti-alias)</label>
+                        </div>
+                        <div class="form-check form-check-sm">
+                            <input class="form-check-input perf-flag" type="checkbox" id="perf-comp" data-perf="ENABLE_DESKTOP_COMPOSITION" checked />
+                            <label class="form-check-label" for="perf-comp" style="font-size:.82rem;">Desktop composition (Aero)</label>
+                        </div>
+                        <div class="form-check form-check-sm">
+                            <input class="form-check-input perf-flag" type="checkbox" id="perf-wallpaper" data-perf="DISABLE_WALLPAPER" data-invert="1" checked />
+                            <label class="form-check-label" for="perf-wallpaper" style="font-size:.82rem;">Wallpaper</label>
+                        </div>
+                        <div class="form-check form-check-sm">
+                            <input class="form-check-input perf-flag" type="checkbox" id="perf-theming" data-perf="DISABLE_THEMING" data-invert="1" checked />
+                            <label class="form-check-label" for="perf-theming" style="font-size:.82rem;">Themes</label>
+                        </div>
+                        <div class="form-check form-check-sm">
+                            <input class="form-check-input perf-flag" type="checkbox" id="perf-drag" data-perf="DISABLE_FULLWINDOWDRAG" data-invert="1" checked />
+                            <label class="form-check-label" for="perf-drag" style="font-size:.82rem;">Show window contents while dragging</label>
+                        </div>
+                        <div class="form-check form-check-sm">
+                            <input class="form-check-input perf-flag" type="checkbox" id="perf-menu" data-perf="DISABLE_MENUANIMATIONS" data-invert="1" checked />
+                            <label class="form-check-label" for="perf-menu" style="font-size:.82rem;">Menu animations</label>
+                        </div>
+                        <div class="form-check form-check-sm">
+                            <input class="form-check-input perf-flag" type="checkbox" id="perf-cursorshadow" data-perf="DISABLE_CURSOR_SHADOW" data-invert="1" checked />
+                            <label class="form-check-label" for="perf-cursorshadow" style="font-size:.82rem;">Cursor shadow</label>
+                        </div>
+                        <div class="form-check form-check-sm">
+                            <input class="form-check-input perf-flag" type="checkbox" id="perf-cursorsettings" data-perf="DISABLE_CURSORSETTINGS" data-invert="1" checked />
+                            <label class="form-check-label" for="perf-cursorsettings" style="font-size:.82rem;">Cursor blink</label>
+                        </div>
+                    </div>
+                </details>
+
                 <div id="login-error"></div>
                 <div class="d-grid mt-2">
                     <button class="btn btn-primary btn-sm" type="submit" id="btn-connect">Connect</button>
@@ -92,6 +188,8 @@
         // locateFile lets the emscripten loader find the .wasm next to the .js under /lib/rdpweb/rle/.
         var Module = { locateFile: function (p) { return "/lib/rdpweb/rle/" + p; } };
     </script>
+    <script src="~/lib/fontawesome/js/all.min.js"></script>
+
     <script src="~/lib/rdpweb/rle/ms-rle-wasm.js"></script>
 
     <script src="~/lib/rdpweb/binary.js"></script>
@@ -103,42 +201,49 @@
     <script src="~/lib/rdpweb/input/keymap.js"></script>
     <script src="~/lib/rdpweb/input/keyboard.js"></script>
     <script src="~/lib/rdpweb/input/mouse.js"></script>
+    <script src="~/lib/rdpweb/rdpsnd.js"></script>
+    <script src="~/lib/rdpweb/cliprdr.js"></script>
     <script src="~/lib/rdpweb/protocol.js"></script>
     <script src="~/lib/rdpweb/client.js"></script>
 
     <script>
         (function () {
             var wsUrl = "/ws/rdp/@resourceId";
-            var statusText = document.getElementById("status-text");
             var loginOverlay = document.getElementById("login-overlay");
             var loginError = document.getElementById("login-error");
             var btnConnect = document.getElementById("btn-connect");
             var btnDisconnect = document.getElementById("btn-disconnect");
             var btnFullscreen = document.getElementById("btn-fullscreen");
+            var btnMute = document.getElementById("btn-mute");
+            var btnDisableMic = document.getElementById("btn-disable-microphone");
+            var btnDisableVideo = document.getElementById("btn-disable-video");
+            var btnClip = document.getElementById("btn-clip");
+            var floatbar = document.getElementById("floatbar");
+            var revealZone = document.getElementById("reveal-zone");
 
             var screenWrap = document.getElementById("screen-wrap");
             var client = new Client(wsUrl, "canvas");
             client.setStatusCallback(function (status, message) {
                 switch (status) {
                     case "connecting":
-                        statusText.textContent = message || "Connecting…";
                         break;
                     case "ready":
-                        statusText.textContent = "Connected";
                         loginOverlay.style.display = "none";
                         btnDisconnect.disabled = false;
+                        showBar();          // reveal the floating bar on connect, then auto-hide
+                        scheduleAutoHide();
                         break;
                     case "error":
-                        statusText.textContent = "Error";
                         loginError.textContent = message || "Connection failed";
                         loginOverlay.style.display = "flex";
                         btnConnect.disabled = false;
                         btnConnect.textContent = "Connect";
                         btnDisconnect.disabled = true;
+                        floatbar.classList.add("hidden");
                         break;
                     case "closed":
-                        statusText.textContent = "Disconnected";
                         btnDisconnect.disabled = true;
+                        showBar();
                         break;
                 }
             });
@@ -152,11 +257,29 @@
                 if (!user) { loginError.textContent = "Username is required."; return; }
                 btnConnect.disabled = true;
                 btnConnect.textContent = "Connecting…";
+
+                // Build the RDP performanceFlags from the checkboxes. For a plain ENABLE_* flag,
+                // checked = set the bit. For a DISABLE_* flag marked data-invert, the checkbox means
+                // "keep this eye-candy" — so UNchecked sets the DISABLE bit.
+                var perf = 0;
+                var PERF = window.RDP_PERF || {};
+                document.querySelectorAll(".perf-flag").forEach(function (cb) {
+                    var bit = PERF[cb.getAttribute("data-perf")] || 0;
+                    var invert = cb.getAttribute("data-invert") === "1";
+                    if (invert ? !cb.checked : cb.checked) perf |= bit;
+                });
+
+                client.setAudioEnabled(document.getElementById("opt-audio").checked);
+                client.setClipboardEnabled(document.getElementById("opt-clipboard").checked);
+                // Create/resume the AudioContext now, inside this user gesture — browsers block audio
+                // that starts without one, and the first wave arrives long after the click.
+                if (client.audioEnabled) client.primeAudio();
+
                 // Pick a desktop resolution that fills the visible area in *device* pixels (crisp on
                 // HiDPI), bake it into the handshake by sizing the canvas before connecting.
                 var size = client.chooseDesktopSize(screenWrap);
                 client.applyDesktopSize(screenWrap, size);
-                client.connect({ user: user, password: pass, domain: domain });
+                client.connect({ user: user, password: pass, domain: domain, performanceFlags: perf });
             });
 
             btnDisconnect.addEventListener("click", function () { client.disconnect(); });
@@ -167,6 +290,56 @@
                     document.exitFullscreen();
                 }
             });
+            btnMute.addEventListener("click", function () {
+                var muted = !(client.muted);
+                client.setMuted(muted);
+                if(muted) {
+                    btnMute.classList.add("fa-red");
+                } else {
+                    btnMute.classList.remove("fa-red");
+                }
+                btnMute.innerHTML = muted ? '<i class="fa-solid fa-volume-xmark"></i>' : '<i class="fa-solid fa-volume"></i>';
+            });
+            btnDisableMic.addEventListener("click", function () {
+                var enabled = !(client.microphoneEnabled);
+                client.setMicrophoneEnabled(enabled);
+                if(!enabled) {
+                    btnDisableMic.classList.add("fa-red");
+                } else {
+                    btnDisableMic.classList.remove("fa-red");
+                }
+                btnDisableMic.innerHTML = enabled ? '<i class="fa-solid fa-microphone"></i>' : '<i class="fa-solid fa-microphone-slash"></i>';
+            });
+            btnDisableVideo.addEventListener("click", function () {
+                var enabled = !(client.cameraEnabled);
+                client.setCameraEnabled(enabled);
+                if(!enabled) {
+                    btnDisableVideo.classList.add("fa-red");
+                } else {
+                    btnDisableVideo.classList.remove("fa-red");
+                }
+                btnDisableVideo.innerHTML = enabled ? '<i class="fa-solid fa-video"></i>' : '<i class="fa-solid fa-video-slash"></i>';
+            });
+            btnClip.addEventListener("click", function () { client.pushLocalClipboard(); });
+
+            // ---- floating bar: auto-hide + click-to-minimize ------------------------------------
+            // The bar reveals on mouse activity near the top, stays while hovered, and auto-hides a
+            // couple of seconds after you stop interacting with it. The grip toggles a minimized
+            // (name + status only) state that persists across reveals.
+            var hideTimer = null;
+            function showBar() { floatbar.classList.remove("hidden"); }
+            function scheduleAutoHide() {
+                if (hideTimer) clearTimeout(hideTimer);
+                hideTimer = setTimeout(function () {
+                    if (!client.connected) return;     // keep it visible while disconnected
+                    if (floatbar.matches(":hover")) { scheduleAutoHide(); return; }
+                    floatbar.classList.add("hidden");
+                }, 2200);
+            }
+            floatbar.addEventListener("mouseenter", function () { if (hideTimer) clearTimeout(hideTimer); });
+            floatbar.addEventListener("mouseleave", scheduleAutoHide);
+            // Reveal when the pointer reaches the top edge of the screen.
+            revealZone.addEventListener("mouseenter", function () { showBar(); scheduleAutoHide(); });
             // Live remote resolution changes (MS-RDPEDISP). On a *genuine, settled* viewport change we
             // ask the server for a new resolution that fills the area. Guards against the spurious
             // resize/reflow events that fire right after connect (which must NOT trigger a layout —
