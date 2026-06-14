@@ -620,7 +620,12 @@ function capBitmap(width, height) {
     d.u16le(0x0001); d.u16le(0x0001); d.u16le(0x0001); // receive1/4/8 BitsPerPixel
     d.u16le(width); d.u16le(height);
     d.u16le(0);      // padding
-    d.u16le(0);      // desktopResizeFlag
+    // desktopResizeFlag = 1: we DO support desktop resizes (the Deactivation-Reactivation Sequence,
+    // handled in _beginReactivation / _onDemandActiveControl). FreeRDP and mstsc both advertise this.
+    // With it 0, the server thinks the client can't be resized: it best-effort applies the FIRST
+    // MONITOR_LAYOUT in place but silently DROPS every subsequent one (the second-resize-goes-black
+    // bug) because it would otherwise have to reactivate, which we told it we can't handle.
+    d.u16le(1);      // desktopResizeFlag
     d.u16le(0x0001); // bitmapCompressionFlag
     d.u8(0);         // highColorFlags
     d.u8(0);         // drawingFlags
@@ -1123,8 +1128,6 @@ RdpProtocol.prototype._onActiveSlowPath = function (r) {
         }
         r.o = bodyO;
 
-        this._log("RDP: active slow-path PDU type 0x" + pduType.toString(16) + " on channel " + this._lastChannelId);
-
         if (pduType === (PDUTYPE_DEMANDACTIVE & 0xf)) {
             // Server-initiated reactivation WITHOUT a DEACTIVATE_ALL — this host re-demands active
             // after a MONITOR_LAYOUT change. Re-confirm active + re-finalize at the new size so the
@@ -1163,12 +1166,6 @@ RdpProtocol.prototype._handleFastPath = function (fpHeader, payload) {
     // makes the screen freeze after a resize.
     if (this.state !== ST.ACTIVE && this.state !== ST.FINALIZATION) {
         return;
-    }
-    // DIAGNOSTIC: log the first few fastpath updates after a monitor layout, so we can tell whether
-    // the server keeps streaming graphics post-resize (vs. going silent). Remove once resize is fixed.
-    if (this._fpLogBudget > 0) {
-        this._fpLogBudget--;
-        this._log("RDP: fastpath update (" + payload.length + " bytes) state=" + this.state);
     }
     // Hand the whole updates blob to the renderer; client.js walks the individual updates.
     const copy = payload.slice(); // detach from the reassembly buffer
@@ -1269,8 +1266,6 @@ RdpProtocol.prototype._onDrdynvcData = function (r) {
     const sp = (header >> 2) & 0x3;
     const cbId = header & 0x3;
 
-    if (this._dvcLogBudget > 0) { this._dvcLogBudget--; this._log("drdynvc: rx cmd=" + cmd + " sp=" + sp + " cbId=" + cbId); }
-
     switch (cmd) {
         case DVC_CMD_CAPABILITIES: return this._dvcOnCapabilities(r);
         case DVC_CMD_CREATE: return this._dvcOnCreate(r, cbId);
@@ -1330,8 +1325,14 @@ RdpProtocol.prototype._dvcOnCreate = function (r, cbId) {
         delete this.dvcById[channelId];
     }
 
-    // creationStatus: 0 = success; 0xC0000001 (STATUS_UNSUCCESSFUL) = "won't use this channel".
-    const status = new ByteWriter().u32le(accept ? 0x00000000 : 0xC0000001).toArray();
+    // creationStatus: 0 = success; for a refusal, use 0xC0000225 (STATUS_NOT_FOUND) — the exact code
+    // mstsc and FreeRDP send when there's no listener for a channel (FreeRDP drdynvc_main.c comments it
+    // as "same code used by mstsc"). Using 0xC0000001 (STATUS_UNSUCCESSFUL) instead made this host wedge
+    // its entire output stream on the SECOND live resize: after applying the first MONITOR_LAYOUT the
+    // host re-creates its per-resolution DVCs (Geometry, etc.); our non-standard refusal code left the
+    // host's DVC manager in a state where it silently dropped all subsequent slow-path input (the next
+    // monitor layout) and stopped sending output. STATUS_NOT_FOUND is what the host expects.
+    const status = new ByteWriter().u32le(accept ? 0x00000000 : 0xC0000225).toArray();
     const pdu = dvcBuildPdu(DVC_CMD_CREATE, channelId, status, 0, cbId);
     this._sendOnChannel(this.drdynvcChannelId, pdu);
 
@@ -1379,7 +1380,6 @@ RdpProtocol.prototype._onDisplayControlData = function (data) {
     if (r.remaining() < 8) return;
     const type = r.u32le();
     /* length */ r.u32le();
-    this._log("RDPEDISP: inbound data type=0x" + type.toString(16) + " len=" + data.length);
     if (type === DISPLAYCONTROL_PDU_TYPE_CAPS) {
         // CAPS: maxNumMonitors(4) maxMonitorAreaFactorA(4) maxMonitorAreaFactorB(4).
         this.displayMaxMonitors = r.remaining() >= 4 ? r.u32le() : 1;
@@ -1454,16 +1454,12 @@ RdpProtocol.prototype.sendMonitorLayout = function (width, height, desktopScale,
     // static-channel PDU on drdynvc.
     const dvc = dvcBuildPdu(DVC_CMD_DATA, this.displayControlChannelId, pdu.toArray(), 0, this.displayControlCbId);
     this._sendOnChannel(this.drdynvcChannelId, dvc);
-    this._log("RDPEDISP: monitor layout " + width + "x" + height + " @ " + desktopScale + "%"
-        + " (dvcChan=" + this.displayControlChannelId + " cbId=" + this.displayControlCbId
-        + " drdynvc=" + this.drdynvcChannelId + ")");
+    this._log("RDPEDISP: monitor layout " + width + "x" + height + " @ " + desktopScale + "%");
 
-    // NOTE: the real Windows client sends ONLY the MONITOR_LAYOUT for a resize — no refresh rect. We
-    // previously sent a TS_REFRESH_RECT here to force a repaint on the in-place host, but that's our only
-    // non-standard PDU and a prime suspect for the "second resize ignored" desync. Removed; rely on the
-    // server's own repaint after the layout (it sent a full repaint for the first resize without it).
-    this._fpLogBudget = 5; // DIAGNOSTIC: log the next few fastpath updates after this layout
-    this._dvcLogBudget = 30; // DIAGNOSTIC: log inbound drdynvc commands after this layout
+    // The server responds to the layout with a Deactivation-Reactivation Sequence (DEACTIVATE_ALL then
+    // a fresh Demand Active at the new size), which we re-confirm in _beginReactivation. It does this
+    // only because our Confirm Active advertises desktopResizeFlag=1 — without that it would silently
+    // drop the layout. No refresh rect is needed: the reactivation repaints the whole desktop.
     return true;
 };
 

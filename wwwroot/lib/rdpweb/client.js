@@ -232,7 +232,7 @@ Client.prototype.maybeResize = function (wrapEl) {
     const sent = this.proto.sendMonitorLayout(size.width, size.height, this._scaleForSession(), 100);
     // Use the protocol's clamped dimensions so the canvas matches the server's desktop exactly (keeps
     // mouse coordinate scaling accurate after a resize).
-    if (sent) { this._resizeCanvas(this.proto.width, this.proto.height); this._bmpLogBudget = 8; }
+    if (sent) this._resizeCanvas(this.proto.width, this.proto.height);
     return sent;
 };
 
@@ -376,19 +376,6 @@ Client.prototype._dispatchUpdate = function (updateCode, header, payload) {
 
 Client.prototype.handleBitmap = function (r) {
     const bitmap = parseBitmapUpdate(r);
-
-    // DIAGNOSTIC: after a resize, log the extent of incoming bitmaps so we can tell what resolution the
-    // server is actually painting at (vs. the canvas size we requested). Remove once resize is solid.
-    if (this._bmpLogBudget > 0) {
-        this._bmpLogBudget--;
-        let maxR = 0, maxB = 0;
-        bitmap.rectangles.forEach((b) => {
-            if (b.destLeft + b.width > maxR) maxR = b.destLeft + b.width;
-            if (b.destTop + b.height > maxB) maxB = b.destTop + b.height;
-        });
-        console.log("rdp: bitmap extent right=" + maxR + " bottom=" + maxB
-            + " (canvas " + this.canvas.width + "x" + this.canvas.height + ")");
-    }
 
     bitmap.rectangles.forEach((bitmapData) => {
         const size = bitmapData.width * bitmapData.height;

@@ -256,47 +256,6 @@ public sealed class RdpRelaySession
         throw new IOException("server did not select TLS/NLA");
     }
 
-    // DIAGNOSTIC: logs the framing of an RDP byte chunk (best-effort; chunks may straddle PDU
-    // boundaries). Reports TPKT slow-path length, fastpath length, or flags a chunk whose leading byte
-    // is neither (0x03 TPKT nor a fastpath action header) — i.e. a likely desync/malformed packet.
-    // verbose=true logs every chunk's framing; false logs only anomalies (unrecognized/empty). Use
-    // verbose only on the low-volume ws→host (browser) direction so the host→ws graphics flood doesn't
-    // drown the log — but anomalies are always logged in both directions.
-    private void LogFraming(string dir, ReadOnlySpan<byte> b, bool verbose)
-    {
-        if (b.Length == 0) { _logger.LogWarning("RDP relay [{Dir}]: empty chunk", dir); return; }
-        byte first = b[0];
-        if (first == 0x03)
-        {
-            if (verbose)
-            {
-                int len = b.Length >= 4 ? (b[2] << 8) | b[3] : -1;
-                _logger.LogInformation("RDP relay [{Dir}]: TPKT chunk={Chunk} declaredLen={Len}", dir, b.Length, len);
-            }
-        }
-        else if ((first & 0x03) == 0x00) // fastpath action FASTPATH_*_ACTION_FASTPATH
-        {
-            if (verbose)
-            {
-                int len = -1, hdr = 2;
-                if (b.Length >= 2)
-                {
-                    int l1 = b[1];
-                    if ((l1 & 0x80) != 0 && b.Length >= 3) { len = ((l1 & 0x7f) << 8) | b[2]; hdr = 3; }
-                    else { len = l1; }
-                }
-                _logger.LogInformation("RDP relay [{Dir}]: fastpath chunk={Chunk} declaredLen={Len} hdr={Hdr}", dir, b.Length, len, hdr);
-            }
-        }
-        else if (verbose)
-        {
-            // Only meaningful on the low-volume ws→host path. On host→ws this fires constantly and
-            // harmlessly because a 16KB TLS read routinely starts mid-PDU (not a real desync).
-            _logger.LogWarning("RDP relay [{Dir}]: UNRECOGNIZED leading byte 0x{First:X2} chunk={Chunk} (possible desync/malformed)",
-                dir, first, b.Length);
-        }
-    }
-
     private async Task PumpSslToWsAsync(SslStream ssl, CancellationToken ct)
     {
         var buffer = new byte[16 * 1024];
@@ -310,7 +269,6 @@ public sealed class RdpRelaySession
                 if (n == 0) { _logger.LogWarning("RDP relay: host→ws pump: host closed (0 bytes) after {Total} bytes / {Chunks} chunks", total, chunks); break; }
                 total += n;
                 chunks++;
-                LogFraming("host→ws", buffer.AsSpan(0, n), verbose: false);
                 await _ws.SendAsync(buffer.AsMemory(0, n), WebSocketMessageType.Binary,
                     endOfMessage: true, ct);
             }
@@ -334,16 +292,6 @@ public sealed class RdpRelaySession
                 var result = await _ws.ReceiveAsync(buffer, ct);
                 if (result.MessageType == WebSocketMessageType.Close) break;
                 if (result.Count == 0) continue;
-                // DIAGNOSTIC: log framing + whether the WS message was delivered whole. A false
-                // EndOfMessage means the browser PDU was split across WS reads (could desync the host).
-                LogFraming("ws→host", buffer.AsSpan(0, result.Count), verbose: true);
-                if (!result.EndOfMessage)
-                    _logger.LogWarning("RDP relay [ws→host]: PARTIAL WS frame (EndOfMessage=false), count={Count}", result.Count);
-                // DIAGNOSTIC: hex-dump small slow-path PDUs (the monitor layout/refresh) so we can diff
-                // a working vs ignored layout byte-for-byte. Slow path only, ≤128 bytes.
-                if (result.Count <= 128 && result.Count >= 4 && buffer[0] == 0x03)
-                    _logger.LogInformation("RDP relay [ws→host] HEX {Len}: {Hex}", result.Count,
-                        Convert.ToHexString(buffer.AsSpan(0, result.Count)));
                 // Browser sends raw RDP bytes as binary frames; write straight to the host. (A frame
                 // may be partial; RDP framing is the browser's concern, so just forward bytes.)
                 await ssl.WriteAsync(buffer.AsMemory(0, result.Count), ct);
