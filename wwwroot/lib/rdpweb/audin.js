@@ -143,10 +143,14 @@ AudInput.prototype._onFormats = function (body) {
     for (const f of this.formats) fmtBytes.bytes(ainSerializeFormat(f));
     const fmtArr = fmtBytes.arr();
 
+    // cbSizeFormatsPacket = the TOTAL byte length of this PDU including the 9-byte header
+    // (Header 1 + NumFormats 4 + cbSizeFormatsPacket 4), NOT just the formats array. FreeRDP computes
+    // it as Stream_GetPosition(out) after reserving 9 bytes and appending the formats
+    // (audin_main.c:278). Getting this wrong makes the host reject the PDU and never send OPEN.
     const w = new AinWriter();
     w.u8(MSG_SNDIN_FORMATS);
     w.u32(this.formats.length);     // NumFormats
-    w.u32(fmtArr.length);           // cbSizeFormatsPacket
+    w.u32(9 + fmtArr.length);       // cbSizeFormatsPacket (full PDU size incl. 9-byte header)
     w.bytes(fmtArr);
     this.send(w.arr());
 };

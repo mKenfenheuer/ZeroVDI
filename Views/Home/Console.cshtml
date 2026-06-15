@@ -234,7 +234,22 @@
             var revealZone = document.getElementById("reveal-zone");
 
             var screenWrap = document.getElementById("screen-wrap");
+            var canvas = document.getElementById("canvas");
             var client = new Client(wsUrl, "canvas");
+
+            // Return the console to its pre-connect state: blank the screen and show the login form.
+            function resetConsole() {
+                var ctx = canvas.getContext("2d");
+                if (ctx) { ctx.fillStyle = "#000"; ctx.fillRect(0, 0, canvas.width, canvas.height); }
+                btnDisconnect.disabled = true;
+                btnConnect.disabled = false;
+                btnConnect.textContent = "Connect";
+                if (hideTimer) clearTimeout(hideTimer);
+                floatbar.classList.add("hidden");
+                loginError.textContent = "";
+                loginOverlay.style.display = "flex";
+            }
+
             client.setStatusCallback(function (status, message) {
                 switch (status) {
                     case "connecting":
@@ -254,8 +269,9 @@
                         floatbar.classList.add("hidden");
                         break;
                     case "closed":
-                        btnDisconnect.disabled = true;
-                        showBar();
+                        // Session ended (user disconnect or server drop): reset the screen to black
+                        // and bring back the login form so the console is ready for a fresh connect.
+                        resetConsole();
                         break;
                 }
             });

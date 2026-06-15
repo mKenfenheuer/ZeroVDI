@@ -320,8 +320,11 @@ Client.prototype._buildMicGraph = function (stream, fmt) {
 
     node.onaudioprocess = function (e) {
         if (!self.proto || !self.proto.micFormat()) return; // channel closed
-        if (self.micMuted) return;                            // muted → send nothing
-        const input = e.inputBuffer.getChannelData(0);        // mono capture (Float32, -1..1)
+        let input = e.inputBuffer.getChannelData(0);          // mono capture (Float32, -1..1)
+        // Muted → keep the stream flowing but silent. Dropping chunks entirely starves the host's
+        // capture pipeline (it can freeze/repeat the last audio); instead resample a zeroed block so we
+        // ship correctly-sized SILENT PCM at the same cadence as live audio.
+        if (self.micMuted) input = new Float32Array(input.length);
         const inRate = self._micCtx.sampleRate;
         const pcm = self._resampleToPcm(input, inRate, fmt);
         if (pcm && pcm.length) self.proto.sendMicPcm(pcm);
@@ -643,8 +646,55 @@ Client.prototype._applyInitialScale = function () {
     this._sessionScale = this.desktopScaleForDpr(dpr);
     if (this._sessionScale <= 100) { this._initialScaleApplied = true; return; } // nothing to scale
     this._initialScaleApplied = true;
-    // Same backing-store resolution, only the DPI scale — no canvas resize/clear needed.
-    this.proto.sendMonitorLayout(this.canvas.width, this.canvas.height, this._sessionScale, 100);
+    // Remember the real target resolution; the dummy-resize sequence bounces off it.
+    this._scaleW = this.canvas.width;
+    this._scaleH = this.canvas.height;
+    // Kick off the scale sequence (see _runScaleStep). Step 0 sends the target scale at the real
+    // resolution (a scale-only change), which some hosts intermittently ignore — so the sequence then
+    // performs a dummy resize to a different resolution and back, each step gated on the previous
+    // Deactivation-Reactivation completing (signalled by _onActive), forcing the scale to take effect.
+    this._scaleStep = 0;
+    this._runScaleStep();
+};
+
+// Drives the initial-scale "dummy resize" as a step machine. Each layout the host accepts triggers a
+// Deactivation-Reactivation; we advance to the next step only when that reactivation completes (a fresh
+// _onActive) or, for hosts that apply in place without reactivating, after a short timeout fallback.
+// This serialization is what makes the scale reliable: two layouts fired in the same tick get coalesced
+// or dropped by the host, leaving the session at 100%.
+Client.prototype._runScaleStep = function () {
+    if (!this.proto || !this.proto.canResize()) return;
+    const w = this._scaleW, h = this._scaleH, s = this._sessionScale;
+    // Step plan: 0 = target scale @ real res; 1 = nudge res (+2) @ target scale; 2 = back to real res.
+    let sent = false;
+    if (this._scaleStep === 0) {
+        sent = this.proto.sendMonitorLayout(w, h, s, 100);
+    } else if (this._scaleStep === 1) {
+        sent = this.proto.sendMonitorLayout(w + 2, h + 2, s, 100);
+        if (sent) this._resizeCanvas(this.proto.width, this.proto.height);
+    } else if (this._scaleStep === 2) {
+        sent = this.proto.sendMonitorLayout(w, h, s, 100);
+        if (sent) this._resizeCanvas(this.proto.width, this.proto.height);
+    } else {
+        return; // sequence complete
+    }
+
+    // Advance. If the host accepted the layout it will reactivate → _onActive calls _advanceScaleStep.
+    // Always arm a timeout fallback too: a no-op send (sent=false) or an in-place apply (no reactivation)
+    // won't produce an _onActive, so the timeout keeps the sequence moving / ends it. _advancedFrom
+    // dedupes the two triggers (reactivation vs. timeout) racing on the same step.
+    this._advancedFrom = this._scaleStep;
+    clearTimeout(this._scaleStepTimer);
+    this._scaleStepTimer = setTimeout(() => this._advanceScaleStep(), 600);
+};
+
+Client.prototype._advanceScaleStep = function () {
+    if (this._scaleStep === undefined || this._scaleStep > 2) return;
+    if (this._advancedFrom !== this._scaleStep) return; // already advanced past this step
+    this._advancedFrom = -1;
+    clearTimeout(this._scaleStepTimer);
+    this._scaleStep += 1;
+    this._runScaleStep();
 };
 
 // The fixed DPI scale for this session (captured at connect). Resizes must reuse it so they only ever
@@ -656,8 +706,14 @@ Client.prototype._scaleForSession = function () {
 
 Client.prototype._onActive = function () {
     if (this.connected) {
-        // Reached again after a reactivation; Display Control may only now be usable.
-        this._applyInitialScale();
+        // Reached again after a reactivation. If a scale-sequence step is in flight, this reactivation
+        // is the host confirming it applied — advance to the next step. Otherwise Display Control may
+        // only now be usable, so (re)try the initial scale.
+        if (this._initialScaleApplied && this._scaleStep !== undefined && this._scaleStep <= 2) {
+            this._advanceScaleStep();
+        } else {
+            this._applyInitialScale();
+        }
         return;
     }
     this.connected = true;
@@ -683,6 +739,14 @@ Client.prototype.deinitialize = function () {
     this.canvas.removeEventListener("mouseup", this.handleMouseUp);
     this.canvas.removeEventListener("contextmenu", this.handleMouseUp);
     this.canvas.removeEventListener("wheel", this.handleWheel);
+
+    // Stop any in-flight initial-scale sequence and reset its state so a reconnect on this same Client
+    // re-applies the DPI scale from scratch (otherwise _initialScaleApplied stays set and the reconnected
+    // session is left at 100%).
+    clearTimeout(this._scaleStepTimer);
+    this._initialScaleApplied = false;
+    this._scaleStep = undefined;
+    this._sessionScale = 0;
 
     this.connected = false;
 

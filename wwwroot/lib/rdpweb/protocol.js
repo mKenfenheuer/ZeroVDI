@@ -629,6 +629,11 @@ const INFO_DISABLECTRLALTDEL = 0x00000002;
 const INFO_AUTOLOGON = 0x00000008;
 const INFO_UNICODE = 0x00000010;
 const INFO_ENABLEWINDOWSKEY = 0x00000100;
+// INFO_AUDIOCAPTURE ([MS-RDPBCGR] 2.2.1.11.1.1, flag 0x00200000): tells the server the CLIENT wants
+// audio-input (microphone) redirection. The host only opens the AUDIO_INPUT dynamic channel when this
+// bit is set in the Client Info PDU — without it the SNDIN handshake never starts (this is what the
+// Windows mstsc client sets when mic redirection is enabled; it is the gate, NOT a host group policy).
+const INFO_AUDIOCAPTURE = 0x00200000;
 
 // Performance flags ([MS-RDPBCGR] 2.2.1.11.1.1.1, the ExtendedInfoPacket performanceFlags field).
 // The DISABLE_* bits turn OFF the named eye-candy to save bandwidth; the ENABLE_* bits turn ON
@@ -649,7 +654,7 @@ const PERF_DEFAULT = PERF.ENABLE_FONT_SMOOTHING | PERF.ENABLE_DESKTOP_COMPOSITIO
 // Surface the flag table to the page UI (which builds the performanceFlags value from checkboxes).
 if (typeof window !== "undefined") { window.RDP_PERF = PERF; window.RDP_PERF_DEFAULT = PERF_DEFAULT; }
 
-function clientInfoPdu(domain, username, password, performanceFlags) {
+function clientInfoPdu(domain, username, password, performanceFlags, audioCapture) {
     function field(s) {
         if (s && s.length > 0) {
             const w = new ByteWriter().utf16le(s).toArray(); // no NUL
@@ -663,7 +668,9 @@ function clientInfoPdu(domain, username, password, performanceFlags) {
 
     const info = new ByteWriter();
     info.u32le(0); // codePage
-    info.u32le(INFO_MOUSE | INFO_UNICODE | INFO_AUTOLOGON | INFO_DISABLECTRLALTDEL | INFO_ENABLEWINDOWSKEY);
+    let infoFlags = INFO_MOUSE | INFO_UNICODE | INFO_AUTOLOGON | INFO_DISABLECTRLALTDEL | INFO_ENABLEWINDOWSKEY;
+    if (audioCapture) infoFlags |= INFO_AUDIOCAPTURE; // request microphone redirection (gates AUDIO_INPUT DVC)
+    info.u32le(infoFlags);
     info.u16le(d.cb);
     info.u16le(u.cb);
     info.u16le(p.cb);
@@ -1265,8 +1272,8 @@ RdpProtocol.prototype._sendRdpdrDeviceListAnnounce = function () {
 };
 
 RdpProtocol.prototype._sendClientInfo = function () {
-    this._log("RDP: Client Info");
-    const info = clientInfoPdu(this.opts.domain, this.opts.username, this.opts.password, this.performanceFlags);
+    this._log("RDP: Client Info (audioCapture=" + (this.opts.microphone ? "yes" : "no") + ")");
+    const info = clientInfoPdu(this.opts.domain, this.opts.username, this.opts.password, this.performanceFlags, this.opts.microphone);
     this.t.send(tpktX224Wrap(mcsSendDataSerialize(this.userId, this.mcsChannelId, info)));
     this.state = ST.LICENSING;
 };
@@ -1826,10 +1833,10 @@ RdpProtocol.prototype._initAudinDvc = function (channelId, cbId) {
     const self = this;
     if (typeof AudInput === "undefined") { this._log("audin: AudInput module missing"); return; }
     this.audin = new AudInput(
-        function (payload) {
-            const dvc = dvcBuildPdu(DVC_CMD_DATA, channelId, payload, 0, cbId);
-            self._sendOnChannel(self.drdynvcChannelId, dvc);
-        },
+        // Route through the DVC fragmenter (DATA_FIRST + DATA*) — captured PCM chunks routinely exceed
+        // one DVC chunk (DVC_CHUNK_LENGTH=1600); a single oversized DATA PDU makes the host kill the
+        // session with ERRINFO_VC_DATA_TOO_LONG (0x112B). Small PDUs (handshake) go as one DATA.
+        function (payload) { self._sendDvcData(channelId, cbId, payload); },
         { onLog: function (m) { self._log("audin: " + m); },
           onOpen: function (fmt) { if (self.cb.onMicOpen) self.cb.onMicOpen(fmt); },
           onClose: function () { if (self.cb.onMicClose) self.cb.onMicClose(); } });
