@@ -868,7 +868,11 @@ function RdpProtocol(transport, opts, callbacks) {
     // Static virtual channels to request, in positional order. drdynvc is always present (live
     // resize); rdpsnd/cliprdr are opt-in per the audio/clipboard options.
     this.staticChannels = ["drdynvc"];
-    if (opts.audio) { this.staticChannels.push("rdpdr"); this.staticChannels.push("rdpsnd"); }
+    // The host gates its rich audio DVC set (AUDIO_PLAYBACK_DVC for output, AUDIO_INPUT for the mic)
+    // behind the rdpdr device-redirection static channel completing its handshake. So advertise rdpdr
+    // (and rdpsnd) whenever EITHER audio output or microphone capture is requested.
+    if (opts.audio || opts.microphone || opts.camera) this.staticChannels.push("rdpdr");
+    if (opts.audio) this.staticChannels.push("rdpsnd");
     if (opts.clipboard) this.staticChannels.push("cliprdr");
 
     this.userId = 0;
@@ -901,6 +905,27 @@ function RdpProtocol(transport, opts, callbacks) {
     this.audioDvcChannelId = null;
     this.audioDvcCbId = 0;
     this._dvcReasm = {};        // DVC channelId -> {parts, len, total}
+
+    // Audio input dynamic virtual channel ("AUDIO_INPUT", MS-RDPEAI) — microphone redirection. Like
+    // the audio OUTPUT DVC, the host offers this dynamically (gated on rdpsnd/rdpdr presence) once it
+    // wants to capture the client mic. Accepted only when opts.microphone is set; bound to AudInput.
+    this.audinDvcChannelId = null;
+    this.audinDvcCbId = 0;
+    this.audin = null;          // AudInput instance when microphone is enabled and the DVC is opened
+
+    // Camera redirection (MS-RDPECAM). Two DVCs: the control/enumerator channel
+    // "RDCamera_Device_Enumerator" (host-opened; we send SelectVersionRequest then advertise a virtual
+    // camera) and a per-device channel the host opens by the name we advertise. Accepted only when
+    // opts.camera. The device channel drives capture; frames come from client.js.
+    this.camEnumChannelId = null;
+    this.camEnumCbId = 0;
+    this.camEnum = null;        // RdpCamEnum (control channel)
+    this.camDeviceChannelName = null; // the VirtualChannelName we advertised; the host opens it next
+    // The host opens MULTIPLE concurrent device channels (one per consuming pipeline), all with the
+    // same name — and expects every one to keep working. So we keep a RdpCamDevice per channelId, not a
+    // single instance (overwriting a single one made older channels go dead → the host looped opening
+    // new ones). Keyed by MCS/DVC channelId.
+    this.camDevices = {};       // channelId -> RdpCamDevice
 
     // RDPEGFX graphics DVC. Accepted (to unlock the host's audio DVC) but not yet rendered.
     this.gfxDvcChannelId = null;
@@ -1492,6 +1517,12 @@ const DISPLAY_CONTROL_CHANNEL_NAME = "Microsoft::Windows::RDS::DisplayControl";
 // Dynamic-channel name for remote audio output (MS-RDPEA over MS-RDPEDYC). Modern Windows streams
 // rdpsnd through this DVC rather than the static "rdpsnd" channel.
 const AUDIO_PLAYBACK_DVC_NAME = "AUDIO_PLAYBACK_DVC";
+// Dynamic-channel name for microphone redirection (MS-RDPEAI). The host opens this to capture the
+// client microphone; we accept it only when opts.microphone is set and bind it to AudInput.
+const AUDIO_INPUT_DVC_NAME = "AUDIO_INPUT";
+// Camera redirection (MS-RDPECAM): the host-opened control/enumerator DVC. After version negotiation
+// we advertise a virtual camera; the host then opens a per-device DVC named by our VirtualChannelName.
+const RDPECAM_CONTROL_DVC_NAME = "RDCamera_Device_Enumerator";
 // RDPEGFX graphics pipeline DVC ([MS-RDPEGFX]). We accept it (and answer its capability exchange)
 // only to unlock the host's rich DVC set (which carries audio). Surface graphics are not yet
 // rendered — see _onGfxData.
@@ -1569,6 +1600,54 @@ function dvcBuildPdu(cmd, channelId, body, sp, cbId) {
     return w.toArray();
 }
 
+// drdynvc per-PDU chunk limit ([MS-RDPEDYC]; FreeRDP CHANNEL_CHUNK_LENGTH). A DVC DATA payload larger
+// than what fits in one chunk MUST be split into DATA_FIRST (carrying the total length) + DATA chunks.
+const DVC_CHUNK_LENGTH = 1600;
+
+// Send a DVC DATA payload on `channelId`, fragmenting into DATA_FIRST + DATA* exactly like FreeRDP's
+// drdynvc_write_data when it exceeds one chunk. Each emitted drdynvc PDU is wrapped by _sendOnChannel
+// (CHANNEL_PDU_HEADER over MCS). Small payloads (control PDUs, audio) send as a single DATA PDU.
+RdpProtocol.prototype._sendDvcData = function (channelId, cbId, payload) {
+    const enc = dvcEncodeChannelId(channelId);
+    // Header(1) + channelId bytes, computed for a plain DATA PDU.
+    const dataHeaderLen = 1 + enc.bytes.length;
+    if (payload.length <= DVC_CHUNK_LENGTH - dataHeaderLen) {
+        this._sendOnChannel(this.drdynvcChannelId, dvcBuildPdu(DVC_CMD_DATA, channelId, payload, 0, cbId));
+        return;
+    }
+    // DATA_FIRST: header byte packs (cmd<<4)|(cbLen<<2)|cbId; then channelId, then the total length
+    // (variable width = cbLen), then the first chunk. cbLen sizing mirrors dvcEncodeChannelId.
+    const total = payload.length;
+    let cbLen, lenBytes;
+    if (total <= 0xff) { cbLen = 0; lenBytes = [total & 0xff]; }
+    else if (total <= 0xffff) { cbLen = 1; lenBytes = [total & 0xff, (total >> 8) & 0xff]; }
+    else { cbLen = 2; lenBytes = [total & 0xff, (total >> 8) & 0xff, (total >> 16) & 0xff, (total >> 24) & 0xff]; }
+
+    const idBytes = dvcEncodeChannelIdFixed(channelId, cbId);
+    const firstHeaderLen = 1 + idBytes.length + lenBytes.length;
+    let off = 0;
+    {
+        const w = new ByteWriter();
+        w.u8(((DVC_CMD_DATA_FIRST & 0xf) << 4) | ((cbLen & 0x3) << 2) | (cbId & 0x3));
+        w.bytes(idBytes);
+        w.bytes(lenBytes);
+        const n = Math.min(DVC_CHUNK_LENGTH - firstHeaderLen, total - off);
+        w.bytes(payload.subarray(off, off + n));
+        off += n;
+        this._sendOnChannel(this.drdynvcChannelId, w.toArray());
+    }
+    // Remaining DATA chunks.
+    while (off < total) {
+        const w = new ByteWriter();
+        w.u8(((DVC_CMD_DATA & 0xf) << 4) | (cbId & 0x3));
+        w.bytes(idBytes);
+        const n = Math.min(DVC_CHUNK_LENGTH - dataHeaderLen, total - off);
+        w.bytes(payload.subarray(off, off + n));
+        off += n;
+        this._sendOnChannel(this.drdynvcChannelId, w.toArray());
+    }
+};
+
 // Inbound data on the drdynvc static channel: strip the CHANNEL_PDU_HEADER then dispatch the
 // drdynvc command. (We assume single-chunk channel PDUs, which is the case for the small control
 // PDUs we exchange.)
@@ -1627,10 +1706,17 @@ RdpProtocol.prototype._dvcOnCreate = function (r, cbId) {
     // through a DVC and then stalling while it waits for responses we can't produce (e.g. ECHO
     // keepalives). Accepting channels we don't service is what made the server go silent.
     const isAudio = (name === AUDIO_PLAYBACK_DVC_NAME) && this.opts.audio;
+    // Microphone (audio input). Only accept when enabled — otherwise the host would wait on capture
+    // PDUs we never send. Like the output DVC, the host opens this dynamically.
+    const isAudin = (name === AUDIO_INPUT_DVC_NAME) && this.opts.microphone;
+    // Camera: the control/enumerator channel (when enabled), and the per-device channel the host opens
+    // by the VirtualChannelName we advertised on the enumerator (camDeviceChannelName, set dynamically).
+    const isCamEnum = (name === RDPECAM_CONTROL_DVC_NAME) && this.opts.camera;
+    const isCamDevice = !!this.camDeviceChannelName && (name === this.camDeviceChannelName);
     // Accept the RDPEGFX Graphics channel only to keep the host's rich DVC set (incl. audio) alive.
     // We answer its capability exchange but do not render its surfaces yet.
     const isGfx = (name === RDPGFX_DVC_NAME);
-    const accept = (name === DISPLAY_CONTROL_CHANNEL_NAME) || isAudio || isGfx;
+    const accept = (name === DISPLAY_CONTROL_CHANNEL_NAME) || isAudio || isAudin || isCamEnum || isCamDevice || isGfx;
 
     // The server REUSES dynamic channel ids: id 11 may be Geometry, then DisplayControl, then Geometry
     // again over the life of the session. A new Create for an id we currently hold means the server has
@@ -1664,6 +1750,16 @@ RdpProtocol.prototype._dvcOnCreate = function (r, cbId) {
             this.audioDvcChannelId = channelId;
             this.audioDvcCbId = cbId; // echo the same channel-id width when we send DATA back
             this._initAudioDvc(channelId, cbId);
+        } else if (isAudin) {
+            this.audinDvcChannelId = channelId;
+            this.audinDvcCbId = cbId; // echo the same channel-id width when we send DATA back
+            this._initAudinDvc(channelId, cbId);
+        } else if (isCamEnum) {
+            this.camEnumChannelId = channelId;
+            this.camEnumCbId = cbId;
+            this._initCamEnumDvc(channelId, cbId);
+        } else if (isCamDevice) {
+            this._initCamDeviceDvc(channelId, cbId);
         } else if (isGfx) {
             this.gfxDvcChannelId = channelId;
             this.gfxDvcCbId = cbId;
@@ -1722,12 +1818,101 @@ RdpProtocol.prototype._initAudioDvc = function (channelId, cbId) {
     this._log("rdpsnd: bound to AUDIO_PLAYBACK_DVC id=" + channelId);
 };
 
+// Build the AudInput (microphone) handler bound to the audio-input DVC. Its send() wraps each SNDIN
+// PDU as a drdynvc DATA PDU on the audio-input channel (then CHANNEL_PDU_HEADER on drdynvc). When the
+// server OPENs the device, onOpen(format) fires so client.js can begin capturing; captured PCM is
+// pushed back via this.audin.sendPcm().
+RdpProtocol.prototype._initAudinDvc = function (channelId, cbId) {
+    const self = this;
+    if (typeof AudInput === "undefined") { this._log("audin: AudInput module missing"); return; }
+    this.audin = new AudInput(
+        function (payload) {
+            const dvc = dvcBuildPdu(DVC_CMD_DATA, channelId, payload, 0, cbId);
+            self._sendOnChannel(self.drdynvcChannelId, dvc);
+        },
+        { onLog: function (m) { self._log("audin: " + m); },
+          onOpen: function (fmt) { if (self.cb.onMicOpen) self.cb.onMicOpen(fmt); },
+          onClose: function () { if (self.cb.onMicClose) self.cb.onMicClose(); } });
+    this._log("audin: bound to AUDIO_INPUT id=" + channelId);
+};
+
+// Push one chunk of captured microphone PCM (little-endian interleaved in the OPENed format) to the
+// server. No-op unless the audio-input DVC is open and the server has OPENed the capture device.
+RdpProtocol.prototype.sendMicPcm = function (pcm) {
+    if (this.audin && this.audin.isOpen()) this.audin.sendPcm(pcm);
+};
+
+// Build the RdpCamEnum (MS-RDPECAM control channel) bound to the enumerator DVC. Send wraps each PDU
+// as a DVC DATA on the enumerator channel. We kick off version negotiation immediately (FreeRDP sends
+// SelectVersionRequest in the channel's OnOpen, i.e. right after the create handshake). When it
+// advertises our virtual camera, onDeviceChannelName records the name so we accept the device DVC the
+// host opens next.
+RdpProtocol.prototype._initCamEnumDvc = function (channelId, cbId) {
+    const self = this;
+    if (typeof RdpCamEnum === "undefined") { this._log("rdpecam: RdpCamEnum module missing"); return; }
+    this.camEnum = new RdpCamEnum(
+        function (payload) { self._sendDvcData(channelId, cbId, payload); },
+        { onLog: function (m) { self._log("rdpecam: " + m); },
+          onDeviceChannelName: function (name) { self.camDeviceChannelName = name; } });
+    this._log("rdpecam: bound enumerator id=" + channelId);
+    this.camEnum.start();
+};
+
+// Build the RdpCamDevice bound to the per-device DVC the host opened by our advertised name. The
+// device channel drives the capture handshake; onStart/onStop/onSampleNeeded reach client.js, which
+// captures JPEG frames and feeds them back via sendCameraFrame().
+RdpProtocol.prototype._initCamDeviceDvc = function (channelId, cbId) {
+    const self = this;
+    if (typeof RdpCamDevice === "undefined") { this._log("rdpecam: RdpCamDevice module missing"); return; }
+    const dev = new RdpCamDevice(
+        function (payload) { self._sendDvcData(channelId, cbId, payload); },
+        { onLog: function (m) { self._log("rdpecam[dev]: " + m); },
+          onStart: function (mt) { if (self.cb.onCameraStart) self.cb.onCameraStart(mt); },
+          onStop: function () { self._onCamDeviceStopped(); },
+          onSampleNeeded: function (idx) { if (self.cb.onCameraSampleNeeded) self.cb.onCameraSampleNeeded(idx); } });
+    this.camDevices[channelId] = dev;
+    this._log("rdpecam: bound device channel id=" + channelId);
+};
+
+// Fire onCameraStop only when NO device channel is still streaming (the host keeps several open).
+RdpProtocol.prototype._onCamDeviceStopped = function () {
+    for (const id in this.camDevices) { if (this.camDevices[id] && this.camDevices[id].isStreaming()) return; }
+    if (this.cb.onCameraStop) this.cb.onCameraStop();
+};
+
+// client.js delivers a captured JPEG frame (Uint8Array). Fan it out to every device channel that has
+// an outstanding SampleRequest (each consuming pipeline pulls frames independently).
+RdpProtocol.prototype.sendCameraFrame = function (jpegBytes) {
+    for (const id in this.camDevices) { const d = this.camDevices[id]; if (d) d.pushFrame(jpegBytes); }
+};
+
+// The media type some device channel is streaming with ({width,height,fps}), or null if none.
+RdpProtocol.prototype.cameraMediaType = function () {
+    for (const id in this.camDevices) { const d = this.camDevices[id]; if (d && d.isStreaming()) return d.currentMediaType; }
+    return null;
+};
+
+// The format the server OPENed the microphone with ({rate, bits, channels}), or null if not capturing.
+RdpProtocol.prototype.micFormat = function () {
+    return (this.audin && this.audin.isOpen()) ? this.audin.openFormat : null;
+};
+
 RdpProtocol.prototype._dvcOnClose = function (r, cbId) {
     const channelId = dvcReadChannelId(r, cbId);
     const name = this.dvcById[channelId];
     if (name) { delete this.dvcByName[name]; delete this.dvcById[channelId]; }
     if (channelId === this.displayControlChannelId) this.displayControlChannelId = null;
     if (channelId === this.audioDvcChannelId) { this.audioDvcChannelId = null; this.rdpsnd = null; }
+    if (channelId === this.audinDvcChannelId) {
+        this.audinDvcChannelId = null;
+        this.audin = null;
+        if (this.cb.onMicClose) this.cb.onMicClose();
+    }
+    if (channelId === this.camEnumChannelId) { this.camEnumChannelId = null; this.camEnum = null; }
+    if (this.camDevices[channelId]) {
+        delete this.camDevices[channelId];
+        this._onCamDeviceStopped();
+    }
     if (channelId === this.gfxDvcChannelId) this.gfxDvcChannelId = null;
     delete this._dvcReasm[channelId];
 };
@@ -1764,6 +1949,9 @@ RdpProtocol.prototype._dvcOnData = function (r, cbId, isFirst, sp) {
 
     if (channelId === this.displayControlChannelId) return this._onDisplayControlData(data);
     if (channelId === this.audioDvcChannelId && this.rdpsnd) return this.rdpsnd.onData(data);
+    if (channelId === this.audinDvcChannelId && this.audin) return this.audin.onData(data);
+    if (channelId === this.camEnumChannelId && this.camEnum) return this.camEnum.onData(data);
+    if (this.camDevices[channelId]) return this.camDevices[channelId].onData(data);
     if (channelId === this.gfxDvcChannelId) return; // RDPEGFX surfaces: accepted but not rendered yet
 };
 

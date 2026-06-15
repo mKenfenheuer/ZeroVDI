@@ -131,6 +131,14 @@
                             <input class="form-check-input" type="checkbox" id="opt-clipboard" checked />
                             <label class="form-check-label" for="opt-clipboard" style="font-size:.82rem;">Clipboard sync</label>
                         </div>
+                        <div class="form-check form-check-sm">
+                            <input class="form-check-input" type="checkbox" id="opt-microphone" checked/>
+                            <label class="form-check-label" for="opt-microphone" style="font-size:.82rem;">Microphone (prompts for permission)</label>
+                        </div>
+                        <div class="form-check form-check-sm">
+                            <input class="form-check-input" type="checkbox" id="opt-camera"  checked/>
+                            <label class="form-check-label" for="opt-camera" style="font-size:.82rem;">Camera (prompts for permission)</label>
+                        </div>
 
                         <div class="mt-2" style="font-size:.78rem; color:#999;">Visual quality</div>
                         @* Performance flags. Checked = the named eye-candy / quality feature is ON.
@@ -189,21 +197,26 @@
     </script>
     <script src="~/lib/fontawesome/js/all.min.js"></script>
 
-    <script src="~/lib/rdpweb/rle/ms-rle-wasm.js"></script>
+    @* asp-append-version stamps a content hash onto each src (?v=…) so a changed file is always
+       refetched — browsers cache these static JS aggressively, which silently served stale code while
+       iterating on the camera channel. *@
+    <script src="~/lib/rdpweb/rle/ms-rle-wasm.js" asp-append-version="true"></script>
 
-    <script src="~/lib/rdpweb/binary.js"></script>
-    <script src="~/lib/rdpweb/color.js"></script>
-    <script src="~/lib/rdpweb/update/header.js"></script>
-    <script src="~/lib/rdpweb/update/bitmap.js"></script>
-    <script src="~/lib/rdpweb/update/pointer.js"></script>
-    <script src="~/lib/rdpweb/input/header.js"></script>
-    <script src="~/lib/rdpweb/input/keymap.js"></script>
-    <script src="~/lib/rdpweb/input/keyboard.js"></script>
-    <script src="~/lib/rdpweb/input/mouse.js"></script>
-    <script src="~/lib/rdpweb/rdpsnd.js"></script>
-    <script src="~/lib/rdpweb/cliprdr.js"></script>
-    <script src="~/lib/rdpweb/protocol.js"></script>
-    <script src="~/lib/rdpweb/client.js"></script>
+    <script src="~/lib/rdpweb/binary.js" asp-append-version="true"></script>
+    <script src="~/lib/rdpweb/color.js" asp-append-version="true"></script>
+    <script src="~/lib/rdpweb/update/header.js" asp-append-version="true"></script>
+    <script src="~/lib/rdpweb/update/bitmap.js" asp-append-version="true"></script>
+    <script src="~/lib/rdpweb/update/pointer.js" asp-append-version="true"></script>
+    <script src="~/lib/rdpweb/input/header.js" asp-append-version="true"></script>
+    <script src="~/lib/rdpweb/input/keymap.js" asp-append-version="true"></script>
+    <script src="~/lib/rdpweb/input/keyboard.js" asp-append-version="true"></script>
+    <script src="~/lib/rdpweb/input/mouse.js" asp-append-version="true"></script>
+    <script src="~/lib/rdpweb/rdpsnd.js" asp-append-version="true"></script>
+    <script src="~/lib/rdpweb/audin.js" asp-append-version="true"></script>
+    <script src="~/lib/rdpweb/rdpecam.js" asp-append-version="true"></script>
+    <script src="~/lib/rdpweb/cliprdr.js" asp-append-version="true"></script>
+    <script src="~/lib/rdpweb/protocol.js" asp-append-version="true"></script>
+    <script src="~/lib/rdpweb/client.js" asp-append-version="true"></script>
 
     <script>
         (function () {
@@ -280,6 +293,24 @@
                 btnMute.innerHTML = muted ? '<i class="fa-solid fa-volume-xmark"></i>' : '<i class="fa-solid fa-volume"></i>';
 
                 client.setClipboardEnabled(document.getElementById("opt-clipboard").checked);
+
+                // Microphone redirection must be decided BEFORE connect (the AUDIO_INPUT DVC is only
+                // accepted if enabled at handshake time). The floatbar mic button then mutes/unmutes
+                // capture at runtime. Reflect the initial state on the button.
+                var micOn = document.getElementById("opt-microphone").checked;
+                client.setMicrophoneEnabled(micOn);
+                client.setMicMuted(!micOn);
+                btnDisableMic.classList.toggle("fa-red", !micOn);
+                btnDisableMic.innerHTML = micOn ? '<i class="fa-solid fa-microphone"></i>' : '<i class="fa-solid fa-microphone-slash"></i>';
+
+                // Camera redirection — same pattern: decided before connect (the RDPECAM DVCs are only
+                // accepted when enabled at handshake); the floatbar video button pauses/resumes at runtime.
+                var camOn = document.getElementById("opt-camera").checked;
+                client.setCameraEnabled(camOn);
+                client.setCameraPaused(!camOn);
+                btnDisableVideo.classList.toggle("fa-red", !camOn);
+                btnDisableVideo.innerHTML = camOn ? '<i class="fa-solid fa-video"></i>' : '<i class="fa-solid fa-video-slash"></i>';
+
                 // Create/resume the AudioContext now, inside this user gesture — browsers block audio
                 // that starts without one, and the first wave arrives long after the click.
                 if (client.audioEnabled) client.primeAudio();
@@ -309,25 +340,25 @@
                 }
                 btnMute.innerHTML = muted ? '<i class="fa-solid fa-volume-xmark"></i>' : '<i class="fa-solid fa-volume"></i>';
             });
+            // Floatbar mic button: mute/unmute capture at runtime. (Whether the AUDIO_INPUT channel
+            // exists at all is decided at connect from the "Microphone" option.) If the channel wasn't
+            // enabled this session, the button just stays in the muted/slashed state.
             btnDisableMic.addEventListener("click", function () {
-                var enabled = !(client.microphoneEnabled);
-                client.setMicrophoneEnabled(enabled);
-                if(!enabled) {
-                    btnDisableMic.classList.add("fa-red");
-                } else {
-                    btnDisableMic.classList.remove("fa-red");
-                }
-                btnDisableMic.innerHTML = enabled ? '<i class="fa-solid fa-microphone"></i>' : '<i class="fa-solid fa-microphone-slash"></i>';
+                if (!client.microphoneEnabled) return; // no mic channel this session
+                var muted = !(client.micMuted);
+                client.setMicMuted(muted);
+                btnDisableMic.classList.toggle("fa-red", muted);
+                btnDisableMic.innerHTML = muted ? '<i class="fa-solid fa-microphone-slash"></i>' : '<i class="fa-solid fa-microphone"></i>';
             });
+            // Floatbar video button: pause/resume the camera feed at runtime (sends black frames while
+            // paused). Whether the camera channel exists at all is decided at connect from the "Camera"
+            // option; if it wasn't enabled this session the button stays in the slashed state.
             btnDisableVideo.addEventListener("click", function () {
-                var enabled = !(client.cameraEnabled);
-                client.setCameraEnabled(enabled);
-                if(!enabled) {
-                    btnDisableVideo.classList.add("fa-red");
-                } else {
-                    btnDisableVideo.classList.remove("fa-red");
-                }
-                btnDisableVideo.innerHTML = enabled ? '<i class="fa-solid fa-video"></i>' : '<i class="fa-solid fa-video-slash"></i>';
+                if (!client.cameraEnabled) return; // no camera channel this session
+                var paused = !(client.cameraPaused);
+                client.setCameraPaused(paused);
+                btnDisableVideo.classList.toggle("fa-red", paused);
+                btnDisableVideo.innerHTML = paused ? '<i class="fa-solid fa-video-slash"></i>' : '<i class="fa-solid fa-video"></i>';
             });
             btnClip.addEventListener("click", function () { client.pushLocalClipboard(); });
 

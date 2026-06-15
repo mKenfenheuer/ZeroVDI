@@ -172,6 +172,8 @@ Client.prototype._startProtocol = function () {
         deviceScaleFactor: 100,
         performanceFlags: this.creds.performanceFlags, // undefined → protocol default (best visuals)
         audio: !!this.audioEnabled,        // request the rdpsnd channel for remote sound
+        microphone: !!this.microphoneEnabled, // accept the AUDIO_INPUT DVC for mic redirection
+        camera: !!this.cameraEnabled,      // accept the RDPECAM DVCs for camera redirection
         clipboard: !!this.clipboardEnabled, // request the cliprdr channel for clipboard sync
     }, {
         onUpdate: this.onUpdate,
@@ -181,6 +183,11 @@ Client.prototype._startProtocol = function () {
         onResize: function (w, h) { self._onRemoteResize(w, h); },
         onDisplayControlReady: function () { self._displayControlReady = true; self._applyInitialScale(); },
         onAudio: function (fmt, pcm) { self._playPcm(fmt, pcm); },
+        onMicOpen: function (fmt) { self._startMicCapture(fmt); },
+        onMicClose: function () { self._stopMicCapture(); },
+        onCameraStart: function (mt) { self._startCameraCapture(mt); },
+        onCameraStop: function () { self._stopCameraCapture(); },
+        onCameraSampleNeeded: function (idx) { self._onCameraSampleNeeded(idx); },
         onClipboardText: function (text) { self._onRemoteClipboardText(text); },
     });
     this.proto.start();
@@ -193,11 +200,23 @@ Client.prototype.setAudioEnabled = function (on) { this.audioEnabled = !!on; };
 // Mute/unmute playback at runtime (the channel stays open; we just drop or pass the waves).
 Client.prototype.setMuted = function (muted) { this.muted = !!muted; };
 
-// Enable/disable camera video redirection at runtime (the channel stays open; we just drop or pass the video).
-Client.prototype.setCameraEnabled = function (cameraEnabled) { this.cameraEnabled = !!cameraEnabled; };
+// Enable camera redirection. Must be set before connect() so the protocol accepts the host's RDPECAM
+// dynamic channels (enumerator + per-device). The webcam stream is acquired lazily when the host
+// actually starts a stream (_startCameraCapture), which is when the permission prompt appears.
+Client.prototype.setCameraEnabled = function (on) { this.cameraEnabled = !!on; };
 
-// Enable/disable mic audio redirection at runtime (the channel stays open; we just drop or pass the audio).
-Client.prototype.setMicrophoneEnabled = function (microphoneEnabled) { this.microphoneEnabled = !!microphoneEnabled; };
+// Pause/resume sending camera frames at runtime without tearing down the channel: while paused we send
+// a blanked (black) frame so the remote app sees a steady feed instead of stalling.
+Client.prototype.setCameraPaused = function (paused) { this.cameraPaused = !!paused; };
+
+// Enable microphone redirection. Must be set before connect() so the protocol accepts the host's
+// AUDIO_INPUT dynamic channel (a host that opens the DVC but gets no capture PDUs can stall its audio
+// set). The actual capture stream is acquired lazily when the host OPENs the channel (_startMicCapture).
+Client.prototype.setMicrophoneEnabled = function (on) { this.microphoneEnabled = !!on; };
+
+// Mute/unmute the mic at runtime without tearing down the channel: we simply stop sending captured
+// PCM upstream (the host's capture device stays open and just receives silence-by-omission).
+Client.prototype.setMicMuted = function (muted) { this.micMuted = !!muted; };
 
 // Create (and resume) the AudioContext. Call from a user gesture (e.g. the connect click) so the
 // browser's autoplay policy lets audio start; the first wave arrives well after the gesture ends.
@@ -251,6 +270,244 @@ Client.prototype._playPcm = function (fmt, pcm) {
     } catch (e) {
         console.warn("audio play error:", e);
     }
+};
+
+// ---- microphone capture (getUserMedia → PCM upstream) --------------------------------------------
+// The host opened the AUDIO_INPUT channel and OPENed the capture device with `fmt` {rate, bits,
+// channels}. Acquire the mic (prompts for permission on first use), then continuously convert
+// captured audio to the requested PCM format and ship it to the server via proto.sendMicPcm().
+//
+// Capture runs through an AudioContext whose hardware sample rate is usually NOT the format's rate, so
+// we linearly resample to fmt.rate and downmix to fmt.channels before quantizing to 16-bit LE PCM.
+Client.prototype._startMicCapture = function (fmt) {
+    const self = this;
+    this._micFmt = fmt;
+    if (this._micStream || this._micStarting) return; // already capturing / acquiring
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        console.warn("mic: getUserMedia unavailable (needs a secure context)");
+        return;
+    }
+    this._micStarting = true;
+    navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false })
+        .then(function (stream) {
+            self._micStarting = false;
+            if (!self.proto || !self.proto.micFormat()) { // host closed the channel while we prompted
+                stream.getTracks().forEach(function (t) { t.stop(); });
+                return;
+            }
+            self._micStream = stream;
+            self._buildMicGraph(stream, self._micFmt);
+        })
+        .catch(function (err) {
+            self._micStarting = false;
+            console.warn("mic: permission/denied or no device:", err && err.name);
+        });
+};
+
+// Wire the capture stream through a ScriptProcessor that emits resampled 16-bit PCM each callback.
+Client.prototype._buildMicGraph = function (stream, fmt) {
+    const self = this;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    // A dedicated capture context (separate from playback) so its rate/lifecycle is independent.
+    this._micCtx = new AC();
+    const src = this._micCtx.createMediaStreamSource(stream);
+    // 4096-frame buffer ≈ 85ms at 48kHz — low enough latency, large enough to be efficient. We resample
+    // from the context's native rate to fmt.rate in the callback.
+    const node = this._micCtx.createScriptProcessor(4096, 1, 1);
+    this._micNode = node;
+    this._micResampleFrac = 0; // fractional read position carried across callbacks for clean resampling
+
+    node.onaudioprocess = function (e) {
+        if (!self.proto || !self.proto.micFormat()) return; // channel closed
+        if (self.micMuted) return;                            // muted → send nothing
+        const input = e.inputBuffer.getChannelData(0);        // mono capture (Float32, -1..1)
+        const inRate = self._micCtx.sampleRate;
+        const pcm = self._resampleToPcm(input, inRate, fmt);
+        if (pcm && pcm.length) self.proto.sendMicPcm(pcm);
+    };
+    src.connect(node);
+    // ScriptProcessor only fires while connected to the destination; route through a muted gain so we
+    // don't echo the mic to the local speakers.
+    const sink = this._micCtx.createGain();
+    sink.gain.value = 0;
+    node.connect(sink);
+    sink.connect(this._micCtx.destination);
+    console.log("mic: capturing", self._micCtx.sampleRate + "Hz →", fmt.rate + "Hz/" + fmt.bits + "bit/" + fmt.channels + "ch");
+};
+
+// Linearly resample a mono Float32 block from `inRate` to fmt.rate and quantize to interleaved PCM in
+// the format's bit depth (16-bit LE in practice). Mono input is duplicated to fmt.channels. The
+// fractional read cursor is carried across calls (this._micResampleFrac) so block boundaries don't click.
+Client.prototype._resampleToPcm = function (input, inRate, fmt) {
+    const outRate = fmt.rate || inRate;
+    const channels = fmt.channels || 1;
+    const ratio = inRate / outRate;
+    const inLen = input.length;
+    // Number of output frames available from this block, continuing from the carried fractional cursor.
+    let pos = this._micResampleFrac;
+    const outFrames = Math.max(0, Math.floor((inLen - pos) / ratio));
+    if (outFrames <= 0) { this._micResampleFrac = pos - inLen; return null; }
+
+    const bytesPerSample = (fmt.bits === 8) ? 1 : 2;
+    const out = new Uint8Array(outFrames * channels * bytesPerSample);
+    const view = new DataView(out.buffer);
+    let o = 0;
+    for (let i = 0; i < outFrames; i++) {
+        const idx = Math.floor(pos);
+        const frac = pos - idx;
+        const s0 = input[idx] || 0;
+        const s1 = (idx + 1 < inLen) ? input[idx + 1] : s0;
+        let sample = s0 + (s1 - s0) * frac; // linear interpolation
+        if (sample > 1) sample = 1; else if (sample < -1) sample = -1;
+        for (let ch = 0; ch < channels; ch++) {
+            if (bytesPerSample === 2) { view.setInt16(o, (sample * 32767) | 0, true); o += 2; }
+            else { out[o++] = (sample * 127 + 128) & 0xff; }
+        }
+        pos += ratio;
+    }
+    // Carry the leftover fractional position into the next block (subtract the consumed input length).
+    this._micResampleFrac = pos - inLen;
+    return out;
+};
+
+// Stop capturing and release the microphone (host closed the channel, or we disconnected).
+Client.prototype._stopMicCapture = function () {
+    if (this._micNode) { try { this._micNode.disconnect(); this._micNode.onaudioprocess = null; } catch (e) {} this._micNode = null; }
+    if (this._micCtx) { try { this._micCtx.close(); } catch (e) {} this._micCtx = null; }
+    if (this._micStream) { this._micStream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} }); this._micStream = null; }
+    this._micResampleFrac = 0;
+};
+
+// ---- camera capture (getUserMedia video → MJPEG frames upstream) ---------------------------------
+// The host started a camera stream at media type `mt` {width, height, fps}. Acquire the webcam (prompts
+// for permission), play it into a hidden <video>, and run a capture loop that encodes each frame to a
+// JPEG (one MJPEG sample) kept in _camLastJpeg. The RDPECAM device handler asks for samples on demand
+// via _onCameraSampleNeeded; we answer with the latest encoded frame.
+Client.prototype._startCameraCapture = function (mt) {
+    const self = this;
+    this._camMt = mt;
+    if (this._camStream || this._camStarting) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        console.warn("camera: getUserMedia unavailable (needs a secure context)");
+        return;
+    }
+    this._camStarting = true;
+    const want = {
+        video: { width: { ideal: mt.width }, height: { ideal: mt.height }, frameRate: { ideal: mt.fps || 30 } },
+        audio: false,
+    };
+    navigator.mediaDevices.getUserMedia(want)
+        .then(function (stream) {
+            self._camStarting = false;
+            if (!self.proto || !self.proto.cameraMediaType()) { // host stopped while we prompted
+                stream.getTracks().forEach(function (t) { t.stop(); });
+                return;
+            }
+            self._camStream = stream;
+            self._buildCameraGraph(stream, self._camMt);
+        })
+        .catch(function (err) {
+            self._camStarting = false;
+            console.warn("camera: permission/denied or no device:", err && err.name);
+        });
+};
+
+// Wire the webcam stream into a hidden <video> + capture <canvas>, and start the per-frame capture loop
+// at the negotiated frame rate. Each frame is converted to the negotiated raw format (NV12) so the host
+// needs no decoder.
+Client.prototype._buildCameraGraph = function (stream, mt) {
+    const self = this;
+    const video = document.createElement("video");
+    video.autoplay = true; video.muted = true; video.playsInline = true;
+    video.srcObject = stream;
+    this._camVideo = video;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = mt.width; canvas.height = mt.height;
+    this._camCanvas = canvas;
+    this._camCtx = canvas.getContext("2d", { willReadFrequently: true });
+    this._camLastFrame = null;
+
+    const fps = Math.max(1, Math.min(30, mt.fps || 15));
+    const interval = Math.round(1000 / fps);
+
+    video.play().catch(function () { /* autoplay should allow muted */ });
+    this._camTimer = setInterval(function () { self._captureCameraFrame(); }, interval);
+    console.log("camera: capturing →", mt.width + "x" + mt.height + "@" + fps + " fmt=" + mt.fmt + " (NV12)");
+};
+
+// Draw the current video frame to the canvas and convert to the negotiated raw format (NV12). Stored as
+// the latest sample; if the host already asked for a frame, answer it now.
+Client.prototype._captureCameraFrame = function () {
+    if (!this._camVideo || !this._camCtx) return;
+    const video = this._camVideo;
+    if (!video.videoWidth) return; // not ready yet
+    const cv = this._camCanvas;
+    if (this.cameraPaused) {
+        this._camCtx.fillStyle = "#000";
+        this._camCtx.fillRect(0, 0, cv.width, cv.height);
+    } else {
+        this._camCtx.drawImage(video, 0, 0, cv.width, cv.height);
+    }
+    const img = this._camCtx.getImageData(0, 0, cv.width, cv.height);
+    this._camLastFrame = this._rgbaToNv12(img.data, cv.width, cv.height);
+    if (this._camSamplePending && this.proto) {
+        this._camSamplePending = false;
+        this.proto.sendCameraFrame(this._camLastFrame);
+    }
+};
+
+// Convert an RGBA buffer to NV12 (4:2:0): a full-resolution Y plane (w*h bytes) followed by an
+// interleaved UV plane (w*h/2 bytes, one U and one V per 2x2 block). BT.601 limited-range coefficients,
+// matching what webcams/RDP expect. Width and height should be even (our advertised sizes are).
+Client.prototype._rgbaToNv12 = function (rgba, w, h) {
+    const ySize = w * h;
+    const out = new Uint8Array(ySize + (w * h) / 2);
+    // Y plane.
+    for (let j = 0, p = 0, q = 0; j < h; j++) {
+        for (let i = 0; i < w; i++, p += 4, q++) {
+            const r = rgba[p], g = rgba[p + 1], b = rgba[p + 2];
+            out[q] = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) & 0xff;
+        }
+    }
+    // UV plane: sample one chroma pair per 2x2 block (average the 4 RGB samples).
+    let uv = ySize;
+    for (let j = 0; j < h; j += 2) {
+        for (let i = 0; i < w; i += 2) {
+            const idx = (j * w + i) * 4;
+            const idxR = idx + 4;                  // pixel to the right
+            const idxD = idx + w * 4;              // pixel below
+            const idxDR = idxD + 4;                // pixel below-right
+            const r = (rgba[idx] + rgba[idxR] + rgba[idxD] + rgba[idxDR]) >> 2;
+            const g = (rgba[idx + 1] + rgba[idxR + 1] + rgba[idxD + 1] + rgba[idxDR + 1]) >> 2;
+            const b = (rgba[idx + 2] + rgba[idxR + 2] + rgba[idxD + 2] + rgba[idxDR + 2]) >> 2;
+            out[uv++] = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128) & 0xff; // U (Cb)
+            out[uv++] = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128) & 0xff;  // V (Cr)
+        }
+    }
+    return out;
+};
+
+// The RDPECAM device handler needs a frame. Answer with the latest captured frame if we have one;
+// otherwise mark a pending request that the next captured frame will satisfy.
+Client.prototype._onCameraSampleNeeded = function (idx) {
+    if (this._camLastFrame && this.proto) {
+        const frame = this._camLastFrame;
+        this._camLastFrame = null; // one sample per captured frame (avoid resending a stale image)
+        this.proto.sendCameraFrame(frame);
+    } else {
+        this._camSamplePending = true;
+    }
+};
+
+// Stop capturing and release the webcam (host stopped the stream, or we disconnected).
+Client.prototype._stopCameraCapture = function () {
+    if (this._camTimer) { clearInterval(this._camTimer); this._camTimer = null; }
+    if (this._camVideo) { try { this._camVideo.pause(); this._camVideo.srcObject = null; } catch (e) {} this._camVideo = null; }
+    if (this._camStream) { this._camStream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} }); this._camStream = null; }
+    this._camCanvas = null; this._camCtx = null; this._camLastFrame = null;
+    this._camSamplePending = false;
 };
 
 // ---- clipboard sync ------------------------------------------------------------------------------
@@ -400,6 +657,11 @@ Client.prototype.deinitialize = function () {
 
     // Tear down the audio timeline so a later reconnect starts fresh (the AudioContext is reused).
     this._audioTime = 0;
+
+    // Release the microphone if we were capturing (stops the OS "in use" indicator on disconnect).
+    this._stopMicCapture();
+    // Release the webcam too (stops the camera light/in-use indicator).
+    this._stopCameraCapture();
 
     this._status("closed", null);
 };
