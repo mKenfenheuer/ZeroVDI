@@ -192,7 +192,6 @@ RdpCamDevice.prototype.onData = function (payload) {
     const msgId = payload[1];
     this.version = version || this.version;
     const body = payload.subarray(2);
-    this._log("dev: <- msgId 0x" + msgId.toString(16) + " len " + payload.length); // DIAG
     switch (msgId) {
         case CAM_MSG_ID_ActivateDeviceRequest: return this._sendGeneric(CAM_MSG_ID_SuccessResponse);
         case CAM_MSG_ID_DeactivateDeviceRequest: this._stop(); return this._sendGeneric(CAM_MSG_ID_SuccessResponse);
@@ -212,7 +211,6 @@ RdpCamDevice.prototype._sendGeneric = function (msgId) {
     this.send(new CamWriter().u8(this.version).u8(msgId).arr());
 };
 RdpCamDevice.prototype._sendError = function (code) {
-    this._log("dev: -> ERROR 0x" + code.toString(16)); // DIAG
     this.send(new CamWriter().u8(this.version).u8(CAM_MSG_ID_ErrorResponse).u32(code).arr());
 };
 

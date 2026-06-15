@@ -379,20 +379,36 @@ Client.prototype._stopMicCapture = function () {
     this._micResampleFrac = 0;
 };
 
-// ---- camera capture (getUserMedia video → MJPEG frames upstream) ---------------------------------
-// The host started a camera stream at media type `mt` {width, height, fps}. Acquire the webcam (prompts
-// for permission), play it into a hidden <video>, and run a capture loop that encodes each frame to a
-// JPEG (one MJPEG sample) kept in _camLastJpeg. The RDPECAM device handler asks for samples on demand
-// via _onCameraSampleNeeded; we answer with the latest encoded frame.
+// ---- camera capture (getUserMedia video → NV12 frames upstream) ----------------------------------
+// The host started a camera stream at media type `mt` {width, height, fps}. We set up the capture
+// canvas + frame loop IMMEDIATELY (so the remote app always gets a steady feed) and acquire the webcam
+// in parallel. Until the webcam is live — or if it's paused, denied, or absent — the loop renders a
+// placeholder frame (camera/permission icon + explanatory text) instead of the live video. Each frame
+// is converted to NV12 so the host needs no decoder. The RDPECAM device handler pulls samples on demand
+// (_onCameraSampleNeeded), answered with the latest frame.
 Client.prototype._startCameraCapture = function (mt) {
     const self = this;
     this._camMt = mt;
-    if (this._camStream || this._camStarting) return;
+    // Capture canvas + loop are independent of whether a webcam stream exists, so placeholder frames
+    // can be produced from the very first SampleRequest. (Re)create only once.
+    if (!this._camCanvas) {
+        const canvas = document.createElement("canvas");
+        canvas.width = mt.width; canvas.height = mt.height;
+        this._camCanvas = canvas;
+        this._camCtx = canvas.getContext("2d", { willReadFrequently: true });
+        this._camLastFrame = null;
+        const fps = Math.max(1, Math.min(30, mt.fps || 15));
+        this._camTimer = setInterval(function () { self._captureCameraFrame(); }, Math.round(1000 / fps));
+    }
+
+    if (this._camStream || this._camStarting) return; // webcam already acquired / acquiring
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        this._camState = "nodevice";
         console.warn("camera: getUserMedia unavailable (needs a secure context)");
         return;
     }
     this._camStarting = true;
+    this._camState = "requesting";
     const want = {
         video: { width: { ideal: mt.width }, height: { ideal: mt.height }, frameRate: { ideal: mt.fps || 30 } },
         audio: false,
@@ -405,56 +421,77 @@ Client.prototype._startCameraCapture = function (mt) {
                 return;
             }
             self._camStream = stream;
-            self._buildCameraGraph(stream, self._camMt);
+            const video = document.createElement("video");
+            video.autoplay = true; video.muted = true; video.playsInline = true;
+            video.srcObject = stream;
+            video.play().catch(function () { /* autoplay should allow muted */ });
+            self._camVideo = video;
+            self._camState = "live";
+            console.log("camera: capturing →", self._camMt.width + "x" + self._camMt.height + " (NV12)");
         })
         .catch(function (err) {
             self._camStarting = false;
-            console.warn("camera: permission/denied or no device:", err && err.name);
+            const name = err && err.name;
+            // NotAllowedError = permission denied; NotFoundError/OverconstrainedError = no camera.
+            self._camState = (name === "NotFoundError" || name === "OverconstrainedError" || name === "NotReadableError") ? "nodevice" : "denied";
+            console.warn("camera: " + self._camState + " (" + name + ")");
         });
 };
 
-// Wire the webcam stream into a hidden <video> + capture <canvas>, and start the per-frame capture loop
-// at the negotiated frame rate. Each frame is converted to the negotiated raw format (NV12) so the host
-// needs no decoder.
-Client.prototype._buildCameraGraph = function (stream, mt) {
-    const self = this;
-    const video = document.createElement("video");
-    video.autoplay = true; video.muted = true; video.playsInline = true;
-    video.srcObject = stream;
-    this._camVideo = video;
-
-    const canvas = document.createElement("canvas");
-    canvas.width = mt.width; canvas.height = mt.height;
-    this._camCanvas = canvas;
-    this._camCtx = canvas.getContext("2d", { willReadFrequently: true });
-    this._camLastFrame = null;
-
-    const fps = Math.max(1, Math.min(30, mt.fps || 15));
-    const interval = Math.round(1000 / fps);
-
-    video.play().catch(function () { /* autoplay should allow muted */ });
-    this._camTimer = setInterval(function () { self._captureCameraFrame(); }, interval);
-    console.log("camera: capturing →", mt.width + "x" + mt.height + "@" + fps + " fmt=" + mt.fmt + " (NV12)");
-};
-
-// Draw the current video frame to the canvas and convert to the negotiated raw format (NV12). Stored as
-// the latest sample; if the host already asked for a frame, answer it now.
+// Draw the current source (live video, or a placeholder when paused/denied/absent/not-ready) to the
+// canvas and convert to NV12. Stored as the latest sample; if the host already asked, answer now.
 Client.prototype._captureCameraFrame = function () {
-    if (!this._camVideo || !this._camCtx) return;
-    const video = this._camVideo;
-    if (!video.videoWidth) return; // not ready yet
+    if (!this._camCtx) return;
     const cv = this._camCanvas;
-    if (this.cameraPaused) {
-        this._camCtx.fillStyle = "#000";
-        this._camCtx.fillRect(0, 0, cv.width, cv.height);
+    const live = this._camVideo && this._camVideo.videoWidth && !this.cameraPaused && this._camState === "live";
+    if (live) {
+        this._camCtx.drawImage(this._camVideo, 0, 0, cv.width, cv.height);
     } else {
-        this._camCtx.drawImage(video, 0, 0, cv.width, cv.height);
+        this._drawCameraPlaceholder(this._camCtx, cv.width, cv.height);
     }
     const img = this._camCtx.getImageData(0, 0, cv.width, cv.height);
     this._camLastFrame = this._rgbaToNv12(img.data, cv.width, cv.height);
     if (this._camSamplePending && this.proto) {
         this._camSamplePending = false;
         this.proto.sendCameraFrame(this._camLastFrame);
+    }
+};
+
+// Render a placeholder frame explaining why there's no live video: a camera (or permission) glyph and
+// a short message, centered on a dark background. The reason is taken from cameraPaused / _camState.
+Client.prototype._drawCameraPlaceholder = function (ctx, w, h) {
+    let icon = "📷";   // 📷 camera
+    let title = "Camera off";
+    let subtitle = "";
+    if (this.cameraPaused) {
+        icon = "🚫"; title = "Camera paused"; subtitle = "Resume from the toolbar to share video.";
+    } else if (this._camState === "denied") {
+        icon = "🔒"; title = "Camera permission needed"; // 🔒
+        subtitle = "Allow camera access in your browser, then reconnect.";
+    } else if (this._camState === "nodevice") {
+        icon = "📷"; title = "No camera available"; subtitle = "No webcam was found on this device.";
+    } else if (this._camState === "requesting") {
+        icon = "📷"; title = "Starting camera…"; subtitle = "Waiting for permission.";
+    }
+
+    ctx.fillStyle = "#16181d";
+    ctx.fillRect(0, 0, w, h);
+
+    const cx = w / 2;
+    const cy = h / 2;
+    const unit = Math.min(w, h);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#e6e6e6";
+    ctx.font = Math.round(unit * 0.22) + "px sans-serif";
+    ctx.fillText(icon, cx, cy - unit * 0.08);
+    ctx.fillStyle = "#f0f0f0";
+    ctx.font = "600 " + Math.round(unit * 0.07) + "px sans-serif";
+    ctx.fillText(title, cx, cy + unit * 0.16);
+    if (subtitle) {
+        ctx.fillStyle = "#9aa0a6";
+        ctx.font = Math.round(unit * 0.045) + "px sans-serif";
+        ctx.fillText(subtitle, cx, cy + unit * 0.27);
     }
 };
 
@@ -507,7 +544,7 @@ Client.prototype._stopCameraCapture = function () {
     if (this._camVideo) { try { this._camVideo.pause(); this._camVideo.srcObject = null; } catch (e) {} this._camVideo = null; }
     if (this._camStream) { this._camStream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} }); this._camStream = null; }
     this._camCanvas = null; this._camCtx = null; this._camLastFrame = null;
-    this._camSamplePending = false;
+    this._camSamplePending = false; this._camStarting = false; this._camState = null;
 };
 
 // ---- clipboard sync ------------------------------------------------------------------------------
