@@ -31,6 +31,7 @@ const RDPGFX_CMDID_DELETESURFACE = 0x000a;
 const RDPGFX_CMDID_STARTFRAME = 0x000b;
 const RDPGFX_CMDID_ENDFRAME = 0x000c;
 const RDPGFX_CMDID_FRAMEACKNOWLEDGE = 0x000d;
+const RDPGFX_CMDID_QOEFRAMEACKNOWLEDGE = 0x0016;
 const RDPGFX_CMDID_RESETGRAPHICS = 0x000e;
 const RDPGFX_CMDID_MAPSURFACETOOUTPUT = 0x000f;
 const RDPGFX_CMDID_CACHEIMPORTREPLY = 0x0011;
@@ -58,8 +59,12 @@ const RDPGFX_CAPVERSION_107 = 0x000a0701;
 const RDPGFX_CAPVERSION_111 = 0x000b0101;
 const RDPGFX_CAPVERSION_112 = 0x000b0200;
 const RDPGFX_CAPVERSION_113 = 0x000b0300;
+const RDPGFX_CAPS_FLAG_THINCLIENT = 0x00000001;     // 8.0+
+const RDPGFX_CAPS_FLAG_SMALL_CACHE = 0x00000002;    // 8.0+: advertise a small offscreen cache
 const RDPGFX_CAPS_FLAG_AVC420_ENABLED = 0x00000010; // 8.1+: AVC420 (H.264) permitted
 const RDPGFX_CAPS_FLAG_AVC_DISABLED = 0x00000020;   // 10.0+: forbid AVC on this capset
+const RDPGFX_CAPS_FLAG_AVC_THINCLIENT = 0x00000040; // 10.3+
+const RDPGFX_CAPS_FLAG_SCALEDMAP_DISABLE = 0x00000080; // 10.7+: tell host NOT to use SCALED output map
 
 // ---- codec ids (rdpgfx.h) -----------------------------------------------------------------------
 const RDPGFX_CODECID_UNCOMPRESSED = 0x0000;
@@ -75,15 +80,9 @@ const RDPGFX_CODECID_AVC444v2 = 0x000f;
 const GFX_PIXEL_FORMAT_XRGB_8888 = 0x20;
 const GFX_PIXEL_FORMAT_ARGB_8888 = 0x21;
 
-// FRAME_ACKNOWLEDGE.queueDepth values ([MS-RDPEGFX] 2.2.2.13 / rdpgfx.h):
-//   QUEUE_DEPTH_UNAVAILABLE (0)          — normal per-frame ack; host gates output on our ack cadence.
-//   SUSPEND_FRAME_ACKNOWLEDGEMENT (0xFFFFFFFF) — tell the host to stop requiring acks and free-run.
-// mstsc sends a few normal acks then ONE suspend ack to switch the host into continuous streaming.
+// FRAME_ACKNOWLEDGE.queueDepth ([MS-RDPEGFX] 2.2.2.13): we send QUEUE_DEPTH_UNAVAILABLE (0) per frame,
+// paired with a QOE_FRAME_ACKNOWLEDGE — the combination mstsc uses to keep the host streaming.
 const RDPGFX_QUEUE_DEPTH_UNAVAILABLE = 0x00000000;
-const RDPGFX_SUSPEND_FRAME_ACK = 0xFFFFFFFF;
-// How many frames to ack normally before sending the SUSPEND sentinel (mirrors mstsc, which suspended
-// at frame 20; a smaller number flips to free-run sooner so we never sit in the gated/stalling window).
-const RDPGFX_SUSPEND_AFTER_FRAMES = 4;
 
 // cb: { onLog, onPaint(canvas, sx, sy, sw, sh, dx, dy), onReset(w, h), send(payload) }
 //   onPaint blits a region (sx,sy,sw,sh) of an offscreen surface canvas to output pixel (dx,dy).
@@ -114,7 +113,7 @@ RdpGfx.prototype.reset = function () {
     for (const id in this.decoders) this.decoders[id].close();
     this.surfaces = {}; this.outputMap = {}; this.decoders = {}; this.cache = {};
     this._dirty = []; this.confirmedVersion = 0; this.framesDecoded = 0;
-    this._acksSuspended = false;
+    this._qoeT0 = null;
     if (this.clear) this.clear.reset();
 };
 
@@ -132,41 +131,33 @@ RdpGfx.prototype.reset = function () {
 //   "avc444"     — same advertisement; the host may additionally use AVC444 (we decode the luma view).
 RdpGfx.prototype.buildCapsAdvertise = function () {
     let caps;
-    if (this.mode === "avc420") {
-        // Single-stream AVC420. CRITICAL BALANCE (learned the hard way against this host):
-        //   - Cap at v8.1 → host confirms v8.0 with AVC DISABLED and streams ClearCodec 64x64 tiles
-        //     (hundreds of paints per frame, no H.264). Too low.
-        //   - Advertise the v11.x (0x000b01xx) capsets → host selects AVC444v2 (codecId 0x0f), whose
-        //     stream1 is NOT a plain YUV420 image — we render black/green and the stream stalls. Too high.
-        // The sweet spot is v8 + v8.1(AVC420) + v10 + v10.1, all flags=0 (AVC420 ENABLED, AVC444 NOT
-        // requested). The host confirms v10 (0x000a0002) and streams single-stream AVC420 (codecId 0x0b),
-        // a standard YUV420 H.264 frame WebCodecs decodes directly. Do NOT add v10.2+/v11.x here.
-        const f = 0;
+    if (this.mode === "avc420" || this.mode === "avc444") {
+        // mstsc negotiates v11.1 (0x000b0101) and the host then free-runs AVC444v2 (codecId 0x0f). When we
+        // advertised v11.1/v11.2/v11.3 the host confirmed v11.2 and streamed AVC420 (0x0b) then stalled.
+        // FreeRDP's v11.x capsets are length=4, flags=caps10Flags(=0). Cap at v11.1 (drop v11.2/v11.3) so
+        // the host can only pick v11.1 — matching mstsc's outcome. (Adding a flag 0x4 made the host REJECT
+        // the v11.1 capset entirely and fall back to v10.7 — so v11.x flags MUST be 0.)
+        // EXACT byte-for-byte match of the working macOS Remote Desktop app's CAPS_ADVERTISE, recovered
+        // by MPPC-decompressing its bulk-compressed caps PDU from a MITM c2s capture (it advertises caps
+        // RDP-bulk-compressed; we send uncompressed, but the host confirms v11.1 from both). The decisive
+        // difference we'd been missing: the macOS app sets SMALL_CACHE (0x02) on nearly every capset, and
+        // its confirmed v11.1 capset carries flags=0x82 (SMALL_CACHE | SCALEDMAP_DISABLE) — we were
+        // sending 0x80 (SCALEDMAP_DISABLE only). It also advertises a DIFFERENT capset LIST (includes
+        // v10.3 and v11.3; OMITS v10.1/v10.5/v10.6). Match the list and flags exactly. The 0x02 bit on
+        // the confirmed capset is the suspected fix for the host's 2nd RESET / stall.
+        const SC = RDPGFX_CAPS_FLAG_SMALL_CACHE;            // 0x02
+        const SC_AVCOFF = SC | RDPGFX_CAPS_FLAG_AVC_DISABLED;        // 0x22
+        const SC_NOSCALE = SC | RDPGFX_CAPS_FLAG_SCALEDMAP_DISABLE;  // 0x82
         caps = [
-            { version: RDPGFX_CAPVERSION_8, flags: 0, len: 4 },
-            { version: RDPGFX_CAPVERSION_81, flags: RDPGFX_CAPS_FLAG_AVC420_ENABLED, len: 4 },
-            { version: RDPGFX_CAPVERSION_10, flags: f, len: 4 },
-            { version: RDPGFX_CAPVERSION_101, flags: 0, len: 0x10 }, // v10.1 body is 16 bytes (all-zero)
-        ];
-    } else if (this.mode === "avc444") {
-        // Mirror FreeRDP rdpgfx_send_supported_caps with GfxH264=on: advertise the full set so the host
-        // may stream AVC444. (Only meaningful once the AVC444 YUV444 reassembly is implemented; until
-        // then prefer mode "avc420".)
-        const f = 0;
-        caps = [
-            { version: RDPGFX_CAPVERSION_8, flags: 0, len: 4 },
-            { version: RDPGFX_CAPVERSION_81, flags: RDPGFX_CAPS_FLAG_AVC420_ENABLED, len: 4 },
-            { version: RDPGFX_CAPVERSION_10, flags: f, len: 4 },
-            { version: RDPGFX_CAPVERSION_101, flags: 0, len: 0x10 }, // v10.1 body is 16 bytes (all-zero)
-            { version: RDPGFX_CAPVERSION_102, flags: f, len: 4 },
-            { version: RDPGFX_CAPVERSION_103, flags: f, len: 4 },
-            { version: RDPGFX_CAPVERSION_104, flags: f, len: 4 },
-            { version: RDPGFX_CAPVERSION_105, flags: f, len: 4 },
-            { version: RDPGFX_CAPVERSION_106, flags: f, len: 4 },
-            { version: RDPGFX_CAPVERSION_107, flags: f, len: 4 },
-            { version: RDPGFX_CAPVERSION_111, flags: f, len: 4 },
-            { version: RDPGFX_CAPVERSION_112, flags: f, len: 4 },
-            { version: RDPGFX_CAPVERSION_113, flags: f, len: 4 },
+            { version: RDPGFX_CAPVERSION_8,   flags: SC, len: 4 },
+            { version: RDPGFX_CAPVERSION_81,  flags: SC, len: 4 },
+            { version: RDPGFX_CAPVERSION_10,  flags: SC_AVCOFF, len: 4 },
+            { version: RDPGFX_CAPVERSION_102, flags: SC_AVCOFF, len: 4 },
+            { version: RDPGFX_CAPVERSION_103, flags: RDPGFX_CAPS_FLAG_AVC_DISABLED, len: 4 }, // 0x20
+            { version: RDPGFX_CAPVERSION_104, flags: SC, len: 4 },
+            { version: RDPGFX_CAPVERSION_107, flags: SC_NOSCALE, len: 4 },
+            { version: RDPGFX_CAPVERSION_111, flags: SC_NOSCALE, len: 4 },
+            { version: RDPGFX_CAPVERSION_113, flags: SC_NOSCALE, len: 4 },
         ];
     } else {
         caps = [
@@ -218,12 +209,17 @@ RdpGfx.prototype.onChannelData = function (data) {
         this._dispatch(cmdId, body);
         off += pduLength;
     }
-    if ((this._walkDbg = (this._walkDbg || 0) + 1) <= 400)
+    // Log EVERY GFX blob (no cap). To diagnose the post-keyframe stall we need to know definitively
+    // whether the host keeps sending after frame ~2 — a silent cap hid that. Toggle off via
+    // window.RDP_GFX_QUIET=1 once the stall is understood.
+    if (!(typeof window !== "undefined" && window.RDP_GFX_QUIET))
         this._log("rdpgfx: PDU walk blob=" + inflated.length + " [" + seq.join(" ") + "] consumed=" + off);
 };
 
 RdpGfx.prototype._dispatch = function (cmdId, body) {
     const r = new ByteReader(body);
+    if (!(typeof window !== "undefined" && window.RDP_GFX_QUIET))
+        this._log("rdpgfx:   dispatch cmdId=0x" + cmdId.toString(16) + " bodyLen=" + body.length);
     switch (cmdId) {
         case RDPGFX_CMDID_CAPSCONFIRM: return this._onCapsConfirm(r);
         case RDPGFX_CMDID_RESETGRAPHICS: return this._onResetGraphics(r);
@@ -323,30 +319,28 @@ RdpGfx.prototype._onMapSurfaceToScaledOutput = function (r) {
 RdpGfx.prototype._onStartFrame = function (r) {
     /* timestamp */ r.u32le();
     this._curFrameId = r.u32le();
+    this._frameStartMs = Date.now();   // for QOE timeDiffSE (START->END)
+    if (!(typeof window !== "undefined" && window.RDP_GFX_QUIET))
+        this._log("rdpgfx: START_FRAME frameId=" + this._curFrameId);
     this._dirty = [];
 };
 
 // END_FRAME: flush this frame's dirty regions to the output, then acknowledge.
 //
-// THE STALL FIX (verified by a MITM capture of mstsc against this exact host): with queueDepth=0
-// (QUEUE_DEPTH_UNAVAILABLE) on every ack, the host gates its output on our per-frame acks and stalls
-// after the initial burst. mstsc acks frames 1..19 with queueDepth=0, then sends ONE ack with
-// queueDepth=0xFFFFFFFF (SUSPEND_FRAME_ACKNOWLEDGEMENT) — after which the host FREE-RUNS and streams
-// continuously (we observed 759 frames/25s vs our ~7-frame stall). So we mirror mstsc: ack normally for
-// the first few frames, then send the SUSPEND sentinel once to flip the host into continuous mode, and
-// stop per-frame acking thereafter (mstsc then only sends QOE acks, which are optional).
+// THE STALL FIX (verified by a MITM capture of mstsc against this exact host): for EVERY frame mstsc
+// sends BOTH a FRAME_ACKNOWLEDGE (cmdId 0x0d, queueDepth=0) AND a QOE_FRAME_ACKNOWLEDGE (cmdId 0x16).
+// We previously sent only the FRAME_ACK; the host gates its GFX output on the QOE acks and stalls after
+// the initial burst without them. So we now mirror mstsc: per-frame FRAME_ACK + QOE_FRAME_ACK, no early
+// suspend (mstsc kept normal acks through frame ~19 and only later sent the SUSPEND sentinel).
 RdpGfx.prototype._onEndFrame = function (r) {
     const frameId = r.u32le();
     this.framesDecoded++;
-    if (this.framesDecoded < RDPGFX_SUSPEND_AFTER_FRAMES) {
-        this._sendFrameAck(frameId, RDPGFX_QUEUE_DEPTH_UNAVAILABLE);
-    } else if (this.framesDecoded === RDPGFX_SUSPEND_AFTER_FRAMES) {
-        // Flip the host to free-run: one ack with the SUSPEND sentinel.
-        this._sendFrameAck(frameId, RDPGFX_SUSPEND_FRAME_ACK);
-        this._acksSuspended = true;
-    }
-    // After suspend: do not send further FRAME_ACKs (host no longer requires them). QOE acks are
-    // optional and omitted.
+    // queueDepth: real decodeQueueSize was tested and did NOT change the host's mid-large-frame pause, so
+    // it's not the flow gate. Back to QUEUE_DEPTH_UNAVAILABLE (the macOS app also sends 0 for most frames).
+    this._sendFrameAck(frameId, RDPGFX_QUEUE_DEPTH_UNAVAILABLE);
+    this._sendQoeFrameAck(frameId);
+    if (!(typeof window !== "undefined" && window.RDP_GFX_QUIET))
+        this._log("rdpgfx: END_FRAME " + frameId + " acked (FRAME_ACK+QOE), totalDecoded=" + this.framesDecoded);
 };
 
 RdpGfx.prototype._sendFrameAck = function (frameId, queueDepth) {
@@ -356,16 +350,33 @@ RdpGfx.prototype._sendFrameAck = function (frameId, queueDepth) {
     body.u32le(this.framesDecoded);              // totalFramesDecoded
     if (this.cb.send) {
         this.cb.send(this._wrapPdu(RDPGFX_CMDID_FRAMEACKNOWLEDGE, body.toArray()));
-        // Log the in-flight window the host watches (hostFrameId - totalFramesDecoded). If this grows
-        // without bound the host is NOT crediting our acks and will stall; if it stays small the stall
-        // is elsewhere. Also stamp wall-clock so we can see WHEN the last frame arrived before a freeze.
-        if ((this._ackDbg = (this._ackDbg || 0) + 1) <= 2000)
+        if (!(typeof window !== "undefined" && window.RDP_GFX_QUIET))
             this._log("rdpgfx: sent FRAME_ACK frameId=" + frameId + " total=" + this.framesDecoded +
-                " queueDepth=0x" + (queueDepth >>> 0).toString(16) +
-                (queueDepth === RDPGFX_SUSPEND_FRAME_ACK ? " (SUSPEND → host free-runs)" : ""));
+                " queueDepth=0x" + (queueDepth >>> 0).toString(16));
     } else {
         this._log("rdpgfx: NO send callback — cannot ack frame " + frameId);
     }
+};
+
+// QOE_FRAME_ACKNOWLEDGE ([MS-RDPEGFX] 2.2.2.14): frameId(4) timestamp(4) timeDiffSE(2) timeDiffEDR(2).
+// mstsc sends one per frame and the host requires them to keep the GFX video stream free-running. We
+// report a monotonic timestamp (ms since first frame) and zero time-diffs (we don't measure E2E latency).
+RdpGfx.prototype._sendQoeFrameAck = function (frameId) {
+    if (!this.cb.send) return;
+    // Match mstsc's QOE exactly (recovered from MITM): it sends a RAW wall-clock tick (GetTickCount,
+    // a large 32-bit value like 0x17e43536) as the timestamp — NOT a since-first-frame delta starting
+    // at 0. The spec calls QOE informational, but this host gated v3 and caps on "informational" fields
+    // too, so we mirror mstsc precisely: raw Date.now() low-32 timestamp + small real timeDiffSE.
+    const now = Date.now() >>> 0;
+    if (this._qoeStartT == null) this._qoeStartT = now;
+    const ts = now;                                  // raw tick, like mstsc
+    const diffSE = Math.min(0xffff, (this._frameStartMs ? (now - this._frameStartMs) : 0)) & 0xffff;
+    const body = new ByteWriter();
+    body.u32le(frameId);   // frameId
+    body.u32le(ts);        // timestamp (raw ms tick)
+    body.u16le(diffSE);    // timeDiffSE (START->END decode, ms)
+    body.u16le(0);         // timeDiffEDR
+    this.cb.send(this._wrapPdu(RDPGFX_CMDID_QOEFRAMEACKNOWLEDGE, body.toArray()));
 };
 
 // WIRE_TO_SURFACE_1: a codec-encoded bitmap for a surface rect. We decode AVC420 (H.264) and, when
@@ -449,23 +460,28 @@ RdpGfx.prototype._decodeAvc420 = function (surfaceId, surf, destRect, data) {
     // quantQualityVals: numRegionRects * 2 bytes (qpVal, qualityVal) — we don't need them for decode.
     r.skip(numRegionRects * 2);
     const h264 = r.bytes(r.remaining());
-    this._log("rdpgfx: AVC420 surf=" + surfaceId + " rects=" + numRegionRects +
-        " h264=" + h264.length + "B firstNALs=" + nalSummary(h264));
-    // Capture the LIVE GFX H.264 stream: append every AVC420 payload (keyframe + all deltas) to one
-    // growing Annex-B file on the gateway, so ffmpeg can decode the whole sequence offline and we can
-    // see whether ANY frame the host sends carries real content. Set window.RDP_DUMP_H264=1 to enable;
-    // window.RDP_DUMP_H264_MAX caps the frame count (default 120). The first POST (no ?append) truncates.
+    if ((this._avcDbg = (this._avcDbg || 0) + 1) <= 8)
+        this._log("rdpgfx: AVC420 surf=" + surfaceId + " rects=" + numRegionRects +
+            " h264=" + h264.length + "B firstNALs=" + nalSummary(h264));
+    // Optional one-shot stream dump for offline ffmpeg analysis (window.RDP_DUMP_H264=1, capped).
     if (typeof window !== "undefined" && window.RDP_DUMP_H264) {
         const max = window.RDP_DUMP_H264_MAX || 120;
         const n = (window.__h264dumpN = (window.__h264dumpN || 0) + 1);
         if (n <= max) {
-            const self = this;
             const append = n > 1 ? "?append=1" : "";
-            fetch("/debug/dump/stream.h264" + append, { method: "POST", body: h264.slice() })
-                .then(function (r) { return r.json(); })
-                .then(function (j) { if (n === 1 || n === max) self._log("rdpgfx: H264 stream dump #" + n + " " + JSON.stringify(j)); })
-                .catch(function (e) { self._log("rdpgfx: H264 dump failed: " + e); });
+            fetch("/debug/dump/stream.h264" + append, { method: "POST", body: h264.slice() }).catch(function () {});
         }
+    }
+
+    // DIAGNOSTIC: drop H.264 frames entirely (no WebCodecs) to verify the GFX frame STREAM keeps
+    // flowing independently of decoder buffering. END_FRAME acks happen in _onEndFrame regardless of
+    // decode, so if the host keeps sending while we drop+ack, the "stall" is purely decoder output
+    // delay (not protocol). Enable with window.RDP_GFX_NODECODE=1.
+    if (typeof window !== "undefined" && window.RDP_GFX_NODECODE) {
+        const n = (this._nodecodeCount = (this._nodecodeCount || 0) + 1);
+        this._log("rdpgfx: NODECODE drop frame #" + n + " surf=" + surfaceId + " rects=" + numRegionRects +
+            " h264=" + h264.length + "B nals=" + nalSummary(h264));
+        return;
     }
 
     let dec = this.decoders[surfaceId];
@@ -522,7 +538,11 @@ RdpGfx.prototype.onDecodedFrame = function (surfaceId, frame, regions) {
     const surf = this.surfaces[surfaceId];
     if (!surf) { if (frame.close) frame.close(); return; }
     const self = this;
-    const fw = frame.codedWidth, fh = frame.codedHeight;
+    // copyTo() produces the frame's VISIBLE rect (coded size minus H.264 crop/16-alignment), so the
+    // RGBA buffer stride is visibleRect.width, NOT codedWidth. Region rects from the metablock are in
+    // visible-frame coordinates. Fall back to coded size if visibleRect is absent.
+    const vr = frame.visibleRect || { x: 0, y: 0, width: frame.codedWidth, height: frame.codedHeight };
+    const fw = vr.width, fh = vr.height;
     const cw = Math.min(fw, surf.width), ch = Math.min(fh, surf.height);
 
     // DEBUG: draw the decoded VideoFrame STRAIGHT to the visible output canvas, bypassing the offscreen
@@ -533,25 +553,73 @@ RdpGfx.prototype.onDecodedFrame = function (surfaceId, frame, regions) {
         return;
     }
 
-    // Render the decoded frame via createImageBitmap → drawImage. Going through the browser's image
-    // pipeline (rather than raw copyTo pixel reads) is the reliable path for GPU-backed decoded frames
-    // in Firefox: raw copyTo returned uniform ~1 (collapsed) pixels, but the bitmap path composites the
-    // frame correctly through the video color pipeline.
+    // Render the decoded frame via VideoFrame.copyTo() into an explicit RGBA CPU buffer, then
+    // putImageData per region rect. WHY copyTo and not drawImage/createImageBitmap: in Firefox a
+    // GPU-backed decoded H.264 VideoFrame composited to a 2D canvas yields ALL BLACK (observed here:
+    // fmt=BGRX, nonBlack=0/4111360 via the createImageBitmap path). copyTo with an EXPLICIT
+    // { format: "RGBA" } forces the browser to read the frame back to CPU and do the BGRX/YUV→RGBA
+    // conversion into a buffer we own — the reliable path. (An earlier copyTo attempt got "collapsed"
+    // pixels because it copied in the frame's NATIVE layout and misread it as RGBA; specifying the
+    // output format is the fix.)
     //
-    // CRITICAL ([MS-RDPEGFX] AVC420 / FreeRDP yuv420_context_decode): the H.264 decoder produces a
-    // FULL-surface frame, but ONLY the metablock's region rects carry valid pixels for THIS update — a
-    // P-frame leaves the non-dirty areas as black/skip. So we must copy ONLY the region rects from the
-    // decoded frame onto the persistent surface; drawing the whole frame would overwrite previously-good
-    // pixels (e.g. the video region painted by an earlier frame) with the current frame's black non-dirty
-    // areas — which is exactly the "content at top, black centre" corruption. With no regions (keyframe
-    // covering everything) copy the whole frame.
+    // CRITICAL ([MS-RDPEGFX] AVC420 / FreeRDP yuv420_context_decode): the decoder emits a FULL-surface
+    // frame, but only the metablock region rects carry valid pixels for THIS update; a P-frame leaves
+    // non-dirty areas black/skip. So we putImageData ONLY the region rects onto the persistent surface
+    // (whole frame when there are no regions, e.g. a covering keyframe).
+    const rects = (regions && regions.length)
+        ? regions
+        : [{ left: 0, top: 0, right: cw, bottom: ch }];
+    const paintRgba = function (rgba) {
+        try {
+            for (const rc of rects) {
+                const sl = Math.max(0, rc.left), st = Math.max(0, rc.top);
+                const sr = Math.min(cw, rc.right), sb = Math.min(ch, rc.bottom);
+                const w = sr - sl, h = sb - st;
+                if (w <= 0 || h <= 0) continue;
+                // Extract this rect's rows from the full-frame RGBA buffer (stride = fw*4).
+                const sub = new Uint8ClampedArray(w * h * 4);
+                for (let row = 0; row < h; row++) {
+                    const srcOff = ((st + row) * fw + sl) * 4;
+                    sub.set(rgba.subarray(srcOff, srcOff + w * 4), row * w * 4);
+                }
+                surf.ctx.putImageData(new ImageData(sub, w, h), sl, st);
+            }
+            self._afterSurfaceUpdate(surfaceId, surf, rects);
+            const fn = (self._dbgFrames = (self._dbgFrames || 0) + 1);
+            if (fn <= 6 || fn % 60 === 0)
+                self._log("rdpgfx: H264 frame #" + fn + " painted surf " + surfaceId + " rects=" +
+                    rects.length + " " + self._surfSample(surf));
+        } catch (e) {
+            self._log("rdpgfx: H264 paint threw: " + (e && e.message || e));
+        } finally {
+            if (frame.close) frame.close();
+        }
+    };
+    // copyTo into RGBA. allocationSize/copyTo with {format:"RGBA"} are widely supported; if copyTo
+    // rejects (older impls), fall back to the createImageBitmap path.
+    let rgba;
+    try {
+        rgba = new Uint8ClampedArray(fw * fh * 4);
+    } catch (e) { rgba = null; }
+    if (rgba && frame.copyTo) {
+        frame.copyTo(rgba, { format: "RGBA" }).then(function () {
+            paintRgba(rgba);
+        }).catch(function (e) {
+            self._log("rdpgfx: H264 copyTo(RGBA) failed: " + (e && e.message || e) + " — trying bitmap");
+            self._paintViaBitmap(surfaceId, surf, frame, rects, cw, ch);
+        });
+        return;
+    }
+    self._paintViaBitmap(surfaceId, surf, frame, rects, cw, ch);
+};
+
+// Fallback render path: createImageBitmap(frame) → drawImage per region rect. Used only when copyTo is
+// unavailable or rejects. Consumes (closes) the frame.
+RdpGfx.prototype._paintViaBitmap = function (surfaceId, surf, frame, rects, cw, ch) {
+    const self = this;
     createImageBitmap(frame).then(function (bmp) {
         try {
-            const rects = (regions && regions.length)
-                ? regions
-                : [{ left: 0, top: 0, right: cw, bottom: ch }];
             for (const rc of rects) {
-                // Clamp to the decoded frame / surface bounds so a stray rect can't throw.
                 const sl = Math.max(0, rc.left), st = Math.max(0, rc.top);
                 const sr = Math.min(cw, rc.right), sb = Math.min(ch, rc.bottom);
                 const w = sr - sl, h = sb - st;
@@ -560,9 +628,10 @@ RdpGfx.prototype.onDecodedFrame = function (surfaceId, frame, regions) {
             }
             bmp.close && bmp.close();
             self._afterSurfaceUpdate(surfaceId, surf, rects);
-            const dbg = (self._dbgFrames = (self._dbgFrames || 0) + 1) <= 400;
-            if (dbg) self._log("rdpgfx: H264 painted(bitmap) surf " + surfaceId + " " + cw + "x" + ch +
-                " rects=" + rects.length + " " + self._surfSample(surf));
+            const fn = (self._dbgFrames = (self._dbgFrames || 0) + 1);
+            if (fn <= 6 || fn % 60 === 0)
+                self._log("rdpgfx: H264 frame #" + fn + " painted(bitmap) surf " + surfaceId +
+                    " rects=" + rects.length + " " + self._surfSample(surf));
         } catch (e) {
             self._log("rdpgfx: H264 bitmap paint threw: " + (e && e.message || e));
         } finally {
@@ -854,20 +923,41 @@ H264SurfaceDecoder.prototype._configureFrom = function (annexb) {
         if (t === 7 && !sps) sps = nal;
         else if (t === 8) ppsList.push(nal);
     }
-    if (!sps || ppsList.length === 0) {
-        this.gfx._log("rdpgfx: H264 keyframe missing SPS/PPS — cannot build avcC");
-        // Fall back to Annex-B mode without description.
-        this._avcc = false;
-    } else {
+    // Config mode. The spec ([MS-RDPEGFX] 2.2.4.4: avc420EncodedBitstream is "a single frame ...
+    // conforming to ... Annex B") guarantees: in-band SPS/PPS on each keyframe, ONE frame per access
+    // unit, and NO B-frames (a live desktop encoder never reorders). So decode order == output order
+    // and nothing should sit in a reorder buffer. We therefore prefer the SPEC-NATIVE Annex-B in-band
+    // config (no avcC `description`): the decoder parses the real SPS+VUI and honours its low-delay
+    // signaling, emitting each frame immediately. The avcC path strips SPS/PPS out-of-band and made
+    // some decoders apply a conservative multi-frame output delay (the ~1-2 frame lag observed — the
+    // newest frame stays buffered, so on a static desktop the picture looks frozen one frame behind).
+    // (The earlier "annexb → all black" note was the createImageBitmap RENDER bug, since fixed by the
+    // copyTo-RGBA path — NOT a decode failure — so that objection no longer applies.)
+    // Set window.RDP_GFX_AVCC=1 to force the old out-of-band avcC path for comparison.
+    const forceAvcc = (typeof window !== "undefined" && window.RDP_GFX_AVCC);
+    if (forceAvcc && sps && ppsList.length) {
         this._avcc = true;
         this._desc = buildAvcC(sps, ppsList);
+    } else {
+        this._avcc = false; // spec-native Annex-B in-band
     }
     const codec = sps ? avcCodecString({ profile: sps[1], constraints: sps[2], level: sps[3] }) : "avc1.4d402a";
     const self = this;
     if (!this.decoder) {
         this.decoder = new VideoDecoder({
             output: function (frame) { self._onFrame(frame); },
-            error: function (e) { self.gfx._log("rdpgfx: H264 decoder error: " + (e && e.message || e)); },
+            // A WebCodecs decoder error closes the decoder. If we don't reset our state, every later
+            // decode() silently throws and frames stop emitting while the host keeps streaming — the
+            // picture freezes ("intermittent stall"). Mark ourselves un-configured so the NEXT keyframe
+            // rebuilds a fresh decoder. Drop any pending region lists (they belong to lost frames).
+            error: function (e) {
+                self.gfx._log("rdpgfx: H264 decoder error: " + (e && e.message || e) + " — will rebuild on next keyframe");
+                try { if (self.decoder && self.decoder.state !== "closed") self.decoder.close(); } catch (_) {}
+                self.decoder = null;
+                self.configured = false;
+                self._gotKey = false;
+                self._pendingRegions = [];
+            },
         });
     }
     const cfg = { codec: codec, optimizeForLatency: true };
@@ -905,17 +995,22 @@ H264SurfaceDecoder.prototype.decode = function (annexb, regions, _destRect) {
             data: payload,
         }));
         this._decCount = (this._decCount || 0) + 1;
-        if (this._decCount <= 400 || key)
+        if (this._decCount <= 8 || key)
             this.gfx._log("rdpgfx: H264 decode() #" + this._decCount + " type=" + (key ? "key" : "delta") +
                 " bytes=" + payload.length + " state=" + this.decoder.state + " queue=" + this.decoder.decodeQueueSize);
     } catch (e) {
-        this.gfx._log("rdpgfx: H264 decode() threw: " + (e && e.message || e));
+        // decode() throwing means the decoder is in a bad/closed state. Reset so the next keyframe
+        // rebuilds it (and ask the gfx layer to nudge the host for a fresh keyframe).
+        this.gfx._log("rdpgfx: H264 decode() threw: " + (e && e.message || e) + " — resetting decoder");
+        try { if (this.decoder && this.decoder.state !== "closed") this.decoder.close(); } catch (_) {}
+        this.decoder = null; this.configured = false; this._gotKey = false; this._pendingRegions = [];
+        if (this.gfx.requestKeyframe) this.gfx.requestKeyframe(this.surfaceId);
     }
 };
 
 H264SurfaceDecoder.prototype._onFrame = function (frame) {
     this._frameCount = (this._frameCount || 0) + 1;
-    if (this._frameCount <= 400)
+    if (this._frameCount <= 8)
         this.gfx._log("rdpgfx: H264 frame #" + this._frameCount + " " +
             (frame.displayWidth || frame.codedWidth) + "x" + (frame.displayHeight || frame.codedHeight) +
             " fmt=" + frame.format);

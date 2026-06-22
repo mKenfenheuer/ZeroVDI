@@ -45,6 +45,14 @@ Client.prototype._status = function (status, message) { if (this.statusCb) this.
 // RDP desktop dimensions must be even (bitmap rows are 16bpp; widths are safest as multiples of 4),
 // and are clamped to the [MS-RDPBCGR] valid range (200..8192 px per axis for typical hosts).
 Client.prototype.chooseDesktopSize = function (wrapEl) {
+    // TEST (2026-06-16): under GFX, force the EXACT resolution the working macOS Remote Desktop app used
+    // (2560x1606, its full native screen). Everything else (scale, DisplayControl, Geometry, acks) now
+    // matches the macOS app yet the host still does a 2nd RESET_GRAPHICS and stalls; resolution is the
+    // last structural difference (we connect at a small 1452x1438 window, the macOS app at 2560x1606 and
+    // gets ONE reset + flood). If the host now resets once and streams, sub-native res was the trigger.
+    if (typeof rdpGfxMode === "function" && rdpGfxMode() !== "off") {
+        return { width: 2560, height: 1606 };
+    }
     const dpr = window.devicePixelRatio || 1;
     const cssW = Math.max(1, Math.floor(wrapEl.clientWidth));
     const cssH = Math.max(1, Math.floor(wrapEl.clientHeight));
@@ -160,7 +168,6 @@ Client.prototype._startProtocol = function () {
             }
         },
     };
-    const dpr = window.devicePixelRatio || 1;
     this.proto = new RdpProtocol(transport, {
         username: this.creds.user,
         password: this.creds.password,
@@ -168,7 +175,10 @@ Client.prototype._startProtocol = function () {
         width: this.canvas.width,
         height: this.canvas.height,
         selectedProtocol: 2, // HYBRID (NLA) — matches the gateway's X.224 negotiation
-        desktopScaleFactor: this.desktopScaleForDpr(dpr),
+        // width/height are ALREADY device pixels (chooseDesktopSize × dpr), so the resolution carries the
+        // DPI. Sending desktopScaleFactor=DPI too double-applies it: under GFX the host then churns
+        // RESET_GRAPHICS and stalls. Commit to ONE strategy (native-pixel resolution) → desktopScale=100.
+        desktopScaleFactor: 100,
         deviceScaleFactor: 100,
         performanceFlags: this.creds.performanceFlags, // undefined → protocol default (best visuals)
         audio: !!this.audioEnabled,        // request the rdpsnd channel for remote sound
@@ -651,13 +661,18 @@ Client.prototype._applyInitialScale = function () {
     // Instead send ONE scale-only monitor layout at the target DPI: the single reactivation it causes
     // makes the host re-send a keyframe at the new scale, which repaints correctly.
     if (this.proto && this.proto.gfx) {
-        // DEBUG: under GFX, send NO scale layout at all — every monitor-layout triggers a
-        // Deactivation-Reactivation that DELETE_SURFACEs the GFX surface and makes the host restart
-        // from a fresh (black) keyframe. We suspect that's why the host never progresses past the first
-        // black keyframe. Skip scaling entirely to test whether content then streams. (Scale will be
-        // 100% for now; we'll reintroduce a non-reactivating scale path once content flows.)
+        // Under GFX the host stalls after the init burst with THREE RESET_GRAPHICS; the working macOS
+        // Remote Desktop app gets ONE then floods. A MITM diff showed the cause: we apply DPI TWICE —
+        // chooseDesktopSize already multiplies the CSS size by devicePixelRatio (so canvas.width is the
+        // native device-pixel resolution), and then we ALSO sent a monitor layout at 200% desktopScale.
+        // The host churns RESETs trying to reconcile a device-pixel surface that also asks for 2x scale.
+        // The macOS app commits to ONE strategy (native-pixel resolution). So send a single layout at the
+        // CURRENT (device-pixel) resolution with desktopScale=100 — no competing scale, no resolution
+        // change (no surface teardown). This is what settles the host into free-run.
+        if (!this.proto.canResize()) return; // DisplayControl/active not ready yet; retried from _onActive
         this._initialScaleApplied = true;
-        this._sessionScale = 100;
+        this._sessionScale = 100; // resolution already carries DPI (device pixels); do NOT double-scale
+        this.proto.sendMonitorLayout(this.canvas.width, this.canvas.height, 100, 100);
         return;
     }
     if (!this.proto || !this.proto.canResize()) return; // not active yet; retried from _onActive
@@ -919,7 +934,10 @@ Client.prototype._onGfxPaint = function (canvas, sx, sy, sw, sh, dx, dy) {
     if (sw <= 0 || sh <= 0) return;
     try {
         this.ctx.drawImage(canvas, sx, sy, sw, sh, dx, dy, sw, sh);
-        if ((this._gfxPaintCount = (this._gfxPaintCount || 0) + 1) <= 30) {
+        // Log the first few paints, then every 30th, so we can SEE whether painting keeps going (stream
+        // alive) vs. genuinely stops — without per-frame spam.
+        const pc = (this._gfxPaintCount = (this._gfxPaintCount || 0) + 1);
+        if (pc <= 8 || pc % 30 === 0) {
             let sample = "?";
             try {
                 const px = this.ctx.getImageData(Math.floor(this.canvas.width / 2), Math.floor(this.canvas.height / 2), 1, 1).data;

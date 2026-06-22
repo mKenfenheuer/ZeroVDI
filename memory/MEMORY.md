@@ -1,0 +1,2 @@
+- [gfx-stall-mitm-findings](gfx-stall-mitm-findings.md) — GFX stall: caps/acks/codec all match mstsc & aren't the gate; stall is in session setup. rdpmitm MPPC+ZGFX decoder fixes + --replay; our-client capture pins the frame-3 boundary.
+- [gfx-dvc-v3-required](gfx-dvc-v3-required.md) — this host requires DVC v3 (nested ZGFX); answering v1 makes the Graphics channel go silent.

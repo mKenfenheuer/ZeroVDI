@@ -393,7 +393,7 @@ function clientCoreData(selectedProtocol, width, height) {
     const w = new ByteWriter();
     w.u16le(0xC001); // CS_CORE
     w.u16le(216);    // length
-    w.u32le(0x00080011); // RDP_VERSION_10_12 (modern client — matches mstsc/FreeRDP)
+    w.u32le(0x00080005); // version — match the working macOS Remote Desktop app's CS_CORE (was 0x00080011)
     w.u16le(width);
     w.u16le(height);
     w.u16le(0xCA01); // colorDepth RNS_UD_COLOR_8BPP
@@ -409,7 +409,7 @@ function clientCoreData(selectedProtocol, width, height) {
     w.u32le(0x00000000); // keyboardSubType
     w.u32le(12);         // keyboardFunctionKey
     w.zeros(64);         // imeFileName[64]
-    w.u16le(0xCA03);     // postBeta2ColorDepth
+    w.u16le(0xCA01);     // postBeta2ColorDepth — match macOS app (was 0xCA03)
     w.u16le(0x0001);     // clientProductId
     w.u32le(0x00000000); // serialNumber
     var gfx = rdpTryGfx();
@@ -418,18 +418,20 @@ function clientCoreData(selectedProtocol, width, height) {
     w.u16le(gfx ? 0x0018 : 0x0010);     // highColorDepth: HIGH_COLOR_24BPP vs 16BPP
     w.u16le(gfx ? 0x000F : 0x0002);     // supportedColorDepths: 15/16/24/32 vs 16BPP only
     // earlyCapabilityFlags ([MS-RDPBCGR] 2.2.1.3.2).
-    // CRITICAL (verified against a wire dump of FreeRDP `+gfx` connecting to this host): the GFX flag
-    // (SUPPORT_DYNVC_GFX_PROTOCOL 0x100) MUST be advertised together with its prerequisites, or the
-    // host RSTs right after CredSSP. FreeRDP sends 0x05E3 =
-    //   ERRINFO_PDU(0x01) | WANT_32BPP(0x02) | VALID_CONNECTION_TYPE(0x20) | MONITOR_LAYOUT(0x40) |
-    //   NETCHAR_AUTODETECT(0x80) | DYNVC_GFX(0x100) | HEARTBEAT(0x400).
-    // The host gates its rich dynamic-channel set — including AUDIO_PLAYBACK_DVC (remote sound) and the
-    // Graphics DVC — behind this set. The no-GFX baseline stays at the minimal ERRINFO only.
-    w.u16le(gfx ? 0x05E3 : 0x0001);
+    // Match the WORKING macOS Remote Desktop app EXACTLY (decoded from its CS_CORE via MITM): it sends
+    // 0x7AF = ERRINFO_PDU(0x01) | WANT_32BPP(0x02) | STATUSINFO_PDU(0x04) | STRONG_ASYMMETRIC_KEYS(0x08)
+    //       | VALID_CONNECTION_TYPE(0x20) | NETCHAR_AUTODETECT(0x80) | DYNVC_GFX(0x100)
+    //       | DYNAMIC_TIME_ZONE(0x200) | HEARTBEAT(0x400).
+    // KEY: the macOS app does NOT set SUPPORT_MONITOR_LAYOUT_PDU (0x40) — WE used to (old 0x05E3). That
+    // flag tells the host the client wants monitor-layout-driven reinit, and is the suspected trigger for
+    // the host's 2nd RESET_GRAPHICS (the GFX stall): the host re-RESETs us to drive a monitor layout we
+    // advertised support for but the macOS app didn't. Dropping 0x40 + matching the rest = 0x7AF.
+    // (DYNVC_GFX 0x100 + its prereqs are still present, so the rich DVC set / GFX channel stays enabled.)
+    w.u16le(gfx ? 0x07AF : 0x0001);
     w.zeros(64);         // clientDigProductId[64]
-    // connectionType: MUST be 0 unless VALID_CONNECTION_TYPE is set. With GFX we send 0x06
-    // (CONNECTION_TYPE_AUTODETECT), matching FreeRDP — required alongside NETCHAR_AUTODETECT.
-    w.u8(gfx ? 0x06 : 0x00);
+    // connectionType: MUST be 0 unless VALID_CONNECTION_TYPE is set. The macOS app sends 0x07
+    // (CONNECTION_TYPE_LAN); match it (was 0x06 AUTODETECT). VALID_CONNECTION_TYPE (0x20) is set.
+    w.u8(gfx ? 0x07 : 0x00);
     w.u8(0x00);          // pad
     w.u32le(selectedProtocol >>> 0); // serverSelectedProtocol
     return w.toArray();
@@ -455,13 +457,16 @@ const CHANNEL_OPTION_SHOW_PROTOCOL = 0x00200000;
 //   - "cliprdr": clipboard redirection (MS-RDPECLIP).
 // The set is built per-connection (see RdpProtocol options audio/clipboard) so we only advertise the
 // channels we actually service — advertising a channel we don't answer can stall the host.
+// Channel options match the working macOS Remote Desktop app EXACTLY (decoded from its CS_NET):
+//   rdpdr=0x80800000 (INITIALIZED|COMPRESS_RDP), rdpsnd=0xc0000000 (INITIALIZED|ENCRYPT_RDP),
+//   cliprdr=0xc0a00000 (INITIALIZED|ENCRYPT_RDP|COMPRESS_RDP|SHOW_PROTOCOL),
+//   drdynvc=0xc0800000 (INITIALIZED|ENCRYPT_RDP|COMPRESS_RDP).
 const CHANNEL_DEFS = {
-    drdynvc: { options: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_COMPRESS_RDP | CHANNEL_OPTION_SHOW_PROTOCOL },
+    drdynvc: { options: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP | CHANNEL_OPTION_COMPRESS_RDP },
     rdpsnd: { options: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP },
-    cliprdr: { options: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP | CHANNEL_OPTION_SHOW_PROTOCOL },
+    cliprdr: { options: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_ENCRYPT_RDP | CHANNEL_OPTION_COMPRESS_RDP | CHANNEL_OPTION_SHOW_PROTOCOL },
     // rdpdr (device redirection, MS-RDPEFS): FreeRDP advertises this with /sound, and the host appears
     // to gate the AUDIO_PLAYBACK_DVC dynamic channel (where modern audio rides) on its presence.
-    // FreeRDP options for rdpdr = INITIALIZED | COMPRESS_RDP (0x00800000).
     rdpdr: { options: CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_COMPRESS_RDP },
 };
 
@@ -648,7 +653,45 @@ const INFO_MOUSE = 0x00000001;
 const INFO_DISABLECTRLALTDEL = 0x00000002;
 const INFO_AUTOLOGON = 0x00000008;
 const INFO_UNICODE = 0x00000010;
+const INFO_MAXIMIZESHELL = 0x00000020;
+const INFO_LOGONNOTIFY = 0x00000040;
 const INFO_ENABLEWINDOWSKEY = 0x00000100;
+const INFO_MOUSE_HAS_WHEEL = 0x00020000;
+// INFO_VIDEO_DISABLE ([MS-RDPBCGR] 2.2.1.11.1.1, 0x00400000): tells the host NOT to use the MS-RDPEVOR
+// video-optimized-remoting pipeline (Video::Control / Video::Data DVCs). The working macOS Remote Desktop
+// app SETS this; we did NOT. Without it the host offers the Video DVCs (which we REJECT, since we don't
+// implement EVOR), and on this host that mismatch is the suspected cause of the 2nd RESET_GRAPHICS + GFX
+// stall — the host keeps trying to route video through a pipeline we refuse, then re-inits the surface and
+// stops. With VIDEO_DISABLE the host never offers video remoting and just floods H.264 over GFX (as it
+// does for the macOS app). This is the closest match yet to "stream it like the macOS app".
+const INFO_VIDEO_DISABLE = 0x00400000;
+const INFO_COMPRESSION = 0x00000080;
+const INFO_FORCE_ENCRYPTED_CS_PDU = 0x00004000;
+const INFO_LOGONERRORS = 0x00010000;
+const INFO_USING_SAVED_CREDS = 0x00100000;
+const PACKET_COMPR_TYPE_RDP6 = 0x02; // goes in infoFlags bits 9-12 (the 0x1E00 compressionType mask)
+
+// The macOS Remote Desktop app's ExtendedInfoPacket, captured byte-for-byte from a MITM c2s dump so our
+// Client Info PDU matches the working client 1:1 (clientAddress 127.0.0.1, W. Europe Standard Time zone,
+// clientSessionId 0xFFFE, performanceFlags 0xC6, and the trailing dynamic-time-zone/region blob).
+const MACOS_CLIENT_EXTENDED_INFO = Uint8Array.from([
+    0x04,0x00,0x14,0x00,0x31,0x00,0x32,0x00,0x37,0x00,0x2e,0x00,0x30,0x00,0x2e,0x00,
+    0x30,0x00,0x2e,0x00,0x31,0x00,0x00,0x00,0x00,0x00,0xc4,0xff,0xff,0xff,0x57,0x00,
+    0x2e,0x00,0x20,0x00,0x45,0x00,0x75,0x00,0x72,0x00,0x6f,0x00,0x70,0x00,0x65,0x00,
+    0x20,0x00,0x53,0x00,0x74,0x00,0x61,0x00,0x6e,0x00,0x64,0x00,0x61,0x00,0x72,0x00,
+    0x64,0x00,0x20,0x00,0x54,0x00,0x69,0x00,0x6d,0x00,0x65,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x0a,0x00,0x00,0x00,
+    0x04,0x00,0x01,0x00,0x3b,0x00,0x3b,0x00,0x3b,0x00,0x00,0x00,0x00,0x00,0x57,0x00,
+    0x2e,0x00,0x20,0x00,0x45,0x00,0x75,0x00,0x72,0x00,0x6f,0x00,0x70,0x00,0x65,0x00,
+    0x20,0x00,0x44,0x00,0x61,0x00,0x79,0x00,0x6c,0x00,0x69,0x00,0x67,0x00,0x68,0x00,
+    0x74,0x00,0x20,0x00,0x54,0x00,0x69,0x00,0x6d,0x00,0x65,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,
+    0x05,0x00,0x02,0x00,0x3b,0x00,0x3b,0x00,0x3b,0x00,0xc4,0xff,0xff,0xff,0xfe,0xff,
+    0x00,0x00,0xc6,0x00,0x00,0x00,0x00,0x00,0x64,0x00,0x00,0x00,0x30,0x00,0x57,0x00,
+    0x2e,0x00,0x20,0x00,0x45,0x00,0x75,0x00,0x72,0x00,0x6f,0x00,0x70,0x00,0x65,0x00,
+    0x20,0x00,0x53,0x00,0x74,0x00,0x61,0x00,0x6e,0x00,0x64,0x00,0x61,0x00,0x72,0x00,
+    0x64,0x00,0x20,0x00,0x54,0x00,0x69,0x00,0x6d,0x00,0x65,0x00,0x00,0x00,0x00,0x00,
+]);
 // INFO_AUDIOCAPTURE ([MS-RDPBCGR] 2.2.1.11.1.1, flag 0x00200000): tells the server the CLIENT wants
 // audio-input (microphone) redirection. The host only opens the AUDIO_INPUT dynamic channel when this
 // bit is set in the Client Info PDU — without it the SNDIN handshake never starts (this is what the
@@ -688,7 +731,19 @@ function clientInfoPdu(domain, username, password, performanceFlags, audioCaptur
 
     const info = new ByteWriter();
     info.u32le(0); // codePage
-    let infoFlags = INFO_MOUSE | INFO_UNICODE | INFO_AUTOLOGON | INFO_DISABLECTRLALTDEL | INFO_ENABLEWINDOWSKEY;
+    // ISOLATION (2026-06-16): the full macOS-matching flag set + macOS extended-info blob made THIS host
+    // RESET right after Client Info. Reverted to the known-good baseline + ONLY INFO_VIDEO_DISABLE (the
+    // one flag with a clear GFX-streaming rationale: keeps the host off the MS-RDPEVOR video pipeline whose
+    // Video DVCs we reject). Re-add the others (MAXIMIZESHELL/LOGONNOTIFY/MOUSE_HAS_WHEEL/FORCE_ENCRYPTED/
+    // LOGONERRORS/USING_SAVED_CREDS/COMPRESSION) ONE AT A TIME once this connects, to find which the host
+    // rejects. The macOS extended-info blob is likewise reverted to the minimal baseline.
+    // INFO_COMPRESSION tested: it CONNECTS and changes host behavior (host then compresses LEGACY fastpath
+    // updates → "skipping fastpath PDU: offset outside bounds" because we don't decompress them) but the
+    // GFX DVC stream is UNAFFECTED — same 2-frames → RESET → 2-frames → stall. So COMPRESSION drives the
+    // legacy path, NOT the GFX frame format. Reverted (adds a fastpath-decompress burden without fixing the
+    // stall). Keep baseline + VIDEO_DISABLE.
+    let infoFlags = INFO_MOUSE | INFO_UNICODE | INFO_AUTOLOGON | INFO_DISABLECTRLALTDEL | INFO_ENABLEWINDOWSKEY
+        | INFO_VIDEO_DISABLE;
     if (audioCapture) infoFlags |= INFO_AUDIOCAPTURE; // request microphone redirection (gates AUDIO_INPUT DVC)
     info.u32le(infoFlags);
     info.u16le(d.cb);
@@ -702,13 +757,13 @@ function clientInfoPdu(domain, username, password, performanceFlags, audioCaptur
     info.bytes(p.bytes).u16le(0);
     info.u16le(0); // alternateShell NUL
     info.u16le(0); // workingDir NUL
-    // ExtendedInfoPacket
+    // ExtendedInfoPacket (baseline minimal form — reverted from the macOS blob during isolation).
     info.u16le(0x0002); // clientAddressFamily AF_INET
     info.u16le(2); info.u16le(0); // cbClientAddress + address
     info.u16le(2); info.u16le(0); // cbClientDir + dir
     info.zeros(172); // clientTimeZone
     info.u32le(0);   // clientSessionId
-    info.u32le((performanceFlags >>> 0)); // performanceFlags (font smoothing, composition, eye-candy)
+    info.u32le((performanceFlags >>> 0)); // performanceFlags
 
     // Security header: SEC_INFO_PKT (0x0040), flagsHi 0
     const w = new ByteWriter();
@@ -831,14 +886,93 @@ function capSound() {
     return capSet(0x000C, d.toArray());
 }
 function capMultifragmentUpdate() {
-    return capSet(0x001A, new ByteWriter().u32le(0).toArray());
+    // MaxRequestSize — the macOS app sends 0x0009482B (~608 KB). We had 0, which tells the host we can't
+    // receive large multi-fragment updates (i.e. continuous H.264 surface frames). Match the macOS value.
+    return capSet(0x001A, new ByteWriter().u32le(0x0009482B).toArray());
+}
+// BUG FIX (found via MITM diff vs mstsc — see tools/rdpmitm + parse_caps.py): our GFX-gating capsets
+// were each typed ONE NUMBER TOO HIGH. Per [MS-RDPBCGR] the correct types are LARGE_POINTER 0x1B,
+// SURFACE_COMMANDS 0x1C, BITMAP_CODECS 0x1D, and 0x1E is CAPSSETTYPE_FRAME_ACKNOWLEDGE ([MS-RDPRFX]
+// 2.2.1.3) — which we never sent. The host was reading our LargePointer body AS SurfaceCommands, our
+// SurfaceCommands body AS BitmapCodecs, and our BitmapCodecs body AS FrameAcknowledge: it never saw a
+// valid SURFACE_COMMANDS cap (the GFX surface-pipeline gate) and mis-parsed FRAME_ACKNOWLEDGE. That is
+// why the host streamed a few GFX frames then stopped. Bodies below are byte-for-byte what mstsc sends.
+
+// LARGE_POINTER ([MS-RDPBCGR] 2.2.7.2.7, type 0x001B): largePointerSupportFlags = 0x0003
+// (LARGE_POINTER_FLAG_96x96 | LARGE_POINTER_FLAG_384x384).
+function capLargePointer() {
+    return capSet(0x001B, new ByteWriter().u16le(0x0003).toArray());
+}
+// SURFACE_COMMANDS ([MS-RDPBCGR] 2.2.7.2.9, type 0x001C) — REQUIRED for the GFX surface pipeline.
+// cmdFlags = 0x12 (SETSURFACEBITS | FRAMEMARKER), reserved(4)=0.
+function capSurfaceCommands() {
+    return capSet(0x001C, new ByteWriter().u32le(0x00000012).u32le(0).toArray());
+}
+// BITMAP_CODECS ([MS-RDPBCGR] 2.2.7.2.10, type 0x001D) — mstsc's exact 23-byte body (one codec: the
+// RemoteFX/NSCodec GUID + codec properties).
+function capBitmapCodecs() {
+    return capSet(0x001D, Uint8Array.from([
+        0x01,0xb9,0x1b,0x8d,0xca,0x0f,0x00,0x4f,0x15,0x58,0x9f,0xae,0x2d,0x1a,0x87,0xe2,0xd6,
+        0x01,0x03,0x00,0x01,0x01,0x03,
+    ]));
+}
+// FRAME_ACKNOWLEDGE ([MS-RDPRFX] 2.2.1.3, type 0x001E) — maxUnacknowledgedFrameCount. mstsc sends 2.
+// This was the cap whose SLOT our mis-typed BitmapCodecs body was occupying; we now send it properly.
+function capFrameAcknowledge() {
+    return capSet(0x001E, new ByteWriter().u32le(0x00000002).toArray());
+}
+
+// The capsets below mstsc includes that we were OMITTING (found via the MITM Confirm Active diff: mstsc
+// sends 22 sets, we sent 16). Bodies are byte-for-byte mstsc's. Several are legacy/mandatory sets the
+// host may require to consider the client fully provisioned before sustaining the GFX stream.
+function capControl() {            // CONTROL 0x05
+    return capSet(0x0005, Uint8Array.from([0x00,0x00,0x00,0x00,0x02,0x00,0x02,0x00]));
+}
+function capWindowActivation() {   // WINDOWACTIVATION 0x07
+    return capSet(0x0007, Uint8Array.from([0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00]));
+}
+function capShare() {              // SHARE 0x09
+    return capSet(0x0009, Uint8Array.from([0x00,0x00,0x00,0x00]));
+}
+function capColorCache() {         // COLORCACHE 0x0A
+    return capSet(0x000A, Uint8Array.from([0x06,0x00,0x00,0x00]));
+}
+function capFont() {               // FONT 0x0E
+    return capSet(0x000E, Uint8Array.from([0x01,0x00,0x00,0x00]));
+}
+function capWindow() {             // WINDOW 0x18 (RemoteApp/AERO; mstsc sends a 7-byte body)
+    return capSet(0x0018, Uint8Array.from([0x02,0x00,0x00,0x00,0x00,0x00,0x00]));
+}
+// BITMAPCACHE_REV2 0x13 — mstsc sends this instead of REV1 (0x04). Exact 36-byte body.
+function capBitmapCacheRev2() {
+    return capSet(0x0013, Uint8Array.from([
+        0x02,0x00,0x00,0x03,0x78,0x00,0x00,0x00,0x78,0x00,0x00,0x00,0x51,0x01,0x00,0x00,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0x00,0x00,0x00,0x00,
+    ]));
 }
 
 function confirmActivePdu(shareID, userId, width, height) {
-    const caps = [
+    // Our own capsets (responses valid for OUR Demand Active — emitting the macOS app's verbatim got
+    // ERRINFO_BAD_CAPABILITIES 0x10EA). Added the GFX-gating capsets the macOS app has that we were
+    // missing: MULTIFRAGMENTUPDATE now with a REAL MaxRequestSize (was 0), SURFACE_COMMANDS, BITMAP_CODECS,
+    // LARGE_POINTER. These tell the host we can receive large multi-fragment surface (H.264) updates.
+    // Match mstsc's Confirm Active capset LIST and ORDER (recovered via MITM diff). The off-by-one type
+    // fix alone did not lift the stall; this brings the full set (22) and order in line with mstsc, in
+    // case the host gates sustained GFX on a complete capability advertisement. Toggle back to the
+    // minimal set with window.RDP_MIN_CAPS=1 for comparison.
+    const minimal = (typeof window !== "undefined" && window.RDP_MIN_CAPS);
+    const caps = minimal ? [
         capGeneral(), capBitmap(width, height), capOrder(), capBitmapCacheRev1(),
         capPointer(), capInput(), capBrush(), capGlyphCache(), capOffscreen(),
         capVirtualChannel(), capSound(), capMultifragmentUpdate(),
+        capLargePointer(), capSurfaceCommands(), capBitmapCodecs(), capFrameAcknowledge(),
+    ] : [
+        capGeneral(), capBitmap(width, height), capOrder(), capBitmapCacheRev2(),
+        capColorCache(), capWindowActivation(), capControl(), capPointer(), capShare(),
+        capInput(), capSound(), capFont(), capGlyphCache(), capBrush(), capOffscreen(),
+        capVirtualChannel(), capMultifragmentUpdate(), capSurfaceCommands(), capLargePointer(),
+        capFrameAcknowledge(), capWindow(), capBitmapCodecs(),
     ];
     const capBuf = new ByteWriter();
     for (const c of caps) capBuf.bytes(c);
@@ -892,15 +1026,20 @@ function RdpProtocol(transport, opts, callbacks) {
     // Defaults to best visual fidelity; the UI can override per-connection.
     this.performanceFlags = (opts.performanceFlags === undefined ? PERF_DEFAULT : opts.performanceFlags) >>> 0;
 
-    // Static virtual channels to request, in positional order. drdynvc is always present (live
-    // resize); rdpsnd/cliprdr are opt-in per the audio/clipboard options.
-    this.staticChannels = ["drdynvc"];
+    // Static virtual channels to request, in positional order. CRITICAL: drdynvc is requested LAST,
+    // matching the working macOS Remote Desktop app's CS_NET order [rdpdr, rdpsnd, cliprdr, drdynvc] —
+    // this puts drdynvc on MCS channel 1007 (not 1004 as when it was first). The channel ORDER changes
+    // when the host opens the dynamic GFX/DisplayControl channels relative to each other, which is the
+    // suspected trigger for the host's 2nd RESET_GRAPHICS (the GFX stall): on 1004-first we get a
+    // DELETE+RESET reinit after DisplayControl; the macOS app on 1007-last gets a clean single RESET.
     // The host gates its rich audio DVC set (AUDIO_PLAYBACK_DVC for output, AUDIO_INPUT for the mic)
-    // behind the rdpdr device-redirection static channel completing its handshake. So advertise rdpdr
-    // (and rdpsnd) whenever EITHER audio output or microphone capture is requested.
+    // behind the rdpdr device-redirection static channel, so advertise rdpdr (and rdpsnd) whenever audio
+    // output, microphone, or camera is requested.
+    this.staticChannels = [];
     if (opts.audio || opts.microphone || opts.camera) this.staticChannels.push("rdpdr");
     if (opts.audio) this.staticChannels.push("rdpsnd");
     if (opts.clipboard) this.staticChannels.push("cliprdr");
+    this.staticChannels.push("drdynvc"); // ALWAYS last → MCS 1007, like the macOS app
 
     this.userId = 0;
     this.shareID = 0;
@@ -913,6 +1052,13 @@ function RdpProtocol(transport, opts, callbacks) {
     this._lastChannelId = 0;
     // Per-static-channel inbound reassembly (CHANNEL_PDU_HEADER FIRST..LAST). Keyed by channel name.
     this._svcReasm = {};
+    // RDP-bulk (MPPC) contexts. With INFO_COMPRESSION set in the Client Info PDU (to match the macOS app),
+    // the host may compress slow-path channel data TO us (_mppcRecv decompresses), and we send our GFX
+    // CAPS_ADVERTISE bulk-compressed (_mppcSend). 8K/RDP4 (level 0) — matches the macOS app's type 0.
+    const MppcCtor = (typeof window !== "undefined" && window.RdpMppc) ? window.RdpMppc.Mppc
+                   : (typeof RdpMppc !== "undefined" ? RdpMppc.Mppc : null);
+    this._mppcSend = MppcCtor ? new MppcCtor(0) : null;
+    this._mppcRecv = MppcCtor ? new MppcCtor(0) : null;
 
     // Optional virtual-channel handlers, constructed lazily once their channel is joined.
     this.rdpsnd = null;   // RdpSnd instance when audio is enabled and rdpsnd joined
@@ -932,6 +1078,7 @@ function RdpProtocol(transport, opts, callbacks) {
     this.audioDvcChannelId = null;
     this.audioDvcCbId = 0;
     this._dvcReasm = {};        // DVC channelId -> {parts, len, total}
+    this._dvcZgfx = {};         // DVC channelId -> ZgfxDecode (v3 compressed-data inflate context)
 
     // Audio input dynamic virtual channel ("AUDIO_INPUT", MS-RDPEAI) — microphone redirection. Like
     // the audio OUTPUT DVC, the host offers this dynamically (gated on rdpsnd/rdpdr presence) once it
@@ -1210,7 +1357,10 @@ RdpProtocol.prototype._onRdpdrData = function (payload) {
     const r = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
     const component = r.getUint16(0, true);
     const packetId = r.getUint16(2, true);
-    if (component !== RDPDR_CTYP_CORE) return; // ignore printer-cache (RDPDR_CTYP_PRN) etc.
+    if (component !== RDPDR_CTYP_CORE) { // ignore printer-cache (RDPDR_CTYP_PRN) etc.
+        this._log("rdpdr: ignoring component 0x" + component.toString(16) + " packetId 0x" + packetId.toString(16));
+        return;
+    }
 
     switch (packetId) {
         case PAKID_CORE_SERVER_ANNOUNCE: {
@@ -1235,6 +1385,7 @@ RdpProtocol.prototype._onRdpdrData = function (payload) {
             break;
         default:
             // device IO requests etc. — we have no devices, so nothing to answer.
+            this._log("rdpdr: ignoring packetId 0x" + (packetId >>> 0).toString(16));
             break;
     }
 };
@@ -1431,14 +1582,6 @@ RdpProtocol.prototype._readShareDataHeader = function (r) {
 // DEACTIVATE_ALL that begins a Deactivation-Reactivation Sequence after a resolution/scale change).
 RdpProtocol.prototype._onActiveSlowPath = function (r) {
     try {
-        // DIAG: heartbeat of all active-phase inbound PDUs by source channel. If GFX goes silent but
-        // this keeps ticking (e.g. on rdpsnd/drdynvc), the WS is alive and only the GFX stream stopped;
-        // if it stops entirely, the host stopped sending anything.
-        this._activeRxN = (this._activeRxN || 0) + 1;
-        if (this._activeRxN <= 400)
-            this._log("rdp: <<< active PDU #" + this._activeRxN + " chan=" + this._lastChannelId +
-                (this._lastChannelId === this.drdynvcChannelId ? "(drdynvc)" : "") +
-                (this._lastChannelId === this.gfxDvcChannelId ? "(gfx-mcs)" : ""));
         if (this.drdynvcChannelId && this._lastChannelId === this.drdynvcChannelId) {
             return this._onDrdynvcData(r);
         }
@@ -1451,6 +1594,13 @@ RdpProtocol.prototype._onActiveSlowPath = function (r) {
             if (svcName === "rdpsnd" && this.rdpsnd) this.rdpsnd.onData(payload);
             else if (svcName === "cliprdr" && this.cliprdr) this.cliprdr.onData(payload);
             else if (svcName === "rdpdr") this._onRdpdrData(payload);
+            return;
+        }
+        // Data on a static channel we joined but have no handler for (named so it's diagnosable, not a
+        // silent drop). The global I/O channel falls through below to share-control parsing.
+        if (svcName && this._lastChannelId !== this.mcsChannelId) {
+            this._log("svc: DROP " + r.remaining() + "B on unhandled static channel '" + svcName +
+                "' id=" + this._lastChannelId);
             return;
         }
 
@@ -1509,6 +1659,8 @@ RdpProtocol.prototype._handleFastPath = function (fpHeader, payload) {
     // finalization PDUs (especially during a Deactivation-Reactivation) — dropping them here is what
     // makes the screen freeze after a resize.
     if (this.state !== ST.ACTIVE && this.state !== ST.FINALIZATION) {
+        this._log("fastpath: DROP " + payload.length + "B output update in state " + this.state +
+            " (before FINALIZATION)");
         return;
     }
     // Hand the whole updates blob to the renderer; client.js walks the individual updates.
@@ -1536,6 +1688,36 @@ RdpProtocol.prototype.sendInputEvent = function (eventBytes) {
     }
     w.bytes(ev);
     this.t.send(w.toArray());
+    // Diagnostic: confirm input actually reaches the wire. If GFX frames resume right after these, the
+    // host was IDLE on a static desktop (correct), not stalled. Capped to avoid mousemove spam.
+    if (!(typeof window !== "undefined" && window.RDP_GFX_QUIET) && (this._inDbg = (this._inDbg || 0) + 1) <= 40) {
+        const code = (ev[0] >> 5) & 0x7;
+        const kind = code === 0 ? "KBD" : code === 1 ? "MOUSE" : code === 3 ? "SYNC" : ("code" + code);
+        // For mouse events, decode pointerFlags (LE u16 at ev[1..2]) so a CLICK (PTRFLAGS_BUTTON1 0x1000
+        // / BUTTON2 0x2000 + DOWN 0x8000) is distinguishable from a bare MOVE (PTRFLAGS_MOVE 0x0800).
+        let extra = "";
+        if (code === 1 && ev.length >= 5) {
+            const pf = ev[1] | (ev[2] << 8);
+            const x = ev[3] | (ev[4] << 8), y = (ev.length >= 7) ? (ev[5] | (ev[6] << 8)) : 0;
+            extra = " pf=0x" + pf.toString(16) + " @" + x + "," + y +
+                (pf & 0x8000 ? " DOWN" : "") + (pf & 0x1000 ? " BTN1" : "") +
+                (pf & 0x2000 ? " BTN2" : "") + (pf & 0x0800 ? " MOVE" : "");
+        } else if (code === 0 && ev.length >= 2) {
+            extra = " scancode=0x" + ev[1].toString(16) + (ev[0] & 0x01 ? " UP" : " DOWN");
+        }
+        //this._log("input: sent #" + this._inDbg + " " + kind + " (" + ev.length + "B, hdr=0x" +
+        //    (ev[0] || 0).toString(16) + ")" + extra);
+    }
+};
+
+// Send a fastpath INPUT SYNC event (FASTPATH_INPUT_EVENT_SYNC, eventCode 3) — toggle-key state sync.
+// mstsc sends this right after the session activates (observed in a MITM capture: a 3-byte fastpath PDU,
+// eventHeader 0x62) before the host begins flooding GFX frames. We send it on activation as a
+// proactive "interactive client present" signal. The event is just the 1-byte eventHeader:
+// (eventCode 3 << 5) | (toggleFlags = 0).
+RdpProtocol.prototype.sendInputSync = function () {
+    if (this.state !== ST.ACTIVE) return;
+    this.sendInputEvent(new Uint8Array([(3 << 5) | 0]));
 };
 
 // Send a TS_REFRESH_RECT_PDU asking the host to repaint the given rect (default: whole desktop). Used
@@ -1554,6 +1736,11 @@ RdpProtocol.prototype.sendRefreshRect = function (width, height) {
 // ================================================================================================
 const CHANNEL_FLAG_FIRST = 0x00000001;
 const CHANNEL_FLAG_LAST = 0x00000002;
+// CHANNEL_PDU_HEADER compression flags ([MS-RDPBCGR] 2.2.6.1.1).
+const CHANNEL_PACKET_COMPRESSED = 0x00200000;
+const CHANNEL_PACKET_AT_FRONT = 0x00400000;
+const CHANNEL_PACKET_FLUSHED = 0x00800000;
+const CHANNEL_COMPRESSION_TYPE_MASK = 0x000F0000;
 
 // drdynvc command codes ([MS-RDPEDYC] 2.2).
 const DVC_CMD_CREATE = 0x01;
@@ -1561,6 +1748,13 @@ const DVC_CMD_DATA_FIRST = 0x02;
 const DVC_CMD_DATA = 0x03;
 const DVC_CMD_CLOSE = 0x04;
 const DVC_CMD_CAPABILITIES = 0x05;
+// Version 3 commands we do NOT implement — we respond v1 in _dvcOnCapabilities so the host never uses
+// them. Named only so the switch can log loudly (rather than silently drop) if a host ever sends one,
+// which would otherwise present as a silent GFX freeze.
+const DVC_CMD_DATA_FIRST_COMPRESSED = 0x06;
+const DVC_CMD_DATA_COMPRESSED = 0x07;
+const DVC_CMD_SOFT_SYNC_REQUEST = 0x08;
+const DVC_CMD_SOFT_SYNC_RESPONSE = 0x09;
 
 const DISPLAY_CONTROL_CHANNEL_NAME = "Microsoft::Windows::RDS::DisplayControl";
 // Dynamic-channel name for remote audio output (MS-RDPEA over MS-RDPEDYC). Modern Windows streams
@@ -1576,15 +1770,36 @@ const RDPECAM_CONTROL_DVC_NAME = "RDCamera_Device_Enumerator";
 // only to unlock the host's rich DVC set (which carries audio). Surface graphics are not yet
 // rendered — see _onGfxData.
 const RDPGFX_DVC_NAME = "Microsoft::Windows::RDS::Graphics";
+// MS-RDPEVOR (Video Optimized Remoting) + Geometry channels. A MITM capture of mstsc vs this host showed
+// mstsc ACCEPTS these (and every other DVC the host offers — zero rejects), and the host then streams GFX
+// H.264 CONTINUOUSLY. When we reject them, the host sets up Graphics but won't sustain the video stream
+// (it stalls after the first frames). We accept them to keep the GFX video pipeline alive; we don't need
+// to send data back (these are host→client coordination channels). Prefix match handles the v08.01 suffix.
+const RDPEVOR_CONTROL_PREFIX = "Microsoft::Windows::RDS::Video::Control";
+const RDPEVOR_DATA_PREFIX = "Microsoft::Windows::RDS::Video::Data";
+const RDPEGT_GEOMETRY_PREFIX = "Microsoft::Windows::RDS::Geometry";
 
 // Wrap a virtual-channel payload in a CHANNEL_PDU_HEADER and send it on `channelId` via MCS
 // send-data-request. Payloads here are small (caps/create responses, monitor layout) and fit a
 // single chunk, so FIRST|LAST is always set.
-RdpProtocol.prototype._sendOnChannel = function (channelId, payload) {
+RdpProtocol.prototype._sendOnChannel = function (channelId, payload, compress) {
     const w = new ByteWriter();
     w.u32le(payload.length);                    // CHANNEL_PDU_HEADER.length (uncompressed total)
-    w.u32le(CHANNEL_FLAG_FIRST | CHANNEL_FLAG_LAST); // flags
-    w.bytes(payload);
+    let flags = CHANNEL_FLAG_FIRST | CHANNEL_FLAG_LAST;
+    let body = payload;
+    // Optionally RDP-bulk (MPPC) compress, matching the macOS app's wire form (it sends GFX caps with
+    // CHANNEL flags 0x600003 = FIRST|LAST|COMPRESSED|AT_FRONT, 8K/RDP4). The host decompresses to the
+    // same bytes; declaredLen above stays the UNCOMPRESSED length. Only used where the macOS app compresses.
+    if (compress && this._mppcSend) {
+        const c = this._mppcSend.compress(payload);
+        body = c.data;
+        flags |= CHANNEL_PACKET_COMPRESSED;                 // 0x00200000
+        if (c.flags & 0x40) flags |= CHANNEL_PACKET_AT_FRONT; // 0x00400000
+        if (c.flags & 0x80) flags |= CHANNEL_PACKET_FLUSHED;  // 0x00800000
+        // compressionType (0x000F0000 mask) = 0 → PACKET_COMPR_TYPE_8K, matching the macOS app.
+    }
+    w.u32le(flags >>> 0);
+    w.bytes(body);
     this.t.send(tpktX224Wrap(mcsSendDataSerialize(this.userId, channelId, w.toArray())));
 };
 
@@ -1594,8 +1809,20 @@ RdpProtocol.prototype._sendOnChannel = function (channelId, payload) {
 // `r` is positioned at the CHANNEL_PDU_HEADER.
 RdpProtocol.prototype._reassembleSvc = function (name, r) {
     const totalLen = r.u32le();          // CHANNEL_PDU_HEADER.length (whole message)
-    const flags = r.u32le();             // CHANNEL_FLAG_FIRST / _LAST
-    const chunk = r.bytes(r.remaining()).slice(); // detach from the rx buffer
+    const flags = r.u32le();             // CHANNEL_FLAG_FIRST / _LAST (+ compression flags)
+    let chunk = r.bytes(r.remaining()).slice(); // detach from the rx buffer
+
+    // RDP-bulk decompress if the host compressed this chunk (we advertised INFO_COMPRESSION to match the
+    // macOS app, so the host may MPPC-compress slow-path data to us). Map the 32-bit channel flags to the
+    // MPPC low-byte form (COMPRESSED 0x20, AT_FRONT 0x40, FLUSHED 0x80).
+    if ((flags & CHANNEL_PACKET_COMPRESSED) && this._mppcRecv) {
+        let mflags = 0x20;
+        if (flags & CHANNEL_PACKET_AT_FRONT) mflags |= 0x40;
+        if (flags & CHANNEL_PACKET_FLUSHED) mflags |= 0x80;
+        const out = this._mppcRecv.decompress(chunk, mflags);
+        if (out) chunk = out;
+        else this._log("svc: MPPC decompress failed on '" + name + "' (" + chunk.length + "B)");
+    }
 
     const first = (flags & CHANNEL_FLAG_FIRST) !== 0;
     const last = (flags & CHANNEL_FLAG_LAST) !== 0;
@@ -1656,12 +1883,14 @@ const DVC_CHUNK_LENGTH = 1600;
 // Send a DVC DATA payload on `channelId`, fragmenting into DATA_FIRST + DATA* exactly like FreeRDP's
 // drdynvc_write_data when it exceeds one chunk. Each emitted drdynvc PDU is wrapped by _sendOnChannel
 // (CHANNEL_PDU_HEADER over MCS). Small payloads (control PDUs, audio) send as a single DATA PDU.
-RdpProtocol.prototype._sendDvcData = function (channelId, cbId, payload) {
+RdpProtocol.prototype._sendDvcData = function (channelId, cbId, payload, compress) {
     const enc = dvcEncodeChannelId(channelId);
     // Header(1) + channelId bytes, computed for a plain DATA PDU.
     const dataHeaderLen = 1 + enc.bytes.length;
     if (payload.length <= DVC_CHUNK_LENGTH - dataHeaderLen) {
-        this._sendOnChannel(this.drdynvcChannelId, dvcBuildPdu(DVC_CMD_DATA, channelId, payload, 0, cbId));
+        // `compress` MPPC-compresses the whole drdynvc DATA PDU at the CHANNEL layer (matches the macOS
+        // app's GFX CAPS_ADVERTISE, sent with CHANNEL flags 0x600003). Only for single-chunk PDUs.
+        this._sendOnChannel(this.drdynvcChannelId, dvcBuildPdu(DVC_CMD_DATA, channelId, payload, 0, cbId), compress);
         return;
     }
     // DATA_FIRST: header byte packs (cmd<<4)|(cbLen<<2)|cbId; then channelId, then the total length
@@ -1715,24 +1944,53 @@ RdpProtocol.prototype._onDrdynvcData = function (r) {
         case DVC_CMD_DATA: return this._dvcOnData(r, cbId, false, sp);
         case DVC_CMD_DATA_FIRST: return this._dvcOnData(r, cbId, true, sp);
         case DVC_CMD_CLOSE: return this._dvcOnClose(r, cbId);
+        // v3 compressed data ([MS-RDPEDYC] 2.2.3.3 / 2.2.3.4): same as DATA_FIRST/DATA but the body is
+        // an RDP8_LITE-compressed ZGFX segment. _dvcOnData inflates it before reassembly/dispatch.
+        case DVC_CMD_DATA_FIRST_COMPRESSED: return this._dvcOnData(r, cbId, true, sp, true);
+        case DVC_CMD_DATA_COMPRESSED: return this._dvcOnData(r, cbId, false, sp, true);
+        // Soft-Sync: only reachable if SOFTSYNC_TCP_TO_UDP was negotiated, which we never advertise — so
+        // this should not occur. Log loudly rather than drop silently (a silent drop would present as a
+        // frozen-but-connected session).
+        case DVC_CMD_SOFT_SYNC_REQUEST:
+        case DVC_CMD_SOFT_SYNC_RESPONSE:
+            this._log("drdynvc: UNEXPECTED Soft-Sync cmd 0x" + cmd.toString(16) +
+                " (we never advertised multitransport) — ignoring");
+            return;
         default:
             this._log("drdynvc: ignoring cmd " + cmd);
     }
 };
 
-// Capabilities Request -> Capabilities Response (advertise version 1, the simplest that works).
+// Capabilities Request -> Capabilities Response.
+//
+// [MS-RDPEDYC] 3.2.3.1: "the client MUST respond ... indicating the HIGHEST version level supported by
+// the CLIENT." The server advertises the highest IT supports and then ADAPTS its feature use to what
+// the client claims:
+//   v1 — uncompressed DATA_FIRST(0x02)/DATA(0x03) only.
+//   v2 — adds priority classes (PriorityCharge fields; informational for bandwidth allocation).
+//   v3 — adds COMPRESSED DVC data (DATA_FIRST_COMPRESSED 0x06 / DATA_COMPRESSED 0x07) and Soft-Sync.
+//
+// This host REQUIRES v3: when we answered v1 it created the Graphics DVC and then sent NOTHING (it only
+// streams GFX over compressed DVC PDUs). So we MUST claim v3. We implement the compressed-data half
+// (inbound 0x06/0x07 ZGFX-decompressed in _dvcOnData). Soft-Sync (0x08/0x09) is NOT a concern: per
+// [MS-RDPEDYC] 3.1.5.3 it MUST NOT be used unless BOTH peers set SOFTSYNC_TCP_TO_UDP in their
+// Multitransport Channel Data — we never advertise multitransport, so the host cannot initiate it.
+// We never SEND compressed PDUs ourselves (our c2s traffic is small); claiming v3 only obligates us to
+// RECEIVE them, which we now do.
+const DVC_CLIENT_MAX_VERSION = 3;
 RdpProtocol.prototype._dvcOnCapabilities = function (r) {
-    // Request body: pad(1) version(2) [+ per-priority charges]. We only need the version echoed.
+    // Request body: pad(1) version(2) [+ per-priority charges]. We read the server's advertised version
+    // only for logging; the RESPONSE version is capped at what we actually implement.
     /* pad */ r.u8();
-    let version = 1;
-    if (r.remaining() >= 2) version = r.u16le();
-    if (version < 1) version = 1;
-    this._log("drdynvc: capabilities v" + version);
+    let serverVersion = 1;
+    if (r.remaining() >= 2) serverVersion = r.u16le();
+    const version = Math.min(serverVersion < 1 ? 1 : serverVersion, DVC_CLIENT_MAX_VERSION);
+    this._log("drdynvc: capabilities server=v" + serverVersion + " -> responding v" + version);
 
     const body = new ByteWriter();
     body.u8(((DVC_CMD_CAPABILITIES & 0xf) << 4)); // cmd, sp=0, cbId=0
     body.u8(0x00);          // pad
-    body.u16le(version);    // Version
+    body.u16le(version);    // Version (highest WE support)
     this._sendOnChannel(this.drdynvcChannelId, body.toArray());
 };
 
@@ -1765,7 +2023,27 @@ RdpProtocol.prototype._dvcOnCreate = function (r, cbId) {
     // Accept the RDPEGFX Graphics channel only to keep the host's rich DVC set (incl. audio) alive.
     // We answer its capability exchange but do not render its surfaces yet.
     const isGfx = (name === RDPGFX_DVC_NAME);
-    const accept = (name === DISPLAY_CONTROL_CHANNEL_NAME) || isAudio || isAudin || isCamEnum || isCamDevice || isGfx;
+    // Geometry tracking (MS-RDPEGT): when GFX is on, accept it like mstsc does. CRITICAL — a corrected
+    // MITM decode (drdynvc CREATE_RSP on the static channel mstsc actually uses) showed mstsc ACCEPTS
+    // only Graphics + Geometry and REJECTS Video::Control + Video::Data (status 0xC0000001). My earlier
+    // "accept all video DVCs" reading was from a mis-parsed channel and was WRONG — accepting
+    // Video::Control/Data does NOT match mstsc. So accept Geometry only; Video::Control/Data fall through
+    // to the reject path below.
+    // Geometry (MS-RDPEGT): ACCEPT. A byte-diff of our_c2s vs the macOS app's c2s (the source of truth)
+    // showed the macOS app ACCEPTS the Geometry channel (CREATE_RSP id 0x0c → status 0) where we were
+    // rejecting it (0xC0000001). Match it. (An earlier "reject all Geometry" experiment was wrong vs the
+    // macOS app and did NOT fix the stall anyway.)
+    const isGeometry = !!this.gfx && name.indexOf(RDPEGT_GEOMETRY_PREFIX) === 0;
+    // MS-RDPEVOR Video::Control/Data: REJECT. Tested accept-and-keep-open — the host sent ZERO bytes on
+    // these channels (no unhandled-channel DROP logs) and GFX still stopped after ~4 frames, so EVOR is
+    // dormant and NOT the gate. Toggle accept via window.RDP_EVOR_ACCEPT=1 for re-testing.
+    const isVideoEvor = !!this.gfx && (typeof window !== "undefined" && window.RDP_EVOR_ACCEPT) &&
+        (name.indexOf(RDPEVOR_CONTROL_PREFIX) === 0 || name.indexOf(RDPEVOR_DATA_PREFIX) === 0);
+    // DisplayControl (MS-RDPEDISP): ACCEPT. (Deferring it was tested — the host STILL did DELETE+2nd RESET
+    // with DisplayControl rejected, so it is NOT the trigger. The DELETE_SURFACE happens at frame ~3-4
+    // regardless; the stall is the post-recreate 137KB keyframe pausing, independent of DisplayControl.)
+    const isDisplayControl = (name === DISPLAY_CONTROL_CHANNEL_NAME);
+    const accept = isDisplayControl || isAudio || isAudin || isCamEnum || isCamDevice || isGfx || isGeometry || isVideoEvor;
 
     // The server REUSES dynamic channel ids: id 11 may be Geometry, then DisplayControl, then Geometry
     // again over the life of the session. A new Create for an id we currently hold means the server has
@@ -1780,14 +2058,12 @@ RdpProtocol.prototype._dvcOnCreate = function (r, cbId) {
         delete this.dvcById[channelId];
     }
 
-    // creationStatus: 0 = success; for a refusal, use 0xC0000225 (STATUS_NOT_FOUND) — the exact code
-    // mstsc and FreeRDP send when there's no listener for a channel (FreeRDP drdynvc_main.c comments it
-    // as "same code used by mstsc"). Using 0xC0000001 (STATUS_UNSUCCESSFUL) instead made this host wedge
-    // its entire output stream on the SECOND live resize: after applying the first MONITOR_LAYOUT the
-    // host re-creates its per-resolution DVCs (Geometry, etc.); our non-standard refusal code left the
-    // host's DVC manager in a state where it silently dropped all subsequent slow-path input (the next
-    // monitor layout) and stopped sending output. STATUS_NOT_FOUND is what the host expects.
-    const status = new ByteWriter().u32le(accept ? 0x00000000 : 0xC0000225).toArray();
+    // creationStatus: 0 = success; for a refusal we send 0xC0000001 (STATUS_UNSUCCESSFUL) — this is the
+    // EXACT code a real mstsc sends against this host (confirmed by a MITM capture: mstsc rejects
+    // Video::Control/Video::Data/CoreInput/MouseCursor with 0xC0000001 and the host streams GFX fine).
+    // (An older note preferred 0xC0000225/STATUS_NOT_FOUND for a legacy-bitmap resize bug; the GFX MITM
+    // ground truth is 0xC0000001. If the live-resize regression returns, revisit per-channel.)
+    const status = new ByteWriter().u32le(accept ? 0x00000000 : 0xC0000001).toArray();
     const pdu = dvcBuildPdu(DVC_CMD_CREATE, channelId, status, 0, cbId);
     this._sendOnChannel(this.drdynvcChannelId, pdu);
 
@@ -1813,6 +2089,19 @@ RdpProtocol.prototype._dvcOnCreate = function (r, cbId) {
             this.gfxDvcChannelId = channelId;
             this.gfxDvcCbId = cbId;
             this._initGfxDvc(channelId, cbId);
+        } else if (isGeometry) {
+            // Geometry (MS-RDPEGT): accept-then-close, matching the macOS app's c2s (DVC CLOSE right
+            // after accept). Tested keeping it OPEN to see if the host gates sustained GFX on a live
+            // Geometry channel — it did NOT change the post-frame-4 GFX stop, so Geometry is not the gate.
+            const closePdu = dvcBuildPdu(DVC_CMD_CLOSE, channelId, new Uint8Array(0), 0, cbId);
+            this._sendOnChannel(this.drdynvcChannelId, closePdu);
+            this._log("drdynvc: closed '" + name + "' id=" + channelId + " (accept-then-close, matches macOS app)");
+            delete this.dvcByName[name];
+            delete this.dvcById[channelId];
+        } else if (isVideoEvor) {
+            // MS-RDPEVOR Video::Control/Data: accept and keep OPEN (host→client coordination; we don't
+            // send data back). Just remembered in dvcById; inbound PDUs fall to the unhandled-channel log.
+            this._log("drdynvc: kept '" + name + "' id=" + channelId + " OPEN (EVOR video — GFX sustain test)");
         } else {
             this.displayControlChannelId = channelId;
             this.displayControlCbId = cbId;
@@ -1849,7 +2138,13 @@ RdpProtocol.prototype._initGfxDvc = function (channelId, cbId) {
                 if (self.cb.onGfxDirectFrame) self.cb.onGfxDirectFrame(frame, surfaceId, map);
             },
         });
-        this._sendDvcData(channelId, cbId, this.gfx.buildCapsAdvertise());
+        // Send CAPS_ADVERTISE UNCOMPRESSED. (We previously MPPC-compressed it at the static-channel layer
+        // with compress=true to mirror the macOS app's wire form. That was fine under a v1 DVC cap, but
+        // once we negotiate DVC v3 the host stopped responding to the static-layer-compressed caps — it
+        // accepted the Graphics channel and then went silent with NO CAPS_CONFIRM. Sending the caps
+        // uncompressed is always valid: the host decompresses nothing and confirms. If a 1:1 wire match
+        // with the macOS app is needed again, it must be done via DVC-layer compression, not static MPPC.)
+        this._sendDvcData(channelId, cbId, this.gfx.buildCapsAdvertise(), false);
         this._log("rdpgfx: GFX rendering ENABLED (mode=" + mode + ")");
         return;
     }
@@ -1992,19 +2287,41 @@ RdpProtocol.prototype._dvcOnClose = function (r, cbId) {
         if (this.gfx) { this.gfx.reset(); this.gfx = null; }
     }
     delete this._dvcReasm[channelId];
+    delete this._dvcZgfx[channelId];
 };
 
 // DVC data (possibly fragmented via DATA_FIRST + DATA). DisplayControl PDUs are tiny (single-chunk),
 // but audio waves are large and arrive as DATA_FIRST followed by DATA chunks — so reassemble per
 // channel using the DATA_FIRST total-length field before dispatching a complete message.
-RdpProtocol.prototype._dvcOnData = function (r, cbId, isFirst, sp) {
+//
+// `compressed` (v3 DATA_*_COMPRESSED, [MS-RDPEDYC] 2.2.3.3/2.2.3.4): the per-chunk body is an
+// RDP_SEGMENTED_DATA (ZGFX) blob compressed with RDP8_LITE (8 KB history). We ZGFX-inflate each chunk
+// through a PER-CHANNEL, session-persistent context (the LZ77 history carries across chunks) BEFORE
+// reassembly, so `total` (which is the total UNCOMPRESSED length) and the accumulated lengths line up.
+RdpProtocol.prototype._dvcOnData = function (r, cbId, isFirst, sp, compressed) {
     const channelId = dvcReadChannelId(r, cbId);
     let total = 0;
     if (isFirst) {
         // DATA_FIRST carries a total length field whose width is encoded in sp (0->1B,1->2B,2->4B).
         if (sp === 0) total = r.u8(); else if (sp === 1) total = r.u16le(); else total = r.u32le();
     }
-    const chunk = r.bytes(r.remaining()).slice();
+    let chunk = r.bytes(r.remaining()).slice();
+
+    if (compressed) {
+        const zctx = this._dvcZgfx[channelId] || (this._dvcZgfx[channelId] = new ZgfxDecode());
+        const inflated = zctx.decompress(chunk);
+        if (!inflated) {
+            this._log("drdynvc: ZGFX(LITE) inflate failed on channel " + channelId +
+                " (" + chunk.length + "B compressed) — dropping");
+            delete this._dvcReasm[channelId];
+            return;
+        }
+        // First few compressed chunks per channel: confirm the v3 path is live and the inflate ratio.
+        const n = (this._dvcCompDbg = (this._dvcCompDbg || 0) + 1);
+        if (n <= 8) this._log("drdynvc: v3 compressed " + (isFirst ? "FIRST" : "DATA") + " ch=" +
+            channelId + " " + chunk.length + "B -> " + inflated.length + "B inflated");
+        chunk = inflated.slice(); // detach: decompress() returns a view into the ctx scratch buffer
+    }
 
     let data;
     if (isFirst) {
@@ -2030,13 +2347,14 @@ RdpProtocol.prototype._dvcOnData = function (r, cbId, isFirst, sp) {
     if (channelId === this.camEnumChannelId && this.camEnum) return this.camEnum.onData(data);
     if (this.camDevices[channelId]) return this.camDevices[channelId].onData(data);
     if (channelId === this.gfxDvcChannelId) {
-        // DIAG: every inbound GFX blob, uncapped, so we can see if the host keeps streaming after the
-        // initial RESET/CREATE settle or goes silent. (zgfx-compressed length at this point.)
-        this._gfxBlobN = (this._gfxBlobN || 0) + 1;
-        this._log("rdpgfx: <<< GFX blob #" + this._gfxBlobN + " " + data.length + "B (compressed)");
         if (this.gfx) return this.gfx.onChannelData(data); // RDPEGFX surfaces → H.264 compositor
+        this._log("drdynvc: DROP " + data.length + "B on GFX channel " + channelId + " (GFX disabled)");
         return; // GFX off: channel kept alive only, surfaces ignored (legacy bitmap path renders)
     }
+    // Data on a DVC channel we accepted/created but have no handler for. Silently dropping this is how
+    // a host feature stalls invisibly — name the channel so it's diagnosable.
+    this._log("drdynvc: DROP " + data.length + "B on unhandled channel id=" + channelId +
+        " name='" + (this.dvcById[channelId] || "?") + "'");
 };
 
 // ================================================================================================

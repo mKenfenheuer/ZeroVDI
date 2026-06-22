@@ -256,11 +256,22 @@ public sealed class RdpRelaySession
         throw new IOException("server did not select TLS/NLA");
     }
 
+    // DEBUG: when RDPGW_DUMP_DIR is set, tee the decrypted host→browser stream to <dir>/our_s2c.bin so we
+    // can diff our session's GFX frame flow against an mstsc/macOS-RD MITM capture. Remove after debugging.
+    private static FileStream? OpenDump(string name)
+    {
+        var dir = Environment.GetEnvironmentVariable("RDPGW_DUMP_DIR");
+        if (string.IsNullOrEmpty(dir)) return null;
+        try { Directory.CreateDirectory(dir); return new FileStream(Path.Combine(dir, name), FileMode.Create, FileAccess.Write, FileShare.Read); }
+        catch { return null; }
+    }
+
     private async Task PumpSslToWsAsync(SslStream ssl, CancellationToken ct)
     {
         var buffer = new byte[16 * 1024];
         long total = 0;
         long chunks = 0;
+        using var dump = OpenDump("our_s2c.bin");
         try
         {
             while (!ct.IsCancellationRequested)
@@ -269,6 +280,7 @@ public sealed class RdpRelaySession
                 if (n == 0) { _logger.LogWarning("RDP relay: host→ws pump: host closed (0 bytes) after {Total} bytes / {Chunks} chunks", total, chunks); break; }
                 total += n;
                 chunks++;
+                if (dump != null) { await dump.WriteAsync(buffer.AsMemory(0, n), ct); await dump.FlushAsync(ct); }
                 await _ws.SendAsync(buffer.AsMemory(0, n), WebSocketMessageType.Binary,
                     endOfMessage: true, ct);
             }
@@ -285,6 +297,7 @@ public sealed class RdpRelaySession
     private async Task PumpWsToSslAsync(SslStream ssl, CancellationToken ct)
     {
         var buffer = new byte[16 * 1024];
+        using var dump = OpenDump("our_c2s.bin");
         try
         {
             while (!ct.IsCancellationRequested)
@@ -294,6 +307,7 @@ public sealed class RdpRelaySession
                 if (result.Count == 0) continue;
                 // Browser sends raw RDP bytes as binary frames; write straight to the host. (A frame
                 // may be partial; RDP framing is the browser's concern, so just forward bytes.)
+                if (dump != null) { await dump.WriteAsync(buffer.AsMemory(0, result.Count), ct); await dump.FlushAsync(ct); }
                 await ssl.WriteAsync(buffer.AsMemory(0, result.Count), ct);
                 await ssl.FlushAsync(ct);
             }
