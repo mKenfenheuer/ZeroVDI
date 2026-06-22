@@ -26,4 +26,8 @@
     <PackageReference Include="RDPGW" Version="1.0.0.1781369808" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\RdpWire\KSol.RDP.Wire.csproj" />
+  </ItemGroup>
+
 </Project>

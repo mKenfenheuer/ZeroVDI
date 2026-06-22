@@ -1,9 +1,30 @@
 ---
 name: gfx-stall-mitm-findings
-description: GFX stall investigation — MITM+our-client captures; caps/acks/codec all match mstsc and are NOT the gate; stall is in session setup. Includes rdpmitm decoder fixes (MPPC+ZGFX) and --replay.
+description: GFX stall ROOT CAUSE = client never sent its initial DISPLAYCONTROL_MONITOR_LAYOUT (no-op guard suppressed it); host waits on it before the 2nd RESET_GRAPHICS that unlocks free-run streaming. Fixed. Also rdpmitm decoder fixes (MPPC+ZGFX), --replay, gateway live recorder.
 metadata:
   type: project
 ---
+
+## ★ ROOT CAUSE (2026-06-23, v2): client sends an unexpected DVC CLOSE on Geometry channels
+Decisive evidence from true-order replay of our session: the host's s2c stops MID-MESSAGE — last GFX is a DataFirst declaring totalLen=22405 but only 11184 bytes arrive (11221 short). The host sends one big partial chunk then three tiny control PDUs (Create Geometry id=18, Create Geometry id=18, Close Geometry id=18) and goes dormant (last s2c t=828ms; session then idle 8s while we send only mouse moves).
+Diff vs mstsc on the Geometry (MS-RDPEGT) channels: **mstsc NEVER closes Geometry — only the SERVER sends DVC CLOSE (all S2C Close), on its own schedule. Our client sent a CLIENT CLOSE (C2S Close) right after accepting each Geometry channel** ("accept-then-close"). The host then re-opened Geometry, we closed it again — a Create/Close war on the drdynvc static channel that coincides exactly with the GFX stall. The old code comment claiming "macOS app sends CLOSE" was WRONG (verified false against the fresh capture).
+FIX: protocol.js `_dvcOnCreate` isGeometry branch — ACCEPT and KEEP OPEN (don't send a client CLOSE; the CREATE_RSP status 0 + dvcById registration already happened above). Let the host close it. Geometry DATA we receive falls to the unhandled-channel log (harmless; mstsc doesn't respond to it either).
+
+### Superseded lead (kept for context): missing initial MONITOR_LAYOUT
+Earlier I thought the gate was the missing first DISPLAYCONTROL_MONITOR_LAYOUT. Added a `_monitorLayoutSent` fix so the no-op guard never suppresses the first layout — that fix is CORRECT and kept (our client now sends `RDPEDISP: monitor layout 2560x1606 @ 100%`), but it did NOT lift the stall (still stopped at frame 3). And mstsc's c2s rdpedisp MONITOR_LAYOUT actually comes at t=28 AFTER its 2nd RESET (line 339), so it's not the 2nd-reset trigger. So MONITOR_LAYOUT was a real gap but not the gate.
+Codec note: host streams AVC444v2 keyframes then codecId=0x0000 UNCOMPRESSED wire-to-surface deltas (small rects) → 3.6MB. Our decode of frames 1-3 = all-black (nonBlack=0) — genuine pre-reconfigure surface; real content arrives Gen-2 after the host's 2nd RESET_GRAPHICS, which only happens once the Geometry CLOSE war is gone.
+
+## TRUE-ORDER DIFF: extra camera/audio DVCs (2026-06-23, strongest lead)
+With the gateway's live RdpRecorder writing meta.txt, replayed BOTH our session and a fresh mstsc MITM capture in true wire order and diffed the c2s setup. Results:
+- **ConfirmActive capsets: byte-identical** (22 sets, same order/lengths) — caps cleared AGAIN.
+- **GFX acks: 3 FRAME_ACK + 3 QOE (frames 1-3), well-formed, match mstsc.**
+- **0 round-trip mismatches** in our entire session — every PDU we send is byte-valid.
+- **THE difference**: our client advertises camera+mic, so the host opens DVCs **mstsc never gets**: `AUDIO_PLAYBACK_LOSSY_DVC`, `RDCamera_Device_Enumerator`, and `RDPGWCam0` (camera device, on TWO channels id12+id17). The host runs a full MS-RDPECAM probe (ActivateDevice→StreamList→MediaTypeList→CurrentMediaType→PropertyList→**Deactivate**→CLOSE both cam channels). Our rdpecam.js responses are CORRECT (we ack/answer each per spec), but the host probes then **closes** the camera, and GFX stalls shortly after (frame3 + start of frame4's DataFirst, then silence). mstsc's session has NONE of this camera/lossy traffic and streams 3.6MB.
+- Camera msg map (wire `02 XX`, version2): 07=ActivateDeviceReq,01=Success,09=StreamListReq,0a=StreamListRsp,0b=MediaTypeListReq,0c=MediaTypeListRsp,0d=CurrentMediaTypeReq,0e=CurrentMediaTypeRsp,14=PropertyListReq,15=PropertyListRsp,08=DeactivateDeviceReq.
+- **NEXT (the A/B test):** capture with camera+mic+lossy DISABLED (`setCameraEnabled(false)`, `setMicrophoneEnabled(false)`) — if GFX then flows past frame 3, the camera/audio advertisement is the gate; if not, that's cleared too. Toggles in client.js (cameraEnabled/microphoneEnabled → opts.camera/opts.microphone in protocol.js ~line 2015-2021).
+
+## Gateway live recorder + shared RdpWire lib (2026-06-23)
+Repo restructured: `ksol-rdpgw/` now holds `KSol.RDPGateway/` (gateway), `RDP.MITM/` (proxy), and `RdpWire/` (shared decode/encode/dump engine = `KSol.RDP.Wire`, namespace KSol.RDPGateway.RDP). Both gateway and MITM ProjectReference RdpWire. The gateway's `RdpRelaySession` has an `RdpRecorder` (gated on env `RDPGW_DUMP_DIR`) feeding both pump directions through the shared `RdpSession`, writing pdus.log/pdus.jsonl + meta.txt (per-chunk dir+ts+len for true-order replay). `rdpmitm --replay <dir>` decodes either MITM dumps or the gateway's our_c2s/our_s2c (prefers meta.txt for ordering). Recorder is observational only — relay forwards original bytes, never the re-encoded ones.
 
 ## OUR-CLIENT CAPTURE (decisive, 2026-06-23)
 Captured our OWN client's decrypted stream via the gateway's `RDPGW_DUMP_DIR` tee (RdpRelaySession → `/tmp/rdpgw-dump/our_c2s.bin`+`our_s2c.bin`), then decoded it with the now-fixed rdpmitm decoder (`dotnet run -- --replay /tmp/rdpgw-dump`). Findings:

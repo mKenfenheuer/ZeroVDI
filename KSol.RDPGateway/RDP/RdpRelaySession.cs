@@ -35,6 +35,10 @@ public sealed class RdpRelaySession
     private readonly KerberosAuth? _kerberos;
     private readonly ILogger _logger;
 
+    // Optional live structural decode + recording of the decrypted RDP stream (shared RdpWire engine).
+    // Enabled when RDPGW_DUMP_DIR is set. One recorder per session, fed by both pumps.
+    private RdpRecorder? _recorder;
+
     public RdpRelaySession(WebSocket ws, string host, int port, KerberosAuth? kerberos, ILogger logger)
     {
         _ws = ws;
@@ -154,6 +158,8 @@ public sealed class RdpRelaySession
         _logger.LogInformation("RDP relay: bridging {Host}:{Port} (protocol=0x{Proto:X})", _host, _port, selected);
 
         // 5) Relay the decrypted RDP stream both ways until either side closes.
+        // Optional: live decode + record both directions through the shared RdpWire engine.
+        _recorder = RdpRecorder.TryCreate(_logger);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var toWs = PumpSslToWsAsync(ssl, linked.Token);
         var toRdp = PumpWsToSslAsync(ssl, linked.Token);
@@ -162,6 +168,7 @@ public sealed class RdpRelaySession
         var finished = await Task.WhenAny(toWs, toRdp);
         linked.Cancel();
         try { await Task.WhenAll(toWs, toRdp); } catch { /* shutdown races are expected */ }
+        _recorder?.Dispose();
 
         if (finished == toWs)
         {
@@ -266,6 +273,58 @@ public sealed class RdpRelaySession
         catch { return null; }
     }
 
+    // Live structural decode + recording of the decrypted RDP stream via the shared RdpWire engine.
+    // Writes <dir>/pdus.log + pdus.jsonl (decoded PDU tree) and <dir>/meta.txt (per-chunk dir+ts+len, so
+    // an offline `rdpmitm --replay <dir>` reconstructs true wire order). Both pumps feed one RdpSession
+    // (server-learned channel/DVC/GFX state labels client traffic too); a lock serializes the two pumps.
+    private sealed class RdpRecorder : IDisposable
+    {
+        private readonly RdpLogSink _sink;
+        private readonly RdpSession _session;
+        private readonly StreamWriter? _meta;
+        private readonly System.Diagnostics.Stopwatch _sw = System.Diagnostics.Stopwatch.StartNew();
+        private readonly object _gate = new();
+        private readonly ILogger _logger;
+
+        private RdpRecorder(string dir, ILogger logger)
+        {
+            _logger = logger;
+            _sink = new RdpLogSink(dir, echoConsole: false);
+            _session = new RdpSession(_sink);
+            try { _meta = new StreamWriter(Path.Combine(dir, "meta.txt")) { AutoFlush = true }; } catch { _meta = null; }
+        }
+
+        public static RdpRecorder? TryCreate(ILogger logger)
+        {
+            var dir = Environment.GetEnvironmentVariable("RDPGW_DUMP_DIR");
+            if (string.IsNullOrEmpty(dir)) return null;
+            try { Directory.CreateDirectory(dir); return new RdpRecorder(dir, logger); }
+            catch (Exception ex) { logger.LogDebug(ex, "RDP recorder: init failed"); return null; }
+        }
+
+        public void Feed(RdpDir dir, ReadOnlySpan<byte> data)
+        {
+            if (data.Length == 0) return;
+            // RdpSession is stateful and not thread-safe; both pumps run concurrently, so serialize. The
+            // copy is required because the caller's buffer is reused after this returns.
+            var copy = data.ToArray();
+            lock (_gate)
+            {
+                try
+                {
+                    _meta?.WriteLine($"{_sw.ElapsedMilliseconds,8} {(dir == RdpDir.ClientToServer ? "C2S" : "S2C")} {copy.Length}");
+                    _session.Feed(dir, copy);
+                }
+                catch (Exception ex) { _logger.LogDebug(ex, "RDP recorder: decode error"); }
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_gate) { try { _meta?.Dispose(); } catch { } try { _sink.Dispose(); } catch { } }
+        }
+    }
+
     private async Task PumpSslToWsAsync(SslStream ssl, CancellationToken ct)
     {
         var buffer = new byte[16 * 1024];
@@ -281,6 +340,7 @@ public sealed class RdpRelaySession
                 total += n;
                 chunks++;
                 if (dump != null) { await dump.WriteAsync(buffer.AsMemory(0, n), ct); await dump.FlushAsync(ct); }
+                _recorder?.Feed(RdpDir.ServerToClient, buffer.AsSpan(0, n));
                 await _ws.SendAsync(buffer.AsMemory(0, n), WebSocketMessageType.Binary,
                     endOfMessage: true, ct);
             }
@@ -308,6 +368,7 @@ public sealed class RdpRelaySession
                 // Browser sends raw RDP bytes as binary frames; write straight to the host. (A frame
                 // may be partial; RDP framing is the browser's concern, so just forward bytes.)
                 if (dump != null) { await dump.WriteAsync(buffer.AsMemory(0, result.Count), ct); await dump.FlushAsync(ct); }
+                _recorder?.Feed(RdpDir.ClientToServer, buffer.AsSpan(0, result.Count));
                 await ssl.WriteAsync(buffer.AsMemory(0, result.Count), ct);
                 await ssl.FlushAsync(ct);
             }

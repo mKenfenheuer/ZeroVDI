@@ -1115,6 +1115,7 @@ function RdpProtocol(transport, opts, callbacks) {
     // passed per-call to sendMonitorLayout instead. ([MS-RDPEDISP] percent values.)
     this.desktopScaleFactor = 100; // 100..500, current server scale
     this.deviceScaleFactor = 100;  // 100, 140 or 180, current server scale
+    this._monitorLayoutSent = false; // gate so the FIRST MONITOR_LAYOUT is never no-op'd (host needs it)
 
     this.state = null;
     this.rxBuf = new Uint8Array(0); // inbound reassembly buffer
@@ -2090,14 +2091,16 @@ RdpProtocol.prototype._dvcOnCreate = function (r, cbId) {
             this.gfxDvcCbId = cbId;
             this._initGfxDvc(channelId, cbId);
         } else if (isGeometry) {
-            // Geometry (MS-RDPEGT): accept-then-close, matching the macOS app's c2s (DVC CLOSE right
-            // after accept). Tested keeping it OPEN to see if the host gates sustained GFX on a live
-            // Geometry channel — it did NOT change the post-frame-4 GFX stop, so Geometry is not the gate.
-            const closePdu = dvcBuildPdu(DVC_CMD_CLOSE, channelId, new Uint8Array(0), 0, cbId);
-            this._sendOnChannel(this.drdynvcChannelId, closePdu);
-            this._log("drdynvc: closed '" + name + "' id=" + channelId + " (accept-then-close, matches macOS app)");
-            delete this.dvcByName[name];
-            delete this.dvcById[channelId];
+            // Geometry (MS-RDPEGT): ACCEPT and KEEP OPEN. A fresh MITM capture (2026-06-23) of the working
+            // mstsc/macOS session against this host shows the client NEVER closes Geometry — only the
+            // SERVER sends DVC CLOSE on these channels, on its own schedule. Our previous "accept-then-
+            // close" sent a client CLOSE the host didn't expect; the host then re-opened Geometry, we
+            // closed it again, and this Create/Close war on the drdynvc static channel coincided exactly
+            // with the GFX stall (host stops mid frame-4 DataFirst). So just accept it (CREATE_RSP status 0,
+            // already sent above) and leave it open — the host closes it when done. (The old comment
+            // claiming the macOS app sends CLOSE was wrong; verified against the capture.)
+            // No-op: the accept (CREATE_RSP status 0) and dvcById registration already happened above;
+            // we just don't send a client CLOSE. The host closes the channel when it's done with it.
         } else if (isVideoEvor) {
             // MS-RDPEVOR Video::Control/Data: accept and keep OPEN (host→client coordination; we don't
             // send data back). Just remembered in dvcById; inbound PDUs fall to the unhandled-channel log.
@@ -2399,10 +2402,19 @@ RdpProtocol.prototype.sendMonitorLayout = function (width, height, desktopScale,
 
     // No-op if nothing actually changed — avoids a pointless Deactivation-Reactivation (and the brief
     // black frame it causes) when a spurious resize event fires at the same resolution/scale.
-    if (width === this.width && height === this.height &&
+    // EXCEPTION: always send the FIRST MONITOR_LAYOUT. Under GFX this host streams the initial keyframe
+    // generation, then WAITS for the client's DISPLAYCONTROL_MONITOR_LAYOUT before doing its 2nd
+    // RESET_GRAPHICS (the resolution/DPI-adaptation reconfigure) and free-running the rest of the
+    // stream. mstsc always sends one even when the layout matches the host's RESET_GRAPHICS size; if we
+    // suppress it as a no-op (our canvas already equals the host's 2560x1606 at scale 100), the host
+    // never does the 2nd reset and GFX stalls after ~3 frames. So gate the no-op on having sent at
+    // least one layout already. ([MS-RDPEDISP] 1.3.3 / 2.2.2.2 DISPLAYCONTROL_MONITOR_LAYOUT_PDU.)
+    if (this._monitorLayoutSent &&
+        width === this.width && height === this.height &&
         desktopScale === this.desktopScaleFactor && deviceScale === this.deviceScaleFactor) {
         return false;
     }
+    this._monitorLayoutSent = true;
 
     this.desktopScaleFactor = desktopScale;
     this.deviceScaleFactor = deviceScale;

@@ -8,7 +8,7 @@
             "name": "C#: KSol.RDPGateway Debug",
             "type": "dotnet",
             "request": "launch",
-            "projectPath": "${workspaceFolder}/KSol.RDPGateway.csproj"
+            "projectPath": "${workspaceFolder}/KSol.RDPGateway/KSol.RDPGateway.csproj"
         }
     ]
 }

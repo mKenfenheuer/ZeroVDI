@@ -1,0 +1,2 @@
+- [gfx-stall-mitm-findings](gfx-stall-mitm-findings.md) — GFX stall ROOT CAUSE = missing initial MONITOR_LAYOUT (no-op guard suppressed it); fixed. Host needs it before the 2nd RESET_GRAPHICS that unlocks free-run. Also rdpmitm decoder fixes + --replay + gateway live recorder.
+- [gfx-dvc-v3-required](gfx-dvc-v3-required.md) — this host requires DVC v3 (nested ZGFX); answering v1 makes the Graphics channel go silent.
