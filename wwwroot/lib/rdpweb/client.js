@@ -189,6 +189,12 @@ Client.prototype._startProtocol = function () {
         onCameraStop: function () { self._stopCameraCapture(); },
         onCameraSampleNeeded: function (idx) { self._onCameraSampleNeeded(idx); },
         onClipboardText: function (text) { self._onRemoteClipboardText(text); },
+        // RDPEGFX (H.264) rendering — only fires when the GFX path is on (?gfx=1). onGfxPaint blits a
+        // region of a decoded surface canvas onto the output canvas; onGfxReset announces a new
+        // desktop size from RESET_GRAPHICS.
+        onGfxPaint: function (canvas, sx, sy, sw, sh, dx, dy) { self._onGfxPaint(canvas, sx, sy, sw, sh, dx, dy); },
+        onGfxReset: function (w, h) { self._onGfxReset(w, h); },
+        onGfxDirectFrame: function (frame, surfaceId, map) { self._onGfxDirectFrame(frame, surfaceId, map); },
     });
     this.proto.start();
 };
@@ -638,6 +644,22 @@ Client.prototype.maybeResize = function (wrapEl) {
 // (e.g. 200%) from the start instead of only after a manual resize. Fires once per session.
 Client.prototype._applyInitialScale = function () {
     if (this._initialScaleApplied) return;
+    // When GFX rendering is active, do NOT run the multi-step dummy-resize sequence: each dummy resize
+    // triggers a Deactivation-Reactivation that resizes (and thus CLEARS) the output canvas and tears
+    // down the GFX surface — wiping the just-decoded H.264/ClearCodec frame and going black (the host
+    // doesn't resend a keyframe for a no-op resolution change, so the cleared canvas stays cleared).
+    // Instead send ONE scale-only monitor layout at the target DPI: the single reactivation it causes
+    // makes the host re-send a keyframe at the new scale, which repaints correctly.
+    if (this.proto && this.proto.gfx) {
+        // DEBUG: under GFX, send NO scale layout at all — every monitor-layout triggers a
+        // Deactivation-Reactivation that DELETE_SURFACEs the GFX surface and makes the host restart
+        // from a fresh (black) keyframe. We suspect that's why the host never progresses past the first
+        // black keyframe. Skip scaling entirely to test whether content then streams. (Scale will be
+        // 100% for now; we'll reintroduce a non-reactivating scale path once content flows.)
+        this._initialScaleApplied = true;
+        this._sessionScale = 100;
+        return;
+    }
     if (!this.proto || !this.proto.canResize()) return; // not active yet; retried from _onActive
     const dpr = window.devicePixelRatio || 1;
     // Capture the session scale ONCE. Resizes reuse this instead of re-reading devicePixelRatio, which
@@ -887,6 +909,56 @@ Client.prototype.handleBitmap = function (r) {
         Module._free(inputPtr);
         Module._free(padded);
     });
+};
+
+// ---- RDPEGFX (H.264) rendering -------------------------------------------------------------------
+// Blit a region of a decoded GFX surface canvas onto the output canvas. The surface canvas holds the
+// host's decoded picture in surface coordinates; (dx,dy) is where that region maps onto the desktop
+// (MAP_SURFACE_TO_OUTPUT origin + the region offset). drawImage handles the OffscreenCanvas source.
+Client.prototype._onGfxPaint = function (canvas, sx, sy, sw, sh, dx, dy) {
+    if (sw <= 0 || sh <= 0) return;
+    try {
+        this.ctx.drawImage(canvas, sx, sy, sw, sh, dx, dy, sw, sh);
+        if ((this._gfxPaintCount = (this._gfxPaintCount || 0) + 1) <= 30) {
+            let sample = "?";
+            try {
+                const px = this.ctx.getImageData(Math.floor(this.canvas.width / 2), Math.floor(this.canvas.height / 2), 1, 1).data;
+                sample = "centerPx=rgba(" + px[0] + "," + px[1] + "," + px[2] + "," + px[3] + ")";
+            } catch (e) { sample = "centerPx=?(" + (e && e.message) + ")"; }
+            console.log("rdp: gfx paint #" + this._gfxPaintCount + " -> output " + this.canvas.width + "x" + this.canvas.height +
+                " css=" + this.canvas.style.width + "x" + this.canvas.style.height +
+                " src=" + sx + "," + sy + " " + sw + "x" + sh + " dst=" + dx + "," + dy + " " + sample);
+        }
+    } catch (e) {
+        console.warn("gfx paint failed:", e);
+    }
+};
+
+// DEBUG: draw a decoded VideoFrame STRAIGHT onto the visible output canvas (real DOM canvas), trying
+// both drawImage(frame) and a bitmap fallback, and report what the visible canvas holds afterward.
+Client.prototype._onGfxDirectFrame = function (frame, surfaceId, map) {
+    const self = this;
+    const ox = (map && map.originX) || 0, oy = (map && map.originY) || 0;
+    try {
+        this.ctx.drawImage(frame, ox, oy);
+        const px = this.ctx.getImageData(Math.floor(this.canvas.width / 2), Math.floor(this.canvas.height / 2), 1, 1).data;
+        if (!this._directDbg) { this._directDbg = 1; console.log("rdp: DIRECT drawImage(frame) center=rgba(" + px[0] + "," + px[1] + "," + px[2] + "," + px[3] + ")"); }
+        if (frame.close) frame.close();
+    } catch (e) {
+        console.warn("DIRECT drawImage(frame) threw:", e);
+        if (frame.close) frame.close();
+    }
+};
+
+// RESET_GRAPHICS announced a new desktop size. If it differs from the current canvas backing store,
+// resize the canvas (and re-fit CSS) so the GFX surfaces map 1:1 to output pixels.
+Client.prototype._onGfxReset = function (w, h) {
+    if (!w || !h) return;
+    if (this.canvas.width !== w || this.canvas.height !== h) {
+        this.canvas.width = w;
+        this.canvas.height = h;
+        if (this._wrapEl) this._fit(this._wrapEl);
+    }
 };
 
 Client.prototype.handlePointer = function (header, r) {

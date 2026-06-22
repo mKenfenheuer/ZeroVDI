@@ -19,16 +19,36 @@
 
 const PROJECT_NAME = "rdpweb";
 
-// Test toggle: advertise SUPPORT_DYNVC_GFX_PROTOCOL (and the matching extra GCC blocks) only when
-// the page URL carries ?gfx=1. Lets us bisect the GFX-advertising RST without editing files.
-function rdpTryGfx() {
-    if (typeof window === "undefined") return false;
-    if (window.RDP_TRY_GFX != null) return !!window.RDP_TRY_GFX;
-    try {
-        var v = new URLSearchParams(window.location.search).get("gfx");
-        return v === "1" || v === "true";
-    } catch (e) { return false; }
+// GFX codec mode, configurable via `?gfx=<mode>` query param or `window.RDP_GFX_MODE`. Controls both
+// the CS_CORE SUPPORT_DYNVC_GFX_PROTOCOL advertisement and which RDPGFX capsets we advertise (which in
+// turn steers the host's codec choice). Modes:
+//   "off"        — GFX disabled; screen renders via the legacy bitmap fastpath (default)
+//   "clearcodec" — GFX on, advertise up to v8.1 only; on hosts without AVC the host streams ClearCodec
+//   "avc420"     — GFX on, prefer single-stream H.264 (AVC420). Adds v10 (AVC enabled) so AVC-capable
+//                  hosts engage H.264; falls back to ClearCodec if the host still refuses AVC
+//   "avc444"     — GFX on, allow AVC444 (dual luma+chroma H.264) in addition to AVC420
+//   "auto"/"1"   — alias for "avc420" (try the best the host will give, decode whatever arrives)
+// Returns the normalized mode string, or "off".
+function rdpGfxMode() {
+    if (typeof window === "undefined") return "off";
+    let v = null;
+    if (window.RDP_GFX_MODE != null) v = String(window.RDP_GFX_MODE);
+    else {
+        try { v = new URLSearchParams(window.location.search).get("gfx"); } catch (e) { v = null; }
+    }
+    if (v == null) return "off";
+    v = v.toLowerCase();
+    if (v === "0" || v === "false" || v === "off" || v === "") return "off";
+    if (v === "1" || v === "true" || v === "auto") return "avc420";
+    if (v === "clearcodec" || v === "clear") return "clearcodec";
+    if (v === "avc420" || v === "h264" || v === "avc") return "avc420";
+    if (v === "avc444") return "avc444";
+    return "avc420"; // unknown but truthy → try AVC
 }
+
+// Whether the GFX path is enabled at all (any mode other than "off"). The CS_CORE GFX flag + extra GCC
+// blocks ride on this.
+function rdpTryGfx() { return rdpGfxMode() !== "off"; }
 
 // ---- small byte writer (grows automatically; big-endian/little-endian helpers) -------------------
 function ByteWriter() {
@@ -934,9 +954,12 @@ function RdpProtocol(transport, opts, callbacks) {
     // new ones). Keyed by MCS/DVC channelId.
     this.camDevices = {};       // channelId -> RdpCamDevice
 
-    // RDPEGFX graphics DVC. Accepted (to unlock the host's audio DVC) but not yet rendered.
+    // RDPEGFX graphics DVC. When the GFX path is enabled (rdpTryGfx) we drive a full RdpGfx surface
+    // compositor with H.264 (AVC420) decode over this channel; otherwise we only keep the channel
+    // alive (caps advertise) to unlock the host's rich DVC set (audio) and render via legacy bitmaps.
     this.gfxDvcChannelId = null;
     this.gfxDvcCbId = 0;
+    this.gfx = null;            // RdpGfx instance, created on channel accept when GFX rendering is on
 
     // Desktop scale factor (DPI). The RDP handshake (CS_CORE) carries no scale field, so the session
     // ALWAYS starts at 100% — these track the scale currently in effect on the server, not what the
@@ -1408,6 +1431,14 @@ RdpProtocol.prototype._readShareDataHeader = function (r) {
 // DEACTIVATE_ALL that begins a Deactivation-Reactivation Sequence after a resolution/scale change).
 RdpProtocol.prototype._onActiveSlowPath = function (r) {
     try {
+        // DIAG: heartbeat of all active-phase inbound PDUs by source channel. If GFX goes silent but
+        // this keeps ticking (e.g. on rdpsnd/drdynvc), the WS is alive and only the GFX stream stopped;
+        // if it stops entirely, the host stopped sending anything.
+        this._activeRxN = (this._activeRxN || 0) + 1;
+        if (this._activeRxN <= 400)
+            this._log("rdp: <<< active PDU #" + this._activeRxN + " chan=" + this._lastChannelId +
+                (this._lastChannelId === this.drdynvcChannelId ? "(drdynvc)" : "") +
+                (this._lastChannelId === this.gfxDvcChannelId ? "(gfx-mcs)" : ""));
         if (this.drdynvcChannelId && this._lastChannelId === this.drdynvcChannelId) {
             return this._onDrdynvcData(r);
         }
@@ -1505,6 +1536,17 @@ RdpProtocol.prototype.sendInputEvent = function (eventBytes) {
     }
     w.bytes(ev);
     this.t.send(w.toArray());
+};
+
+// Send a TS_REFRESH_RECT_PDU asking the host to repaint the given rect (default: whole desktop). Used
+// as a watchdog nudge: this host stops streaming GFX once it thinks the surface is static, and a
+// refresh-rect forces it to re-encode and resume sending WIRE_TO_SURFACE updates.
+RdpProtocol.prototype.sendRefreshRect = function (width, height) {
+    if (this.state !== ST.ACTIVE) return;
+    const w = width || this.width || 1;
+    const h = height || this.height || 1;
+    this.t.send(tpktX224Wrap(mcsSendDataSerialize(this.userId, this.mcsChannelId,
+        refreshRectPdu(this.shareID, this.userId, w, h))));
 };
 
 // ================================================================================================
@@ -1770,7 +1812,7 @@ RdpProtocol.prototype._dvcOnCreate = function (r, cbId) {
         } else if (isGfx) {
             this.gfxDvcChannelId = channelId;
             this.gfxDvcCbId = cbId;
-            this._gfxAdvertiseCaps(channelId, cbId);
+            this._initGfxDvc(channelId, cbId);
         } else {
             this.displayControlChannelId = channelId;
             this.displayControlCbId = cbId;
@@ -1781,32 +1823,57 @@ RdpProtocol.prototype._dvcOnCreate = function (r, cbId) {
     }
 };
 
-// RDPEGFX ([MS-RDPEGFX]) — minimal participation to keep the Graphics channel (and thus the host's
-// audio DVC) alive. We send a single CAPS_ADVERTISE and otherwise ignore inbound surface graphics;
-// rendering over RDPEGFX is a future task. Screen rendering still relies on legacy bitmap fastpath.
-const RDPGFX_CMDID_CAPSADVERTISE = 0x0012;
-const RDPGFX_CAPVERSION_8 = 0x00080004;
+// RDPEGFX ([MS-RDPEGFX]) Graphics DVC. With the GFX path on (rdpTryGfx) we stand up a full RdpGfx
+// surface compositor (H.264/AVC420 decode via WebCodecs) and advertise H.264-capable capsets; the
+// host then streams the desktop as a video surface instead of legacy bitmaps. With it off we send a
+// minimal v8 CAPS_ADVERTISE only to keep the channel (and the host's audio DVC) alive.
+// (RDPGFX_CMDID_* / RDPGFX_CAPVERSION_* constants live in rdpgfx.js, which loads before protocol.js.)
 
-// Send RDPGFX_CAPS_ADVERTISE_PDU on the graphics DVC: RDPGFX_HEADER {cmdId, flags, pduLength} then
-// capsSetCount + one RDPGFX_CAPSET {version, capsDataLength, capsData}. We advertise the oldest
-// capset (v8) with a 4-byte all-zero flags blob — the simplest the host accepts.
+// Stand up the RdpGfx compositor for this graphics channel (if the module is loaded and GFX is on)
+// and send its CAPS_ADVERTISE. Inbound graphics data routes here via _onGfxData.
+RdpProtocol.prototype._initGfxDvc = function (channelId, cbId) {
+    if (rdpTryGfx() && typeof RdpGfx !== "undefined") {
+        const self = this;
+        const mode = rdpGfxMode();
+        this.gfx = new RdpGfx({
+            mode: mode,
+            onLog: function (m) { self._log(m); },
+            // Forward a complete RDPGFX PDU back to the host on the graphics DVC. The client sends
+            // uncompressed (no ZGFX), so the payload is the bare PDU — the DVC fragmenter wraps it.
+            send: function (payload) { self._sendDvcData(channelId, cbId, payload); },
+            onReset: function (w, h) { if (self.cb.onGfxReset) self.cb.onGfxReset(w, h); },
+            onPaint: function (canvas, sx, sy, sw, sh, dx, dy) {
+                if (self.cb.onGfxPaint) self.cb.onGfxPaint(canvas, sx, sy, sw, sh, dx, dy);
+            },
+            onDirectFrame: function (frame, surfaceId, map) {
+                if (self.cb.onGfxDirectFrame) self.cb.onGfxDirectFrame(frame, surfaceId, map);
+            },
+        });
+        this._sendDvcData(channelId, cbId, this.gfx.buildCapsAdvertise());
+        this._log("rdpgfx: GFX rendering ENABLED (mode=" + mode + ")");
+        return;
+    }
+    this._gfxAdvertiseCaps(channelId, cbId);
+};
+
+// Minimal v8 CAPS_ADVERTISE (no rendering) — keeps the Graphics channel alive to unlock audio.
 RdpProtocol.prototype._gfxAdvertiseCaps = function (channelId, cbId) {
     const caps = new ByteWriter();
     caps.u16le(1);                       // capsSetCount
-    caps.u32le(RDPGFX_CAPVERSION_8);     // version
+    caps.u32le(0x00080004);              // version: RDPGFX_CAPVERSION_8
     caps.u32le(4);                       // capsDataLength
     caps.u32le(0x00000000);              // capsData: RDPGFX_CAPSET_VERSION8.flags = 0
     const capsArr = caps.toArray();
 
     const pdu = new ByteWriter();
-    pdu.u16le(RDPGFX_CMDID_CAPSADVERTISE); // cmdId
+    pdu.u16le(0x0012);                     // cmdId: RDPGFX_CMDID_CAPSADVERTISE
     pdu.u16le(0x0000);                     // flags
     pdu.u32le(8 + capsArr.length);         // pduLength (header 8 + body)
     pdu.bytes(capsArr);
 
     const dvc = dvcBuildPdu(DVC_CMD_DATA, channelId, pdu.toArray(), 0, cbId);
     this._sendOnChannel(this.drdynvcChannelId, dvc);
-    this._log("rdpgfx: sent caps advertise (v8) — surfaces not rendered yet");
+    this._log("rdpgfx: sent caps advertise (v8) — surfaces not rendered (legacy bitmap path)");
 };
 
 // Build the RdpSnd handler bound to the audio DVC. Its send() wraps each rdpsnd PDU as a drdynvc
@@ -1920,7 +1987,10 @@ RdpProtocol.prototype._dvcOnClose = function (r, cbId) {
         delete this.camDevices[channelId];
         this._onCamDeviceStopped();
     }
-    if (channelId === this.gfxDvcChannelId) this.gfxDvcChannelId = null;
+    if (channelId === this.gfxDvcChannelId) {
+        this.gfxDvcChannelId = null;
+        if (this.gfx) { this.gfx.reset(); this.gfx = null; }
+    }
     delete this._dvcReasm[channelId];
 };
 
@@ -1959,7 +2029,14 @@ RdpProtocol.prototype._dvcOnData = function (r, cbId, isFirst, sp) {
     if (channelId === this.audinDvcChannelId && this.audin) return this.audin.onData(data);
     if (channelId === this.camEnumChannelId && this.camEnum) return this.camEnum.onData(data);
     if (this.camDevices[channelId]) return this.camDevices[channelId].onData(data);
-    if (channelId === this.gfxDvcChannelId) return; // RDPEGFX surfaces: accepted but not rendered yet
+    if (channelId === this.gfxDvcChannelId) {
+        // DIAG: every inbound GFX blob, uncapped, so we can see if the host keeps streaming after the
+        // initial RESET/CREATE settle or goes silent. (zgfx-compressed length at this point.)
+        this._gfxBlobN = (this._gfxBlobN || 0) + 1;
+        this._log("rdpgfx: <<< GFX blob #" + this._gfxBlobN + " " + data.length + "B (compressed)");
+        if (this.gfx) return this.gfx.onChannelData(data); // RDPEGFX surfaces → H.264 compositor
+        return; // GFX off: channel kept alive only, surfaces ignored (legacy bitmap path renders)
+    }
 };
 
 // ================================================================================================

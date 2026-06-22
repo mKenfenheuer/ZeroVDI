@@ -27,6 +27,34 @@ public class HomeController : Controller
     }
 
     /// <summary>
+    /// TEMPORARY DEBUG: accept a raw binary body and dump it to /tmp/rdpgw-dump/&lt;name&gt; so a decoded
+    /// H.264 keyframe captured in the browser can be decoded offline with ffmpeg. Remove after debugging.
+    /// </summary>
+    [HttpPost("/debug/dump/{name}")]
+    public async Task<IActionResult> DebugDump(string name)
+    {
+        var safe = System.Text.RegularExpressions.Regex.Replace(name, "[^a-zA-Z0-9._-]", "_");
+        var dir = "/tmp/rdpgw-dump";
+        Directory.CreateDirectory(dir);
+        using var ms = new MemoryStream();
+        await Request.Body.CopyToAsync(ms);
+        var bytes = ms.ToArray();
+        var path = Path.Combine(dir, safe);
+        // ?append=1 concatenates (used to capture a whole GFX H.264 stream across many frames);
+        // otherwise overwrite (single keyframe dump).
+        if (Request.Query.ContainsKey("append"))
+        {
+            using var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
+            await fs.WriteAsync(bytes);
+        }
+        else
+        {
+            await System.IO.File.WriteAllBytesAsync(path, bytes);
+        }
+        return Ok(new { written = bytes.Length, path });
+    }
+
+    /// <summary>
     /// Issues a short-lived PAA pre-auth token for the signed-in user. Clients that support the
     /// extended HTTP_EXTENDED_AUTH_PAA flow can present this token to open a tunnel without
     /// re-entering credentials.

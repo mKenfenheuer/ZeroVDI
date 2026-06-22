@@ -140,6 +140,18 @@
                             <label class="form-check-label" for="opt-camera" style="font-size:.82rem;">Camera (prompts for permission)</label>
                         </div>
 
+                        <div class="mt-2" style="font-size:.78rem; color:#999;">Display mode</div>
+                        @* GFX graphics pipeline + codec. "Legacy bitmaps" = the classic fastpath path
+                           (most compatible). The GFX modes use MS-RDPEGFX surfaces; H.264 needs the host
+                           to grant AVC over GFX (server GPU + the "Prioritize H.264/AVC 444" policy),
+                           otherwise the host streams ClearCodec, which we also decode. *@
+                        <select class="form-select form-select-sm" id="opt-gfx-mode" style="font-size:.82rem; max-width: 22rem;">
+                            <option value="off" selected>Legacy bitmaps (most compatible)</option>
+                            <option value="clearcodec">GFX — ClearCodec</option>
+                            <option value="avc420" selected>GFX — H.264 (AVC420), fallback ClearCodec</option>
+                            <option value="avc444">GFX — H.264 (AVC444), fallback ClearCodec</option>
+                        </select>
+
                         <div class="mt-2" style="font-size:.78rem; color:#999;">Visual quality</div>
                         @* Performance flags. Checked = the named eye-candy / quality feature is ON.
                            Defaults below favour better visuals (font smoothing + composition, all
@@ -215,6 +227,9 @@
     <script src="~/lib/rdpweb/audin.js" asp-append-version="true"></script>
     <script src="~/lib/rdpweb/rdpecam.js" asp-append-version="true"></script>
     <script src="~/lib/rdpweb/cliprdr.js" asp-append-version="true"></script>
+    <script src="~/lib/rdpweb/zgfx.js" asp-append-version="true"></script>
+    <script src="~/lib/rdpweb/clear.js" asp-append-version="true"></script>
+    <script src="~/lib/rdpweb/rdpgfx.js" asp-append-version="true"></script>
     <script src="~/lib/rdpweb/protocol.js" asp-append-version="true"></script>
     <script src="~/lib/rdpweb/client.js" asp-append-version="true"></script>
 
@@ -330,6 +345,17 @@
                 // Create/resume the AudioContext now, inside this user gesture — browsers block audio
                 // that starts without one, and the first wave arrives long after the click.
                 if (client.audioEnabled) client.primeAudio();
+
+                // GFX display mode (graphics pipeline + codec). Decided before connect: it controls the
+                // CS_CORE GFX advertisement and the RDPGFX capsets. The dropdown is authoritative; the
+                // ?gfx=<mode> URL param still works when the dropdown is left at its default ("off").
+                var gfxSel = document.getElementById("opt-gfx-mode");
+                var gfxMode = gfxSel ? gfxSel.value : "off";
+                if (gfxMode === "off") {
+                    var urlGfx = new URLSearchParams(window.location.search).get("gfx");
+                    if (urlGfx) gfxMode = urlGfx; // honor the URL override only when UI is at default
+                }
+                window.RDP_GFX_MODE = gfxMode;
 
                 // Pick a desktop resolution that fills the visible area in *device* pixels (crisp on
                 // HiDPI), bake it into the handshake by sizing the canvas before connecting.
