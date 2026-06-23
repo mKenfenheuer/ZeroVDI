@@ -45,10 +45,10 @@ Client.prototype._status = function (status, message) { if (this.statusCb) this.
 // RDP desktop dimensions must be even (bitmap rows are 16bpp; widths are safest as multiples of 4),
 // and are clamped to the [MS-RDPBCGR] valid range (200..8192 px per axis for typical hosts).
 Client.prototype.chooseDesktopSize = function (wrapEl) {
-    // Match the remote desktop resolution to the actual console panel size (in device pixels), so the
-    // host renders exactly what fits — no hard-coded resolution, no scaling artifacts. (A 2026-06-16
-    // test pinned this to 2560x1606 while chasing the GFX stall; that stall is fixed now — the gate was
-    // the unjoined MCS message channel, not resolution — so we go back to sizing from the viewport.)
+    // Match the remote desktop resolution to the console panel size in DEVICE pixels (CSS × dpr), so the
+    // host's framebuffer is 1:1 with the physical display — crisp, no browser upscaling. The display DPI
+    // is ALSO carried as the RDP DesktopScaleFactor (see _scaleForSession / the CS_CORE handshake) so
+    // Windows sizes its UI correctly: e.g. a 200% Retina panel gets a 2560x1606 desktop @ 200% scale.
     const dpr = window.devicePixelRatio || 1;
     const cssW = Math.max(1, Math.floor(wrapEl.clientWidth));
     const cssH = Math.max(1, Math.floor(wrapEl.clientHeight));
@@ -56,7 +56,18 @@ Client.prototype.chooseDesktopSize = function (wrapEl) {
     let h = Math.round(cssH * dpr);
     w = Math.max(200, Math.min(8192, w - (w % 4)));
     h = Math.max(200, Math.min(8192, h - (h % 2)));
-    return { width: w, height: h };
+    // Remember the logical size we sized from so the DPI scale can be derived as native/logical (rather
+    // than re-reading devicePixelRatio) — the ratio of the resolution we actually sent to the panel's
+    // CSS size, which is self-consistent even after clamping/rounding.
+    return { width: w, height: h, logicalWidth: cssW, logicalHeight: cssH };
+};
+
+// Derive the RDP DesktopScaleFactor from a chosen size: the ratio of the native (device-pixel)
+// resolution to the logical (CSS) size, snapped to a legal scale. This keeps the scale consistent with
+// the resolution actually applied instead of depending on a separate devicePixelRatio read.
+Client.prototype.scaleForSize = function (size) {
+    const ratio = (size && size.logicalWidth) ? (size.width / size.logicalWidth) : (window.devicePixelRatio || 1);
+    return this.desktopScaleForDpr(ratio);
 };
 
 // Applies a chosen device-pixel size to the canvas backing store, and fits its on-screen size to the
@@ -65,15 +76,20 @@ Client.prototype.applyDesktopSize = function (wrapEl, size) {
     this._wrapEl = wrapEl; // remembered for re-fitting after live resolution changes
     this._appliedW = size.width;   // last resolution we asked the server for (resize jitter guard)
     this._appliedH = size.height;
+    // Capture the session DPI scale ONCE here, derived from this size's native/logical ratio. Everything
+    // downstream (the CS_CORE handshake scale, the initial monitor layout, resizes) reuses this single
+    // value so the session never re-reads devicePixelRatio mid-stream (which can momentarily read 1
+    // during a window resize and send a spurious scale change that stalls the host).
+    this._sessionScale = this.scaleForSize(size);
     this.canvas.width = size.width;
     this.canvas.height = size.height;
     this._fit(wrapEl);
 };
 
-// Fits the canvas on screen. The backing store is the host's framebuffer size (under GFX a fixed
-// 2560x1606, see chooseDesktopSize). We scale that to FIT the wrapper while preserving aspect ratio
-// (letterbox) so it always fills the panel regardless of the display's devicePixelRatio — the old
-// "cssSize = backingStore / dpr" only happened to fit on a 2x-DPR display and overflowed on 1x.
+// Fits the canvas on screen. The backing store is the host's framebuffer size (the device-pixel
+// resolution from chooseDesktopSize). We scale that to FIT the wrapper while preserving aspect ratio
+// (letterbox) so it always fills the panel regardless of devicePixelRatio — the old "cssSize =
+// backingStore / dpr" only happened to fit on a 2x-DPR display and overflowed on 1x.
 Client.prototype._fit = function (wrapEl) {
     const el = wrapEl || this._wrapEl;
     const availW = el ? Math.max(1, el.clientWidth) : (this.canvas.width / (window.devicePixelRatio || 1));
@@ -90,6 +106,10 @@ Client.prototype._fit = function (wrapEl) {
 Client.prototype.connect = function (creds) {
     const self = this;
     this.creds = creds;
+
+    // _sessionScale was captured in applyDesktopSize (derived from the chosen native/logical ratio);
+    // fall back to a fresh derivation here in case connect() is ever called without it.
+    if (!this._sessionScale) this._sessionScale = this.scaleForSize(null);
 
     const url = new URL(this.websocketURL, window.location.href);
     url.protocol = (window.location.protocol === "https:") ? "wss:" : "ws:";
@@ -181,10 +201,12 @@ Client.prototype._startProtocol = function () {
         width: this.canvas.width,
         height: this.canvas.height,
         selectedProtocol: 2, // HYBRID (NLA) — matches the gateway's X.224 negotiation
-        // width/height are ALREADY device pixels (chooseDesktopSize × dpr), so the resolution carries the
-        // DPI. Sending desktopScaleFactor=DPI too double-applies it: under GFX the host then churns
-        // RESET_GRAPHICS and stalls. Commit to ONE strategy (native-pixel resolution) → desktopScale=100.
-        desktopScaleFactor: 100,
+        // width/height are DEVICE pixels (chooseDesktopSize × dpr) for a crisp 1:1 framebuffer, and the
+        // display DPI is carried as the DesktopScaleFactor so the remote Windows UI is sized correctly on
+        // HiDPI panels (native res @ 200%, not a tiny 100% desktop). deviceScaleFactor MUST be 100/140/180
+        // ([MS-RDPBCGR] 2.2.1.3.2) or the host ignores scaling entirely — keep it 100 and express all DPI
+        // via desktopScaleFactor (100..500).
+        desktopScaleFactor: this._scaleForSession(),
         deviceScaleFactor: 100,
         performanceFlags: this.creds.performanceFlags, // undefined → protocol default (best visuals)
         audio: !!this.audioEnabled,        // request the rdpsnd channel for remote sound
@@ -587,27 +609,31 @@ Client.prototype._stopCameraCapture = function () {
 };
 
 // ---- clipboard sync ------------------------------------------------------------------------------
+// Browser autosync against navigator.clipboard proved unfeasible (it needs a secure context, an
+// explicit user gesture for every read, and permission prompts that most environments deny). Instead
+// the console drives a manual text box (overlay popup): the remote's copied text is surfaced into the
+// box via the callback below, and the box's contents are pushed to the remote on demand.
+
 // Enable/disable clipboard redirection. Set before connect() to advertise the cliprdr channel.
 Client.prototype.setClipboardEnabled = function (on) { this.clipboardEnabled = !!on; };
 
-// Remote session copied text → write it to the browser clipboard (best effort; needs a secure
-// context + permission). We suppress our own change echo so it isn't sent straight back.
+// Register a callback that receives text the remote session copied. The console wires this to the
+// clipboard overlay's textarea so the user can see/copy what the remote put on the clipboard.
+Client.prototype.setRemoteClipboardCallback = function (cb) { this._remoteClipCb = cb; };
+
+// Remote session copied text → surface it to the UI (the clipboard overlay textarea). We remember it
+// as the last remote value so a subsequent "send to remote" of the unchanged text is suppressed.
 Client.prototype._onRemoteClipboardText = function (text) {
     this._lastRemoteClip = text;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).catch(function () { /* permission/denied — ignore */ });
-    }
+    if (this._remoteClipCb) this._remoteClipCb(text);
 };
 
-// Offer local browser clipboard text to the remote session (so it can paste). Call from a user
-// gesture (clipboard read requires one). No-op if the text is what the remote just sent us.
-Client.prototype.pushLocalClipboard = function () {
-    const self = this;
-    if (!this.proto || !navigator.clipboard || !navigator.clipboard.readText) return;
-    navigator.clipboard.readText().then(function (text) {
-        if (text == null || text === self._lastRemoteClip) return;
-        self.proto.sendClipboardText(text);
-    }).catch(function () { /* permission/denied — ignore */ });
+// Push the given text to the remote session so it can paste it. Called by the clipboard overlay's
+// "send to remote" action. No-op when the text is unchanged from what the remote last sent us.
+Client.prototype.sendClipboardText = function (text) {
+    if (!this.proto || text == null) return;
+    if (text === this._lastRemoteClip) return;
+    this.proto.sendClipboardText(text);
 };
 
 // Resize the canvas backing store to a device-pixel size and re-fit it to the viewport. Setting
@@ -681,26 +707,17 @@ Client.prototype._applyInitialScale = function () {
     // Instead send ONE scale-only monitor layout at the target DPI: the single reactivation it causes
     // makes the host re-send a keyframe at the new scale, which repaints correctly.
     if (this.proto && this.proto.gfx) {
-        // Under GFX the host stalls after the init burst with THREE RESET_GRAPHICS; the working macOS
-        // Remote Desktop app gets ONE then floods. A MITM diff showed the cause: we apply DPI TWICE —
-        // chooseDesktopSize already multiplies the CSS size by devicePixelRatio (so canvas.width is the
-        // native device-pixel resolution), and then we ALSO sent a monitor layout at 200% desktopScale.
-        // The host churns RESETs trying to reconcile a device-pixel surface that also asks for 2x scale.
-        // The macOS app commits to ONE strategy (native-pixel resolution). So send a single layout at the
-        // CURRENT (device-pixel) resolution with desktopScale=100 — no competing scale, no resolution
-        // change (no surface teardown). This is what settles the host into free-run.
+        // Under GFX the host stalls (churns RESET_GRAPHICS) when a *resolution change* tears down the GFX
+        // surface mid-init (the multi-step dummy-resize sequence below does exactly that). So under GFX we
+        // send ONE scale-only monitor layout: same (device-pixel) resolution, target desktopScale. There's
+        // no resolution change, so no surface teardown; the single reactivation it triggers makes the host
+        // re-send a keyframe at the new scale. This gives native-res @ 200% without the RESET churn.
         if (!this.proto.canResize()) return; // DisplayControl/active not ready yet; retried from _onActive
         this._initialScaleApplied = true;
-        this._sessionScale = 100; // resolution already carries DPI (device pixels); do NOT double-scale
-        this.proto.sendMonitorLayout(this.canvas.width, this.canvas.height, 100, 100);
+        this.proto.sendMonitorLayout(this.canvas.width, this.canvas.height, this._scaleForSession(), 100);
         return;
     }
     if (!this.proto || !this.proto.canResize()) return; // not active yet; retried from _onActive
-    const dpr = window.devicePixelRatio || 1;
-    // Capture the session scale ONCE. Resizes reuse this instead of re-reading devicePixelRatio, which
-    // is unreliable during a window resize (it can momentarily read 1, which would send a 200%→100%
-    // scale change mid-session — this host stalls its stream on that, going black after the resize).
-    this._sessionScale = this.desktopScaleForDpr(dpr);
     if (this._sessionScale <= 100) { this._initialScaleApplied = true; return; } // nothing to scale
     this._initialScaleApplied = true;
     // Remember the real target resolution; the dummy-resize sequence bounces off it.
@@ -1055,8 +1072,18 @@ Client.prototype._sendEvent = function (eventArrayBuffer) {
     if (this.proto) this.proto.sendInputEvent(new Uint8Array(eventArrayBuffer));
 };
 
+// The keyboard listeners live on window (so the session has focus without clicking the canvas first),
+// which means they also fire while the user is typing in an overlay control (login form, the clipboard
+// textarea). When such a control is focused, let the keystroke reach it normally instead of forwarding
+// it to the remote and swallowing it.
+function _typingInOverlay() {
+    const el = document.activeElement;
+    if (!el) return false;
+    const tag = el.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
+}
 Client.prototype.handleKeyDown = function (e) {
-    if (!this.connected) return;
+    if (!this.connected || _typingInOverlay()) return;
     const ev = new KeyboardEventKeyDown(e.code);
     if (ev.keyCode === undefined) { e.preventDefault(); return false; }
     this._sendEvent(ev.serialize());
@@ -1064,7 +1091,7 @@ Client.prototype.handleKeyDown = function (e) {
     return false;
 };
 Client.prototype.handleKeyUp = function (e) {
-    if (!this.connected) return;
+    if (!this.connected || _typingInOverlay()) return;
     const ev = new KeyboardEventKeyUp(e.code);
     if (ev.keyCode === undefined) { e.preventDefault(); return false; }
     this._sendEvent(ev.serialize());

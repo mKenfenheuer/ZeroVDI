@@ -18,6 +18,7 @@ const CB_FORMAT_LIST = 0x0002;
 const CB_FORMAT_LIST_RESPONSE = 0x0003;
 const CB_FORMAT_DATA_REQUEST = 0x0004;
 const CB_FORMAT_DATA_RESPONSE = 0x0005;
+const CB_TEMP_DIRECTORY = 0x0006;
 const CB_CLIP_CAPS = 0x0007;
 
 // msgFlags.
@@ -38,6 +39,12 @@ function ClipRdr(send, callbacks) {
     this.cb = callbacks || {};
     this.localText = null;       // text we offer to the remote (browser → remote)
     this._haveOffered = false;   // whether we've sent a non-empty format list
+    // Format-name variant for the Format List PDU. Per [MS-RDPECLIP] 2.2.2.1.1.1, the Long Format Name
+    // variant is used ONLY when BOTH endpoints set CB_USE_LONG_FORMAT_NAMES; otherwise the Short Format
+    // Name (fixed 32-byte name) variant MUST be used. We always advertise long names; this tracks what
+    // the server advertised so we send AND parse the list in the form the server actually negotiated.
+    // It defaults to false ("server caps not seen / no flag") so we degrade to short names safely.
+    this._serverLongNames = false;
 }
 
 ClipRdr.prototype._log = function (m) { if (this.cb.onLog) this.cb.onLog(m); };
@@ -82,13 +89,20 @@ ClipRdr.prototype.setLocalText = function (text) {
     this._sendFormatList();
 };
 
-// Format List PDU ([MS-RDPECLIP] 2.2.3.1) advertising CF_UNICODETEXT (long-format-name form: id +
-// double-NUL-terminated UTF-16 name; we use an empty name).
+// Format List PDU ([MS-RDPECLIP] 2.2.3.1) advertising CF_UNICODETEXT. The entry layout depends on the
+// negotiated form: Long Format Name = formatId(4) + NUL-terminated UTF-16 name (we use an empty name,
+// i.e. a single u16 NUL); Short Format Name = formatId(4) + a fixed 32-byte name block (zeros, since
+// CF_UNICODETEXT is a standard format with no name). CF_UNICODETEXT names are Unicode, so we never set
+// CB_ASCII_NAMES.
 ClipRdr.prototype._sendFormatList = function () {
     const body = new ClipWriter();
     if (this.localText != null) {
         body.u32(CF_UNICODETEXT); // formatId
-        body.u16(0x0000);         // empty wszFormatName (just the terminating NUL)
+        if (this._serverLongNames) {
+            body.u16(0x0000);     // empty wszFormatName (just the terminating NUL)
+        } else {
+            for (let i = 0; i < 32; i++) body.u8(0); // 32-byte formatName block, all zeros
+        }
         this._haveOffered = true;
     } // else: empty list = "clipboard cleared / nothing on offer"
     this._sendPdu(CB_FORMAT_LIST, 0, body.arr());
@@ -105,7 +119,7 @@ ClipRdr.prototype.onData = function (payload) {
 
     switch (msgType) {
         case CB_MONITOR_READY: return this._onMonitorReady();
-        case CB_CLIP_CAPS: return; // we don't need to parse the server caps for text-only sync
+        case CB_CLIP_CAPS: return this._onServerCaps(body);
         case CB_FORMAT_LIST: return this._onFormatList(body);
         case CB_FORMAT_LIST_RESPONSE: return; // ack of our format list; nothing to do
         case CB_FORMAT_DATA_REQUEST: return this._onFormatDataRequest(body);
@@ -114,12 +128,43 @@ ClipRdr.prototype.onData = function (payload) {
     }
 };
 
-// Monitor Ready ([MS-RDPECLIP] 2.2.2.2): the channel is up. Send our capabilities, then an initial
-// (empty) format list to complete the handshake.
+// Server Clipboard Capabilities ([MS-RDPECLIP] 2.2.2.1). Sent before Monitor Ready. We parse just the
+// General capability set's generalFlags to learn whether the server supports long format names — the
+// Format List form (long vs. short) MUST match what BOTH sides advertised (2.2.2.1.1.1).
+ClipRdr.prototype._onServerCaps = function (body) {
+    if (body.length < 4) return; // no caps → defaults (no flags) → short format names
+    const r = new DataView(body.buffer, body.byteOffset, body.byteLength);
+    const cCapsSets = r.getUint16(0, true);
+    let o = 4; // skip cCapabilitiesSets(2) + pad1(2)
+    for (let i = 0; i < cCapsSets && o + 4 <= body.length; i++) {
+        const capType = r.getUint16(o, true);
+        const capLen = r.getUint16(o + 2, true); // length of the whole CLIPRDR_CAPS_SET
+        if (capType === CB_CAPSTYPE_GENERAL && o + 12 <= body.length) {
+            const generalFlags = r.getUint32(o + 8, true); // after capType(2)+capLen(2)+version(4)
+            this._serverLongNames = (generalFlags & CB_USE_LONG_FORMAT_NAMES) !== 0;
+        }
+        o += capLen >= 4 ? capLen : 4; // advance by the set length (guard against a bogus 0)
+    }
+    this._log("server caps: longFormatNames=" + this._serverLongNames);
+};
+
+// Monitor Ready ([MS-RDPECLIP] 2.2.2.2): the channel is up. Per the init sequence (1.3.2.1) send our
+// capabilities, then the Temporary Directory PDU, then an initial (empty unless setLocalText was
+// already called) format list to complete the handshake.
 ClipRdr.prototype._onMonitorReady = function () {
     this._log("monitor ready");
     this._sendCapabilities();
-    this._sendFormatList(); // empty unless setLocalText was already called
+    this._sendTempDirectory();
+    this._sendFormatList();
+};
+
+// Temporary Directory PDU ([MS-RDPECLIP] 2.2.2.3): a fixed 520-byte NUL-padded UTF-16 path. We don't
+// redirect files, so the path is unused, but some hosts expect this PDU during init — send an empty
+// (all-NUL) path to keep the handshake well-formed.
+ClipRdr.prototype._sendTempDirectory = function () {
+    const body = new ClipWriter();
+    for (let i = 0; i < 520; i++) body.u8(0); // wszTempDir: 520 bytes, all zeros
+    this._sendPdu(CB_TEMP_DIRECTORY, 0, body.arr());
 };
 
 // Clipboard Capabilities PDU ([MS-RDPECLIP] 2.2.2.1) advertising long format names.
@@ -140,15 +185,23 @@ ClipRdr.prototype._onFormatList = function (body) {
     // Ack the list ([MS-RDPECLIP] 2.2.3.2).
     this._sendPdu(CB_FORMAT_LIST_RESPONSE, CB_RESPONSE_OK, null);
 
-    // Parse format ids (long-format-name form: formatId(4) + double-NUL-terminated UTF-16 name).
+    // Parse the format ids. The entry layout depends on the negotiated name form (2.2.3.1):
+    //   Long  = formatId(4) + NUL-terminated UTF-16 name (skip up to & including the double-NUL).
+    //   Short = formatId(4) + a fixed 32-byte name block.
+    // Using the wrong form misreads every id and we'd never spot CF_UNICODETEXT — this is exactly why
+    // remote→browser paste failed when the server negotiated short names.
     let wantId = null;
     let o = 0;
     while (o + 4 <= body.length) {
         const formatId = body[o] | (body[o + 1] << 8) | (body[o + 2] << 16) | (body[o + 3] << 24);
         o += 4;
-        // Skip the UTF-16 name up to and including its double-NUL terminator.
-        while (o + 1 < body.length && !(body[o] === 0 && body[o + 1] === 0)) o += 2;
-        o += 2;
+        if (this._serverLongNames) {
+            // Skip the UTF-16 name up to and including its double-NUL terminator.
+            while (o + 1 < body.length && !(body[o] === 0 && body[o + 1] === 0)) o += 2;
+            o += 2;
+        } else {
+            o += 32; // fixed 32-byte formatName block
+        }
         if (formatId === CF_UNICODETEXT) { wantId = CF_UNICODETEXT; break; }
         if (formatId === 1 && wantId == null) wantId = 1; // CF_TEXT (ASCII) as a fallback
     }

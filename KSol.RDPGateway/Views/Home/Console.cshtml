@@ -115,6 +115,32 @@
             cursor: pointer; padding: 0 .15rem; font-size: .9rem; line-height: 1; opacity: .85;
         }
         #rec-banner .rec-close:hover { opacity: 1; }
+
+        /* Clipboard overlay: a small popup panel holding a textarea kept in sync with the remote
+           session's clipboard. Browser clipboard autosync is unfeasible (gesture + permission per
+           read), so the user edits this box and pushes its contents to the remote on demand; text the
+           remote copies is shown here. Centered modal-style panel dimmed over the session. */
+        #clip-overlay {
+            position: fixed; inset: 0; z-index: 45; display: none;
+            align-items: center; justify-content: center;
+            background: rgba(0,0,0,.55);
+        }
+        #clip-overlay.show { display: flex; }
+        #clip-card {
+            width: 520px; max-width: 92vw; background: #2a2a2a; border: 1px solid #444;
+            border-radius: 8px; padding: 1rem 1.1rem; box-shadow: 0 8px 30px rgba(0,0,0,.5);
+        }
+        #clip-card h6 { margin: 0 0 .25rem; font-weight: 600; }
+        #clip-card .clip-sub { font-size: .76rem; color: #999; margin-bottom: .6rem; }
+        #clip-text {
+            width: 100%; min-height: 180px; resize: vertical; font-family: var(--bs-font-monospace, monospace);
+            font-size: .85rem; background: #1e1e1e; color: #eee; border: 1px solid #555;
+            border-radius: 6px; padding: .5rem .6rem;
+        }
+        #clip-text:focus { outline: none; border-color: #6aa7ff; }
+        #clip-actions { display: flex; align-items: center; gap: .5rem; margin-top: .65rem; }
+        #clip-actions .clip-hint { font-size: .74rem; color: #8c9; margin-left: auto; min-height: 1em; }
+        #clip-actions .clip-hint.muted { color: #888; }
     </style>
 </head>
 <body>
@@ -134,7 +160,7 @@
         <span class="name">@resourceName</span>
         <span id="floatbar-controls">
             <button class="btn-session-control" id="btn-clip" type="button"
-                    title="Send your clipboard to the remote session"><i class="fa-solid fa-clipboard"></i></button>
+                    title="Clipboard — sync text with the remote session"><i class="fa-solid fa-clipboard"></i></button>
             <button class="btn-session-control" id="btn-fullscreen" type="button"><i class="fa-solid fa-expand"></i></button>
             <button class="btn-session-control" id="btn-mute" type="button" actiontitle="Mute / unmute remote sound"><i class="fa-solid fa-volume"></i></button>
             <button class="btn-session-control fa-red" id="btn-disable-video" type="button"><i class="fa-solid fa-video-slash"></i></button>
@@ -146,6 +172,24 @@
     <div id="screen-wrap">
         <canvas id="canvas" width="1280" height="800"></canvas>
         <canvas id="pointer-cache" width="32" height="32"></canvas>
+    </div>
+
+    @* Clipboard overlay — manual text sync with the remote session (see #clip-overlay styles). Toggled
+       by the floatbar clipboard button. The textarea shows text the remote copied and is the source for
+       "Send to remote". *@
+    <div id="clip-overlay">
+        <div id="clip-card">
+            <h6>Clipboard</h6>
+            <div class="clip-sub">Edit the text and send it to the remote session, or copy text the
+                remote put on its clipboard from here.</div>
+            <textarea id="clip-text" placeholder="Type or paste text here, then “Send to remote”…"></textarea>
+            <div id="clip-actions">
+                <button class="btn btn-primary btn-sm" type="button" id="clip-send">Send to remote</button>
+                <button class="btn btn-outline-secondary btn-sm" type="button" id="clip-copy">Copy</button>
+                <button class="btn btn-outline-secondary btn-sm" type="button" id="clip-close">Close</button>
+                <span class="clip-hint" id="clip-hint"></span>
+            </div>
+        </div>
     </div>
 
     <div id="login-overlay">
@@ -299,6 +343,12 @@
             var btnDisableMic = document.getElementById("btn-disable-microphone");
             var btnDisableVideo = document.getElementById("btn-disable-video");
             var btnClip = document.getElementById("btn-clip");
+            var clipOverlay = document.getElementById("clip-overlay");
+            var clipText = document.getElementById("clip-text");
+            var clipHint = document.getElementById("clip-hint");
+            var btnClipSend = document.getElementById("clip-send");
+            var btnClipCopy = document.getElementById("clip-copy");
+            var btnClipClose = document.getElementById("clip-close");
             var floatbar = document.getElementById("floatbar");
             var revealZone = document.getElementById("reveal-zone");
 
@@ -343,6 +393,7 @@
                 if (hideTimer) clearTimeout(hideTimer);
                 floatbar.classList.add("hidden");
                 hideRecording();
+                clipOverlay.classList.remove("show"); // hide the clipboard popup when the session ends
                 loginError.textContent = "";
                 loginOverlay.style.display = "flex";
             }
@@ -489,7 +540,60 @@
                 btnDisableVideo.classList.toggle("fa-red", paused);
                 btnDisableVideo.innerHTML = paused ? '<i class="fa-solid fa-video-slash"></i>' : '<i class="fa-solid fa-video"></i>';
             });
-            btnClip.addEventListener("click", function () { client.pushLocalClipboard(); });
+            // ---- clipboard overlay -------------------------------------------------------------------
+            // Browser clipboard autosync is unfeasible (per-read gesture + permission), so clipboard
+            // sync is manual: a popup textarea. The remote's copied text is pushed into the box, and the
+            // box's contents are sent to the remote on "Send to remote".
+            function setClipHint(msg, muted) {
+                clipHint.textContent = msg || "";
+                clipHint.classList.toggle("muted", !!muted);
+            }
+            function openClip() {
+                if (clipOverlay.classList.contains("show")) return;
+                clipOverlay.classList.add("show");
+                setClipHint("");
+                clipText.focus();
+                clipText.select();
+            }
+            function closeClip() { clipOverlay.classList.remove("show"); }
+
+            // Remote copied text → surface it in the textarea (the latest remote copy is the newest
+            // event, so it replaces the box contents; a hint flags it when the popup is open).
+            client.setRemoteClipboardCallback(function (text) {
+                clipText.value = text == null ? "" : text;
+                if (clipOverlay.classList.contains("show")) {
+                    setClipHint("Received from remote", true);
+                }
+            });
+
+            btnClip.addEventListener("click", function () {
+                if (clipOverlay.classList.contains("show")) closeClip(); else openClip();
+            });
+            btnClipSend.addEventListener("click", function () {
+                client.sendClipboardText(clipText.value);
+                setClipHint("Sent to remote — paste in the session");
+            });
+            btnClipCopy.addEventListener("click", function () {
+                clipText.focus();
+                clipText.select();
+                var ok = false;
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(clipText.value).then(function () {
+                        setClipHint("Copied to your clipboard", true);
+                    }).catch(function () { setClipHint("Press Ctrl/Cmd+C to copy", true); });
+                    return;
+                }
+                try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+                setClipHint(ok ? "Copied to your clipboard" : "Press Ctrl/Cmd+C to copy", true);
+            });
+            btnClipClose.addEventListener("click", closeClip);
+            // Click the dimmed backdrop (outside the card) to dismiss.
+            clipOverlay.addEventListener("mousedown", function (e) { if (e.target === clipOverlay) closeClip(); });
+            // Esc closes; Ctrl/Cmd+Enter sends.
+            clipText.addEventListener("keydown", function (e) {
+                if (e.key === "Escape") { e.preventDefault(); closeClip(); }
+                else if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); btnClipSend.click(); }
+            });
 
             // ---- floating bar: auto-hide + click-to-minimize ------------------------------------
             // The bar reveals on mouse activity near the top, stays while hovered, and auto-hides a
