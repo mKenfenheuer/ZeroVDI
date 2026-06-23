@@ -287,7 +287,10 @@
                     case "closed":
                         // Session ended (user disconnect or server drop): reset the screen to black
                         // and bring back the login form so the console is ready for a fresh connect.
+                        // `message`, when present, is the host's disconnect reason (logoff, admin
+                        // disconnect, timeout) — show it so the user knows why the session ended.
                         resetConsole();
+                        if (message) loginError.textContent = message;
                         break;
                 }
             });

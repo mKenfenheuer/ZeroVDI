@@ -190,6 +190,7 @@ Client.prototype._startProtocol = function () {
         onUpdate: this.onUpdate,
         onActive: function () { self._onActive(); },
         onError: function (m) { console.error("rdp:", m); self._status("error", m); },
+        onClose: function (graceful, m) { self._onProtocolClose(graceful, m); },
         onLog: function (m) { console.log("rdp:", m); },
         onResize: function (w, h) { self._onRemoteResize(w, h); },
         onDisplayControlReady: function () { self._displayControlReady = true; self._applyInitialScale(); },
@@ -802,7 +803,11 @@ Client.prototype.deinitialize = function () {
     // Release the webcam too (stops the camera light/in-use indicator).
     this._stopCameraCapture();
 
-    this._status("closed", null);
+    // Surface why the session ended (host logoff/disconnect reason) if the protocol gave us one; the
+    // UI shows it on the login form. Cleared after so a later manual reconnect/close starts clean.
+    this._status("closed", this._closeReason || null);
+    this._closeReason = null;
+    this._protocolClosed = false;
 };
 
 // ---- fastpath update rendering -------------------------------------------------------------------
@@ -1081,6 +1086,22 @@ Client.prototype.handleWheel = function (e) {
     this._sendEvent(new MouseWheelEvent(p.x, p.y, step, delta > 0, isHorizontal).serialize());
     e.preventDefault();
     return false;
+};
+
+// The RDP protocol detected the host ending the session (graceful logoff/disconnect or MCS ultimatum)
+// BEFORE the host lazily closes its TCP socket. Tear down the client side immediately so the UI
+// reflects the disconnect at once instead of waiting (potentially several seconds) for the socket
+// close to propagate. For a non-graceful end we surface the error message first; either way we then
+// close the WebSocket, whose onclose → deinitialize resets the console to the login form.
+Client.prototype._onProtocolClose = function (graceful, message) {
+    if (this._protocolClosed) return; // fire once (multiple disconnect PDUs can arrive)
+    this._protocolClosed = true;
+    // Remember why the session ended so deinitialize() can surface it on the "closed" status (the
+    // socket close → deinitialize would otherwise reset the console and wipe any message we set here).
+    this._closeReason = message || null;
+    // Stop driving the protocol and release input/render before tearing down the socket.
+    this.proto = null;
+    try { if (this.socket) this.socket.close(1000, "remote session ended"); } catch (e) { /* ignore */ }
 };
 
 Client.prototype.disconnect = function () {

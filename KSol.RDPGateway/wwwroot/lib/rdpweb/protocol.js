@@ -598,6 +598,49 @@ const PDUTYPE2_FONTLIST = 0x27;
 const PDUTYPE2_FONTMAP = 0x28;
 const PDUTYPE2_SET_ERROR_INFO_PDU = 0x2f;
 
+// TS_SET_ERROR_INFO_PDU error codes ([MS-RDPBCGR] 2.2.5.1.1), mapped to a user-facing description.
+// The low codes (< 0x10000) are graceful session-end reasons the host sends just before it tears the
+// session down (user logoff, admin disconnect, timeout); the higher codes are genuine protocol/license
+// errors. We surface a description for EVERY code — and always append the raw hex code — so an
+// unrecognized value still reads sensibly (e.g. "Remote desktop error (0x1234).").
+const ERROR_INFO_DESC = {
+    0x00000001: "Disconnected by the server.",                 // RPC_INITIATED_DISCONNECT
+    0x00000002: "Signed out by the server.",                   // RPC_INITIATED_LOGOFF
+    0x00000003: "Idle timeout reached.",                       // IDLE_TIMEOUT
+    0x00000004: "Session time limit reached.",                 // LOGON_TIMEOUT
+    0x00000005: "Disconnected by another connection.",         // DISCONNECTED_BY_OTHERCONNECTION
+    0x00000006: "The server ran out of memory.",               // OUT_OF_MEMORY
+    0x00000007: "The server denied the connection.",           // SERVER_DENIED_CONNECTION
+    0x00000009: "Insufficient access privileges.",             // SERVER_INSUFFICIENT_PRIVILEGES
+    0x0000000A: "The server refused fresh credentials.",       // SERVER_FRESH_CREDENTIALS_REQUIRED
+    0x0000000B: "You disconnected from the session.",          // RPC_INITIATED_DISCONNECT_BYUSER
+    0x0000000C: "You were signed out.",                        // LOGOFF_BY_USER
+    0x00000010: "The connection was replaced.",                // REPLACED_BY_OTHER_CONNECTION
+    0x00000011: "The server changed graphics mode.",           // OUT_OF_MEMORY (gfx) — host-specific
+    // Licensing failures (TS_SET_ERROR_INFO licensing range).
+    0x00000100: "A licensing error occurred.",                 // LICENSE_INTERNAL
+    0x00000101: "No license server is available.",             // LICENSE_NO_LICENSE_SERVER
+    0x00000102: "No license is available.",                    // LICENSE_NO_LICENSE
+    0x00000103: "An invalid licensing message was received.",  // LICENSE_BAD_CLIENT_MSG
+    0x00000104: "The license store is full.",                  // LICENSE_HWID_DOESNT_MATCH_LICENSE
+    0x00000105: "The client license is invalid.",              // LICENSE_BAD_CLIENT_LICENSE
+    0x00000106: "Licensing could not complete.",               // LICENSE_CANT_FINISH_PROTOCOL
+    0x00000107: "An unexpected licensing message was received.", // LICENSE_CLIENT_ENDED_PROTOCOL
+    0x00000108: "An invalid client licensing message was received.", // LICENSE_BAD_CLIENT_ENCRYPTION
+    0x00000109: "Licensing was not negotiated correctly.",     // LICENSE_CANT_UPGRADE_LICENSE
+    0x0000010A: "Too many users are connected to the server.", // LICENSE_NO_REMOTE_CONNECTIONS
+};
+
+function errorInfoReason(code) {
+    if (code === 0x00000000) return null; // ERRINFO_NONE — host clearing a prior error, not a disconnect
+    const desc = ERROR_INFO_DESC[code] || "Remote desktop error";
+    const hex = "0x" + code.toString(16).toUpperCase();
+    // Codes below the protocol-error range are normal session-end reasons → graceful close (UI returns
+    // to the login form, not a red error). Higher codes are genuine errors.
+    const graceful = code < 0x00001000;
+    return { graceful: graceful, message: desc + " (" + hex + ")" };
+}
+
 // Builds a TS_SHAREDATAHEADER + data body (PDUTYPE_DATAPDU) for finalization PDUs.
 function shareDataPdu(shareID, userId, pduType2, body) {
     const totalLength = 18 + body.length;
@@ -1020,6 +1063,7 @@ const ST = {
     CAPABILITIES: "capabilities",
     FINALIZATION: "finalization",
     ACTIVE: "active",
+    CLOSED: "closed", // host signalled session end (graceful logoff/disconnect or MCS ultimatum)
 };
 
 // transport: { send(Uint8Array) }
@@ -1137,6 +1181,19 @@ function RdpProtocol(transport, opts, callbacks) {
 RdpProtocol.prototype._log = function (m) { if (this.cb.onLog) this.cb.onLog(m); };
 RdpProtocol.prototype._err = function (m) { if (this.cb.onError) this.cb.onError(m); };
 
+// The session has ended cleanly from the protocol's point of view (the host sent a graceful
+// disconnect/logoff via SET_ERROR_INFO_PDU, or an MCS Disconnect Provider Ultimatum). Fire onClose
+// so the UI tears down IMMEDIATELY instead of waiting for the host to lazily close its TCP socket
+// (a Windows host can sit in the "you have been disconnected" state for several seconds first). Fires
+// at most once; after it the protocol stops driving the session.
+RdpProtocol.prototype._close = function (graceful, message) {
+    if (this._closed) return;
+    this._closed = true;
+    this.state = ST.CLOSED;
+    if (this.cb.onClose) this.cb.onClose(graceful, message);
+    else if (!graceful) this._err(message); // back-compat if the host didn't wire onClose
+};
+
 // Kick off the handshake: send MCS connect-initial. Called once the relay is "ready".
 RdpProtocol.prototype.start = function () {
     this._log("MCS: Connect Initial");
@@ -1240,7 +1297,13 @@ RdpProtocol.prototype._handleSlowPath = function (x224) {
 RdpProtocol.prototype._mcsSendDataIndication = function (r) {
     const choice = Per.readChoice(r);
     const application = choice >> 2;
-    if (application === MCS_DISCONNECT_ULTIMATUM) throw new Error("server disconnected (MCS ultimatum)");
+    if (application === MCS_DISCONNECT_ULTIMATUM) {
+        // The host is tearing down the MCS domain — the session is over. Close NOW so the UI reacts
+        // immediately; a SET_ERROR_INFO_PDU with the reason usually preceded this, but the ultimatum
+        // alone (e.g. a hard server-side disconnect) is enough to end the session cleanly.
+        this._close(true, "The remote desktop ended the session.");
+        throw new Error("server disconnected (MCS ultimatum)");
+    }
     if (application !== MCS_SEND_DATA_INDICATION) throw new Error("unexpected MCS application " + application);
     Per.readInteger16(r, 1001);               // initiator
     this._lastChannelId = Per.readInteger16(r, 0); // channelId (global I/O vs a virtual channel)
@@ -1563,6 +1626,8 @@ RdpProtocol.prototype._onFinalization = function (r) {
         case PDUTYPE2_SET_ERROR_INFO_PDU: {
             const code = r.u32le();
             this._log("RDP: server error info 0x" + code.toString(16));
+            const reason = errorInfoReason(code);
+            if (reason) this._close(reason.graceful, reason.message);
             break;
         }
         default: break;
@@ -1657,6 +1722,11 @@ RdpProtocol.prototype._onActiveSlowPath = function (r) {
         if (info && info.pduType2 === PDUTYPE2_SET_ERROR_INFO_PDU) {
             const code = r.u32le();
             this._log("RDP: server error info 0x" + code.toString(16));
+            const reason = errorInfoReason(code);
+            // A non-zero error info during the ACTIVE phase means the host is ending the session (a
+            // user logoff, admin disconnect, timeout, or a protocol error). The host then closes its
+            // TCP socket — but lazily. Close now so the UI doesn't sit on a frozen screen meanwhile.
+            if (reason) this._close(reason.graceful, reason.message);
         }
     } catch (e) {
         this._err(e && e.message ? e.message : String(e));
