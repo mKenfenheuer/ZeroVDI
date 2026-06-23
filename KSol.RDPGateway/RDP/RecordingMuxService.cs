@@ -8,13 +8,14 @@ namespace KSol.RDPGateway.RDP;
 
 /// <summary>
 /// Background job that muxes the RAW elementary streams captured by <see cref="SessionRecorder"/> into
-/// the final MP4(s). Polls for recordings in <see cref="RecordingStatus.Processing"/>, reads the
-/// per-recording <c>manifest.json</c>, and produces ONE combined MP4 (session.mp4) with up to four
-/// separate tracks (reading real seekable files, so no FIFOs / launch-timing races):
-///   • desktop video — desktop.h264 (-c:v copy, VFR via per-frame timestamps)
-///   • camera video  — camera.nv12 (-c:v libx264, VFR via per-frame timestamps)
-///   • remote audio  — desktop.pcm (→ aac, silence-padded to its session offset)
-///   • mic audio     — mic.pcm     (→ aac, silence-padded to its session offset)
+/// the final files. Polls for recordings in <see cref="RecordingStatus.Processing"/>, reads the
+/// per-recording <c>manifest.json</c>, and produces up to FOUR independent, individually-seekable
+/// faststart files that share one session-epoch timeline (reading real seekable files, so no FIFOs /
+/// launch-timing races) — one per track so the web player can load and sync them separately:
+///   • desktop video — desktop.h264 → desktop.mp4 (-c:v copy, VFR via per-frame timestamps)
+///   • camera video  — camera.nv12 → camera.mp4  (-c:v libx264, VFR via per-frame timestamps)
+///   • remote audio  — desktop.pcm → audio.m4a   (→ aac, silence-padded to its session offset)
+///   • mic audio     — mic.pcm     → mic.m4a      (→ aac, silence-padded to its session offset)
 /// On success the raw files are deleted and the row is set Completed (or UnsupportedCodec when the
 /// desktop codec wasn't H.264 — audio only). Failures set Failed and KEEP the raws for retry/debugging.
 /// </summary>
@@ -131,22 +132,42 @@ public sealed class RecordingMuxService : BackgroundService
             ? Path.Combine(baseDir, manifest.MicAudio) : null;
         if (micPcm != null && File.Exists(micPcm)) rawFiles.Add(micPcm); else micPcm = null;
 
-        // --- single combined MP4: desktop video + camera video + remote audio + mic audio ---
-        string? sessionOut = null;
-        if (!anyFailed && (desktopMkv != null || cameraMkv != null || remotePcm != null || micPcm != null))
+        // --- four independent, individually-seekable outputs sharing one session-epoch timeline ---
+        // desktop.mp4 / camera.mp4 (video copy from the VFR MKVs), audio.m4a / mic.m4a (PCM → aac,
+        // each silence-padded by its session-epoch offset so playback starts at the right moment). The
+        // web player loads each as its own element and syncs them by currentTime.
+        string? desktopOut = null, cameraOut = null, audioOut = null, micOut = null;
+        if (!anyFailed)
         {
-            var tracks = new List<MuxTrack>();
-            if (desktopMkv != null) tracks.Add(MuxTrack.Video(desktopMkv, "desktop"));
-            if (cameraMkv != null) tracks.Add(MuxTrack.Video(cameraMkv, "camera"));
-            if (remotePcm != null) tracks.Add(MuxTrack.Audio(remotePcm, manifest.RemoteAudio!.Value, manifest.DesktopAudioOffsetMs, "audio"));
-            if (micPcm != null) tracks.Add(MuxTrack.Audio(micPcm, manifest.MicFormat!.Value, manifest.MicOffsetMs, "mic"));
-            if (await MuxCombinedAsync(tracks, rec.DesktopFilePath!, rec.Id, ct)) sessionOut = rec.DesktopFilePath;
-            else anyFailed = true;
+            if (desktopMkv != null)
+            {
+                desktopOut = Path.Combine(baseDir, "desktop.mp4");
+                if (!await MuxVideoFileAsync(desktopMkv, desktopOut, rec.Id, "desktop", ct)) { anyFailed = true; desktopOut = null; }
+            }
+            if (!anyFailed && cameraMkv != null)
+            {
+                cameraOut = Path.Combine(baseDir, "camera.mp4");
+                if (!await MuxVideoFileAsync(cameraMkv, cameraOut, rec.Id, "camera", ct)) { anyFailed = true; cameraOut = null; }
+            }
+            if (!anyFailed && remotePcm != null)
+            {
+                audioOut = Path.Combine(baseDir, "audio.m4a");
+                if (!await MuxAudioFileAsync(remotePcm, manifest.RemoteAudio!.Value, manifest.DesktopAudioOffsetMs, audioOut, rec.Id, "audio", ct)) { anyFailed = true; audioOut = null; }
+            }
+            if (!anyFailed && micPcm != null)
+            {
+                micOut = Path.Combine(baseDir, "mic.m4a");
+                if (!await MuxAudioFileAsync(micPcm, manifest.MicFormat!.Value, manifest.MicOffsetMs, micOut, rec.Id, "mic", ct)) { anyFailed = true; micOut = null; }
+            }
         }
 
-        // Update the row: the single MP4 path (or null), status reflects codec/result.
-        rec.DesktopFilePath = sessionOut;
-        rec.CameraFilePath = null;
+        // Update the row: the four per-track paths (or null), status reflects codec/result. On failure,
+        // keep DesktopFilePath pointing into baseDir (file may not exist) so Delete can still find and
+        // clean up the directory; clear the other tracks.
+        rec.DesktopFilePath = anyFailed ? Path.Combine(baseDir, "desktop.mp4") : desktopOut;
+        rec.CameraFilePath = anyFailed ? null : cameraOut;
+        rec.AudioFilePath = anyFailed ? null : audioOut;
+        rec.MicFilePath = anyFailed ? null : micOut;
         rec.Status = anyFailed ? RecordingStatus.Failed
             : manifest.UnsupportedVideoCodec ? RecordingStatus.UnsupportedCodec
             : RecordingStatus.Completed;
@@ -178,78 +199,27 @@ public sealed class RecordingMuxService : BackgroundService
         return null;
     }
 
-    // One input track for the combined mux: either a VFR video MKV (copied) or a raw PCM audio stream
-    // (AAC-encoded, silence-padded by OffsetMs so it lands at its real session time). Title labels the
-    // track in the container (desktop/camera/audio/mic) so desktop players can tell them apart.
-    private readonly record struct MuxTrack(bool IsVideo, string Path, PcmFormat Pcm, long OffsetMs, string Title)
+    // Remux a single VFR video MKV → its own faststart MP4 (-c:v copy, no re-encode). +faststart moves
+    // the moov atom to the front so the browser can seek without downloading the whole file.
+    private Task<bool> MuxVideoFileAsync(string mkv, string outPath, string recId, string tag, CancellationToken ct)
     {
-        public static MuxTrack Video(string path, string title) => new(true, path, default, 0, title);
-        public static MuxTrack Audio(string path, PcmFormat fmt, long offsetMs, string title) => new(false, path, fmt, offsetMs, title);
+        var args = new List<string> { "-hide_banner", "-loglevel", "warning",
+            "-i", mkv, "-map", "0:v:0", "-c:v", "copy",
+            "-movflags", "+faststart", "-y", outPath };
+        return RunFfmpegAsync(args, recId, tag, ct);
     }
 
-    // Combined mux: up to two VFR video MKVs (copy) + up to two PCM audio streams (→ aac, each
-    // silence-padded by its own offset) → ONE MP4 with all tracks mapped as separate streams. Audio
-    // delays are applied via -filter_complex (one adelay per audio input, each to its own output label),
-    // because a plain -af can't target individual inputs when there are several.
-    private async Task<bool> MuxCombinedAsync(List<MuxTrack> tracks, string outPath, string recId, CancellationToken ct)
+    // Encode a single raw PCM stream → its own faststart M4A (aac), silence-padded at the front by
+    // offsetMs so it starts at its real session-epoch time (adelay 0 is a harmless no-op).
+    private Task<bool> MuxAudioFileAsync(string pcm, PcmFormat fmt, long offsetMs, string outPath, string recId, string tag, CancellationToken ct)
     {
-        if (tracks.Count == 0) return false;
-        var args = new List<string> { "-hide_banner", "-loglevel", "warning" };
-
-        // Inputs in order; remember each track's ffmpeg input index.
-        var inputIndex = new int[tracks.Count];
-        int idx = 0;
-        for (int i = 0; i < tracks.Count; i++)
-        {
-            var t = tracks[i];
-            if (t.IsVideo) { args.Add("-i"); args.Add(t.Path); }
-            else
-            {
-                args.AddRange(new[] { "-f", t.Pcm.BitsPerSample == 8 ? "u8" : "s16le",
-                    "-ar", t.Pcm.SampleRate.ToString(), "-ac", Math.Max(1, t.Pcm.Channels).ToString(),
-                    "-i", t.Path });
-            }
-            inputIndex[i] = idx++;
-        }
-
-        // Per-audio-input adelay filter graph: [N:a]adelay=ms:all=1[aLabel].
-        var filters = new List<string>();
-        var audioLabels = new List<string>();
-        for (int i = 0; i < tracks.Count; i++)
-        {
-            if (tracks[i].IsVideo) continue;
-            string label = "a" + i;
-            long ms = Math.Max(0, tracks[i].OffsetMs);
-            // adelay with 0 is a harmless no-op; keep the filter so the label exists to map.
-            filters.Add($"[{inputIndex[i]}:a]adelay={ms}:all=1[{label}]");
-            audioLabels.Add(label);
-        }
-        if (filters.Count > 0) { args.Add("-filter_complex"); args.Add(string.Join(";", filters)); }
-
-        // Map every track. Video by input:stream; audio by its filter output label.
-        int outVideo = 0, outAudio = 0, ai = 0;
-        for (int i = 0; i < tracks.Count; i++)
-        {
-            var t = tracks[i];
-            if (t.IsVideo)
-            {
-                args.AddRange(new[] { "-map", $"{inputIndex[i]}:v:0" });
-                // MP4 stores per-track names in handler_name (not title); desktop players show it.
-                args.AddRange(new[] { $"-metadata:s:v:{outVideo}", $"handler_name={t.Title}" });
-                outVideo++;
-            }
-            else
-            {
-                args.AddRange(new[] { "-map", $"[{audioLabels[ai++]}]" });
-                args.AddRange(new[] { $"-metadata:s:a:{outAudio}", $"handler_name={t.Title}" });
-                outAudio++;
-            }
-        }
-
-        if (outVideo > 0) args.AddRange(new[] { "-c:v", "copy" });
-        if (outAudio > 0) args.AddRange(new[] { "-c:a", "aac" });
-        args.AddRange(new[] { "-movflags", "+faststart", "-y", outPath });
-        return await RunFfmpegAsync(args, recId, "combined", ct);
+        long ms = Math.Max(0, offsetMs);
+        var args = new List<string> { "-hide_banner", "-loglevel", "warning",
+            "-f", fmt.BitsPerSample == 8 ? "u8" : "s16le",
+            "-ar", fmt.SampleRate.ToString(), "-ac", Math.Max(1, fmt.Channels).ToString(),
+            "-i", pcm, "-af", $"adelay={ms}:all=1", "-c:a", "aac",
+            "-movflags", "+faststart", "-y", outPath };
+        return RunFfmpegAsync(args, recId, tag, ct);
     }
 
     private Task<bool> RunFfmpegAsync(List<string> args, string recId, string tag, CancellationToken ct)

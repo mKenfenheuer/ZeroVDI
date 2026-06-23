@@ -2,6 +2,14 @@
 @using KSol.RDPGateway.Models
 @{
     ViewData["Title"] = "Replay recording";
+
+    // Which per-track files this recording actually produced. The player loads each present track as its
+    // own <video>/<audio> element; all four share one session-epoch timeline so they sync by currentTime.
+    var hasDesktop = !string.IsNullOrEmpty(Model.DesktopFilePath);
+    var hasCamera = !string.IsNullOrEmpty(Model.CameraFilePath);
+    var hasAudio = !string.IsNullOrEmpty(Model.AudioFilePath);
+    var hasMic = !string.IsNullOrEmpty(Model.MicFilePath);
+    string Src(string track) => Url.Action("GetFile", new { id = Model.Id, track })!;
 }
 
 <div class="d-flex justify-content-between align-items-center mb-3">
@@ -23,24 +31,286 @@
     </div>
 }
 
-<div class="row g-4">
-    <div class="col-12">
-        <h2 class="h6">Session @(Model.VideoCodec != null ? $"({Model.VideoCodec})" : "")</h2>
-        @if (Model.DesktopFilePath != null)
+@if (!hasDesktop && !hasCamera && !hasAudio && !hasMic)
+{
+    <p class="text-muted">No recording available.</p>
+}
+else
+{
+    <div id="player" class="rp-player border rounded bg-dark"
+         data-has-camera="@hasCamera.ToString().ToLower()"
+         data-has-audio="@hasAudio.ToString().ToLower()"
+         data-has-mic="@hasMic.ToString().ToLower()">
+
+        <div class="rp-stage@(hasDesktop && hasCamera ? " rp-stage-split" : "")">
+            @* Desktop and camera sit side-by-side: one large ("main"), the other smaller ("side") next to
+               it. The swap button exchanges which source sits where. Audio on both video elements is muted;
+               the two <audio> elements below are the only sound, so they can be toggled independently. *@
+            @if (hasDesktop)
+            {
+                <video id="rp-desktop" class="rp-video rp-main" muted playsinline preload="auto"
+                       src="@Src("desktop")"></video>
+            }
+            @if (hasCamera)
+            {
+                <video id="rp-camera" class="rp-video @(hasDesktop ? "rp-side" : "rp-main")" muted playsinline
+                       preload="auto" src="@Src("camera")"></video>
+                @if (hasDesktop)
+                {
+                    <button id="rp-swap" type="button" class="rp-swap" title="Swap desktop / camera">
+                        <i class="fa-solid fa-right-left"></i></button>
+                }
+            }
+        </div>
+
+        @* Hidden background audio elements — remote (system) audio and microphone — each independently
+           toggleable from the controls. They follow the master clock like the videos. *@
+        @if (hasAudio)
         {
-            <video controls preload="metadata" class="w-100 border rounded bg-dark"
-                   src="@Url.Action("GetFile", new { id = Model.Id })">
-                Your browser cannot play this recording.
-            </video>
-            <p class="text-muted small mt-2">
-                One file with up to four tracks: desktop video, camera video, remote audio, microphone.
-                The browser plays the desktop video and remote audio; the camera and mic tracks are also
-                in the file and selectable in a desktop player (VLC, mpv).
-            </p>
+            <audio id="rp-audio" preload="auto" src="@Src("audio")"></audio>
         }
-        else
+        @if (hasMic)
         {
-            <p class="text-muted">No recording available.</p>
+            <audio id="rp-mic" preload="auto" src="@Src("mic")"></audio>
         }
+
+        <div class="rp-controls">
+            <button id="rp-play" type="button" class="rp-btn" title="Play / pause">
+                <i class="fa-solid fa-play"></i></button>
+
+            <span id="rp-time" class="rp-time">0:00 / 0:00</span>
+
+            <input id="rp-seek" class="rp-seek" type="range" min="0" max="1000" value="0" step="1"
+                   aria-label="Seek" />
+
+            @if (hasAudio)
+            {
+                <button id="rp-audio-toggle" type="button" class="rp-btn rp-toggle is-on"
+                        title="System audio"><i class="fa-solid fa-volume-high"></i></button>
+            }
+            @if (hasMic)
+            {
+                <button id="rp-mic-toggle" type="button" class="rp-btn rp-toggle is-on"
+                        title="Microphone"><i class="fa-solid fa-microphone"></i></button>
+            }
+
+            <input id="rp-volume" class="rp-volume" type="range" min="0" max="100" value="100" step="1"
+                   aria-label="Volume" title="Volume" />
+
+            <button id="rp-fs" type="button" class="rp-btn" title="Fullscreen">
+                <i class="fa-solid fa-expand"></i></button>
+        </div>
     </div>
-</div>
+
+    <p class="text-muted small mt-2">
+        Streams in this recording:
+        @(hasDesktop ? "desktop" : null)@(hasDesktop && (hasCamera || hasAudio || hasMic) ? ", " : null)@(hasCamera ? "camera" : null)@(hasCamera && (hasAudio || hasMic) ? ", " : null)@(hasAudio ? "system audio" : null)@(hasAudio && hasMic ? ", " : null)@(hasMic ? "microphone" : null).
+        Desktop and camera play together (swap with the <i class="fa-solid fa-right-left"></i> button);
+        system audio and microphone toggle independently.
+    </p>
+}
+
+<style>
+        .rp-player { position: relative; overflow: hidden; }
+        /* Single-video sessions: the one video fills a 16:9 stage. */
+        .rp-stage { position: relative; width: 100%; background: #000; aspect-ratio: 16 / 9; }
+        .rp-stage > .rp-main:only-child,
+        .rp-stage:not(.rp-stage-split) > .rp-main {
+            position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+        /* Desktop + camera: side by side — desktop large, camera smaller next to it. */
+        .rp-stage-split { display: flex; align-items: stretch; gap: 4px; aspect-ratio: auto;
+            height: min(70vh, 720px); }
+        .rp-stage-split .rp-video { position: static; }
+        .rp-stage-split .rp-main { flex: 1 1 auto; min-width: 0; height: 100%; object-fit: contain; }
+        .rp-stage-split .rp-side { flex: 0 0 30%; max-width: 30%; height: 100%; object-fit: contain;
+            background: #000; }
+        .rp-video { background: #000; }
+        .rp-swap { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%);
+            z-index: 3; width: 34px; height: 34px; padding: 0; text-align: center;
+            border: none; border-radius: 50%; background: rgba(0,0,0,.6); color: #fff; cursor: pointer;
+            font-size: 15px; }
+        .rp-swap:hover { background: rgba(0,0,0,.85); }
+
+        .rp-controls { display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+            background: #1b1b1b; }
+        .rp-btn { background: transparent; border: none; color: #eee; font-size: 18px; cursor: pointer;
+            padding: 2px 6px; border-radius: 4px; line-height: 1; }
+        .rp-btn:hover { background: rgba(255,255,255,.12); }
+        .rp-toggle { opacity: .45; }
+        .rp-toggle.is-on { opacity: 1; }
+        .rp-time { color: #ccc; font-variant-numeric: tabular-nums; font-size: 13px; white-space: nowrap; }
+        .rp-seek { flex: 1 1 auto; cursor: pointer; accent-color: #0d6efd; }
+        .rp-volume { width: 90px; cursor: pointer; accent-color: #0d6efd; }
+</style>
+
+@section Scripts {
+    <script>
+    (function () {
+        const root = document.getElementById('player');
+        if (!root) return;
+
+        const desktop = document.getElementById('rp-desktop');
+        const camera  = document.getElementById('rp-camera');
+        const audio   = document.getElementById('rp-audio');
+        const mic     = document.getElementById('rp-mic');
+
+        // The "master" clock element drives sync; everyone else follows its currentTime. Prefer the
+        // desktop video (it's the longest/primary stream); fall back to camera, then any audio.
+        const master = desktop || camera || audio || mic;
+        const videos = [desktop, camera].filter(Boolean);
+        const audios = [audio, mic].filter(Boolean);
+        const followers = [desktop, camera, audio, mic].filter(el => el && el !== master);
+        const all = [master, ...followers];
+
+        const playBtn = document.getElementById('rp-play');
+        const seek    = document.getElementById('rp-seek');
+        const timeEl  = document.getElementById('rp-time');
+        const volEl   = document.getElementById('rp-volume');
+        const fsBtn   = document.getElementById('rp-fs');
+        const swapBtn = document.getElementById('rp-swap');
+        const audioToggle = document.getElementById('rp-audio-toggle');
+        const micToggle   = document.getElementById('rp-mic-toggle');
+
+        const SEEK_MAX = 1000;          // range granularity
+        const DRIFT = 0.25;             // seconds of allowed follower drift before a hard resync
+        let scrubbing = false;
+
+        // ---- duration: longest of all streams (they share the session-epoch t=0) ----
+        function duration() {
+            let d = 0;
+            for (const el of all) {
+                const v = el.duration;
+                if (Number.isFinite(v) && v > d) d = v;
+            }
+            return d;
+        }
+
+        function fmt(t) {
+            if (!Number.isFinite(t)) t = 0;
+            t = Math.max(0, Math.floor(t));
+            const m = Math.floor(t / 60), s = t % 60;
+            return m + ':' + (s < 10 ? '0' : '') + s;
+        }
+
+        // ---- sync followers to the master's currentTime ----
+        function syncFollowers(force) {
+            const t = master.currentTime;
+            for (const el of followers) {
+                // Past a follower's own end there's nothing to show/hear — leave it paused at its end.
+                const cap = Number.isFinite(el.duration) ? Math.min(t, el.duration) : t;
+                if (force || Math.abs(el.currentTime - cap) > DRIFT) {
+                    try { el.currentTime = cap; } catch (e) { /* not seekable yet */ }
+                }
+            }
+        }
+
+        function isPlaying() { return !master.paused && !master.ended; }
+
+        async function play() {
+            // Followers first (so audio doesn't lag the picture), then the master.
+            for (const el of followers) { try { await el.play(); } catch (e) {} }
+            try { await master.play(); } catch (e) {}
+            syncFollowers(true);
+            updatePlayBtn();
+        }
+        function pause() {
+            for (const el of all) { try { el.pause(); } catch (e) {} }
+            updatePlayBtn();
+        }
+        function toggle() { isPlaying() ? pause() : play(); }
+
+        function updatePlayBtn() {
+            playBtn.innerHTML = isPlaying()
+                ? '<i class="fa-solid fa-pause"></i>'
+                : '<i class="fa-solid fa-play"></i>';
+        }
+
+        // ---- timeline UI ----
+        function refreshUI() {
+            const d = duration(), t = master.currentTime || 0;
+            if (!scrubbing) seek.value = d > 0 ? Math.round((t / d) * SEEK_MAX) : 0;
+            timeEl.textContent = fmt(t) + ' / ' + fmt(d);
+        }
+
+        function seekTo(t) {
+            const d = duration();
+            t = Math.max(0, Math.min(t, d));
+            try { master.currentTime = Math.min(t, Number.isFinite(master.duration) ? master.duration : t); } catch (e) {}
+            syncFollowers(true);
+            refreshUI();
+        }
+
+        // ---- events ----
+        playBtn.addEventListener('click', toggle);
+        master.addEventListener('timeupdate', () => { refreshUI(); });
+        master.addEventListener('play', updatePlayBtn);
+        master.addEventListener('pause', updatePlayBtn);
+        master.addEventListener('ended', () => { pause(); });
+        all.forEach(el => el.addEventListener('loadedmetadata', refreshUI));
+
+        // Drift watchdog: while playing, keep followers locked to the master.
+        setInterval(() => { if (isPlaying()) syncFollowers(false); }, 500);
+
+        seek.addEventListener('input', () => {
+            scrubbing = true;
+            const d = duration();
+            timeEl.textContent = fmt((seek.value / SEEK_MAX) * d) + ' / ' + fmt(d);
+        });
+        seek.addEventListener('change', () => {
+            const d = duration();
+            seekTo((seek.value / SEEK_MAX) * d);
+            scrubbing = false;
+        });
+
+        // ---- audio: volume + independent toggles ----
+        function applyVolume() {
+            const v = (volEl.value || 0) / 100;
+            audios.forEach(el => { el.volume = v; });
+        }
+        volEl.addEventListener('input', applyVolume);
+        applyVolume();
+
+        function wireToggle(btn, el, onIcon, offIcon) {
+            if (!btn || !el) return;
+            btn.addEventListener('click', () => {
+                el.muted = !el.muted;
+                btn.classList.toggle('is-on', !el.muted);
+                btn.innerHTML = '<i class="fa-solid ' + (el.muted ? offIcon : onIcon) + '"></i>';
+            });
+        }
+        wireToggle(audioToggle, audio, 'fa-volume-high', 'fa-volume-xmark');
+        wireToggle(micToggle, mic, 'fa-microphone', 'fa-microphone-slash');
+        // Videos never carry audio in this player.
+        videos.forEach(v => { v.muted = true; });
+
+        // ---- swap desktop <-> camera between the large (main) and small (side) slots ----
+        if (swapBtn && desktop && camera) {
+            swapBtn.addEventListener('click', swap);
+            camera.addEventListener('click', () => { if (camera.classList.contains('rp-side')) swap(); });
+            function swap() {
+                const mainEl = desktop.classList.contains('rp-main') ? desktop : camera;
+                const sideEl = mainEl === desktop ? camera : desktop;
+                mainEl.classList.replace('rp-main', 'rp-side');
+                sideEl.classList.replace('rp-side', 'rp-main');
+            }
+        }
+
+        // ---- fullscreen on the whole player ----
+        fsBtn.addEventListener('click', () => {
+            if (document.fullscreenElement) document.exitFullscreen();
+            else root.requestFullscreen?.();
+        });
+
+        // ---- keyboard: space=play/pause, arrows=seek ----
+        root.tabIndex = 0;
+        root.addEventListener('keydown', (e) => {
+            if (e.key === ' ' || e.key === 'k') { e.preventDefault(); toggle(); }
+            else if (e.key === 'ArrowRight') { e.preventDefault(); seekTo((master.currentTime || 0) + 5); }
+            else if (e.key === 'ArrowLeft')  { e.preventDefault(); seekTo((master.currentTime || 0) - 5); }
+        });
+
+        updatePlayBtn();
+        refreshUI();
+    })();
+    </script>
+}

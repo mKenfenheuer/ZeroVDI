@@ -120,10 +120,10 @@ public class RdpWebSocketController : Controller
                 var recId = Guid.NewGuid().ToString();
                 var baseDir = Path.Combine(dir, recId);
                 Directory.CreateDirectory(baseDir);
-                // One combined MP4 per session with up to four tracks (desktop video, camera video,
-                // remote audio, mic audio). DesktopFilePath holds that single file; CameraFilePath is
-                // unused now (kept on the model to avoid a migration).
-                var sessionPath = Path.Combine(baseDir, "session.mp4");
+                // Up to four independent per-track files are produced after the session (desktop.mp4,
+                // camera.mp4, audio.m4a, mic.m4a) by RecordingMuxService, which sets the real paths then.
+                // Provisionally point DesktopFilePath at desktop.mp4 only so the mux job can derive baseDir
+                // from it; the job overwrites all four path fields with the actual results (or null).
                 recording = new Recording
                 {
                     Id = recId,
@@ -131,7 +131,7 @@ public class RdpWebSocketController : Controller
                     RDPResourceId = id,
                     StartedUtc = DateTime.UtcNow,
                     Status = RecordingStatus.Recording,
-                    DesktopFilePath = sessionPath,
+                    DesktopFilePath = Path.Combine(baseDir, "desktop.mp4"),
                     CameraFilePath = null,
                 };
                 _context.Recordings.Add(recording);

@@ -46,17 +46,24 @@ public class RecordingsController : Controller
         return View(rec);
     }
 
-    // GET /Recordings/File/{id} — streams the combined session MP4 with range support.
-    public async Task<IActionResult> GetFile(string id)
+    // GET /Recordings/File/{id}?track=desktop|camera|audio|mic — streams one per-track file with range
+    // support so the web player's <video>/<audio> elements can seek independently. Defaults to desktop.
+    public async Task<IActionResult> GetFile(string id, string track = "desktop")
     {
         var rec = await LoadAuthorizedAsync(id);
         if (rec == null) return NotFound();
 
-        var path = rec.DesktopFilePath;
+        var (path, contentType) = track switch
+        {
+            "camera" => (rec.CameraFilePath, "video/mp4"),
+            "audio" => (rec.AudioFilePath, "audio/mp4"),
+            "mic" => (rec.MicFilePath, "audio/mp4"),
+            _ => (rec.DesktopFilePath, "video/mp4"),
+        };
         if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) return NotFound();
 
         var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        return File(stream, "video/mp4", enableRangeProcessing: true);
+        return File(stream, contentType, enableRangeProcessing: true);
     }
 
     // POST /Recordings/Delete/{id} — removes the DB row and the recording's files/base directory.

@@ -46,7 +46,8 @@
                     </td>
                     <td class="text-end">
                         @{ var playable = r.Status is RecordingStatus.Completed or RecordingStatus.UnsupportedCodec
-                               && r.DesktopFilePath != null;
+                               && (r.DesktopFilePath != null || r.CameraFilePath != null
+                                   || r.AudioFilePath != null || r.MicFilePath != null);
                            // Don't offer delete while capture/mux is still in progress (files are in use).
                            var deletable = r.Status is not (RecordingStatus.Recording or RecordingStatus.Processing); }
                         @if (playable)

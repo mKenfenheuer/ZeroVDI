@@ -21,10 +21,11 @@ public enum RecordingStatus
 }
 
 /// <summary>
-/// One recorded console session. Produces a single combined MP4 (session.mp4) with up to four separate
-/// tracks: desktop video, camera video, remote audio, and microphone audio. The file lives under the
-/// configured recordings directory, outside wwwroot, and is served only through the authorized
-/// RecordingsController.GetFile action.
+/// One recorded console session. Produces up to four separate, individually-seekable files — desktop
+/// video (desktop.mp4), camera video (camera.mp4), remote audio (audio.m4a), and microphone audio
+/// (mic.m4a) — that share one session-epoch timeline so the web player can sync them. The files live
+/// under the configured recordings directory, outside wwwroot, and are served only through the
+/// authorized RecordingsController.GetFile action (one per <c>track</c>).
 /// </summary>
 public class Recording
 {
@@ -45,11 +46,17 @@ public class Recording
 
     public RecordingStatus Status { get; set; } = RecordingStatus.Recording;
 
-    /// <summary>Path to the combined session MP4 (all tracks), or null if not produced.</summary>
+    /// <summary>Path to the desktop video MP4 (h264), or null if not produced.</summary>
     public string? DesktopFilePath { get; set; }
 
-    /// <summary>Unused since the single-file change; kept to avoid a schema migration. Always null.</summary>
+    /// <summary>Path to the camera video MP4 (h264), or null if no camera was recorded.</summary>
     public string? CameraFilePath { get; set; }
+
+    /// <summary>Path to the remote (desktop) audio M4A (aac), or null if no remote audio was recorded.</summary>
+    public string? AudioFilePath { get; set; }
+
+    /// <summary>Path to the microphone audio M4A (aac), or null if no mic audio was recorded.</summary>
+    public string? MicFilePath { get; set; }
 
     /// <summary>The desktop video codec observed (e.g. "AVC420", "AVC444v2", or "none").</summary>
     public string? VideoCodec { get; set; }
