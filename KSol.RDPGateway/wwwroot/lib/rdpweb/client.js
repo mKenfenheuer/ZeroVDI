@@ -220,8 +220,13 @@ Client.prototype._startProtocol = function () {
 // Enable/disable remote sound. Must be set before connect() so the rdpsnd channel is advertised.
 Client.prototype.setAudioEnabled = function (on) { this.audioEnabled = !!on; };
 
-// Mute/unmute playback at runtime (the channel stays open; we just drop or pass the waves).
-Client.prototype.setMuted = function (muted) { this.muted = !!muted; };
+// Mute/unmute playback at runtime. The rdpsnd channel and the AudioContext stay fully active; mute
+// only zeroes the persistent output gain, so the host keeps streaming, the context never goes idle,
+// and unmute takes effect on the next scheduled wave without needing a fresh user gesture.
+Client.prototype.setMuted = function (muted) {
+    this.muted = !!muted;
+    if (this._audioGain) this._audioGain.gain.value = this.muted ? 0 : 1;
+};
 
 // Enable camera redirection. Must be set before connect() so the protocol accepts the host's RDPECAM
 // dynamic channels (enumerator + per-device). The webcam stream is acquired lazily when the host
@@ -249,6 +254,12 @@ Client.prototype.primeAudio = function () {
         if (!AC) return null;
         this.audioCtx = new AC();
         this._audioTime = 0;
+        // Persistent output gain — playback always routes through this. Mute sets gain to 0 instead of
+        // dropping waves, so the context keeps an active node graph (browsers can suspend an idle
+        // context, which then can't resume outside a user gesture) and unmute is instant.
+        this._audioGain = this.audioCtx.createGain();
+        this._audioGain.gain.value = this.muted ? 0 : 1;
+        this._audioGain.connect(this.audioCtx.destination);
     }
     if (this.audioCtx.state === "suspended") this.audioCtx.resume();
     return this.audioCtx;
@@ -257,8 +268,11 @@ Client.prototype.primeAudio = function () {
 // Play one decoded PCM wave. fmt = {rate, bits, channels}; pcm = little-endian interleaved samples.
 // Schedules buffers back-to-back on a shared timeline so consecutive waves play gaplessly.
 Client.prototype._playPcm = function (fmt, pcm) {
-    if (this.muted) return;
     try {
+        // Prime/keep the AudioContext alive even while muted: priming must happen so the context the
+        // connect gesture unlocked stays usable, otherwise the first unmute happens outside a user
+        // gesture and the browser's autoplay policy leaves the context suspended (silent until reconnect).
+        // Mute is applied via the persistent gain node (set in setMuted), not by dropping waves here.
         const ctx = this.primeAudio();
         if (!ctx) return;
 
@@ -283,7 +297,7 @@ Client.prototype._playPcm = function (fmt, pcm) {
 
         const src = ctx.createBufferSource();
         src.buffer = buf;
-        src.connect(ctx.destination);
+        src.connect(this._audioGain || ctx.destination);
         const now = ctx.currentTime;
         // Keep a running playhead so waves queue seamlessly; if we've fallen behind (underrun), jump
         // back to now to avoid an ever-growing latency.
