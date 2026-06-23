@@ -1,0 +1,25 @@
+@model KSol.RDPGateway.Models.RecordingRule
+@{
+    ViewData["Title"] = "Add recording rule";
+}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0">Add recording rule</h1>
+    <a asp-action="Index" class="btn btn-outline-secondary btn-sm">Back to list</a>
+</div>
+
+<div class="card shadow-sm">
+    <div class="card-body">
+        <form asp-action="Create">
+            <partial name="_Fields" model="Model" />
+            <div class="d-flex gap-2 mt-3">
+                <button type="submit" class="btn btn-primary">Create</button>
+                <a asp-action="Index" class="btn btn-link">Cancel</a>
+            </div>
+        </form>
+    </div>
+</div>
+
+@section Scripts {
+    @{await Html.RenderPartialAsync("_ValidationScriptsPartial");}
+}

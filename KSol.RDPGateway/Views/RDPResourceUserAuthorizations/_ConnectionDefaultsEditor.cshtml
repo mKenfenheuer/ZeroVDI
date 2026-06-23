@@ -1,0 +1,49 @@
+@model KSol.RDPGateway.Models.ConnectionDefaults
+
+@*
+    Editor for the per-(user, resource) console connect defaults. Bound under the
+    "ConnectionDefaults" prefix so it round-trips into RDPResourceUserAuthorization.ConnectionDefaults
+    on the Edit POST. Mirrors the session options in Views/Home/Console.cshtml.
+*@
+@{
+    var prefix = "ConnectionDefaults";
+    string Name(string p) => $"{prefix}.{p}";
+}
+
+<div class="row g-3">
+    <div class="col-md-6">
+        <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="@Name("Audio")" value="true" id="cd-audio" @(Model.Audio ? "checked" : "") />
+            <input type="hidden" name="@Name("Audio")" value="false" />
+            <label class="form-check-label" for="cd-audio">Remote sound</label>
+        </div>
+        <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="@Name("Clipboard")" value="true" id="cd-clip" @(Model.Clipboard ? "checked" : "") />
+            <input type="hidden" name="@Name("Clipboard")" value="false" />
+            <label class="form-check-label" for="cd-clip">Clipboard sync</label>
+        </div>
+        <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="@Name("Microphone")" value="true" id="cd-mic" @(Model.Microphone ? "checked" : "") />
+            <input type="hidden" name="@Name("Microphone")" value="false" />
+            <label class="form-check-label" for="cd-mic">Microphone redirection</label>
+        </div>
+        <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="@Name("Camera")" value="true" id="cd-cam" @(Model.Camera ? "checked" : "") />
+            <input type="hidden" name="@Name("Camera")" value="false" />
+            <label class="form-check-label" for="cd-cam">Camera redirection</label>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <label class="form-label" for="cd-gfx">Display mode</label>
+        <select class="form-select" name="@Name("GfxMode")" id="cd-gfx">
+            <option value="off" selected="@(Model.GfxMode == "off")">Legacy bitmaps (most compatible)</option>
+            <option value="clearcodec" selected="@(Model.GfxMode == "clearcodec")">GFX — ClearCodec</option>
+            <option value="avc420" selected="@(Model.GfxMode == "avc420")">GFX — H.264 (AVC420)</option>
+            <option value="avc444" selected="@(Model.GfxMode == "avc444")">GFX — H.264 (AVC444)</option>
+        </select>
+
+        <label class="form-label mt-3" for="cd-perf">Performance flags (RDP bitmask)</label>
+        <input class="form-control" type="number" name="@Name("PerformanceFlags")" id="cd-perf" value="@Model.PerformanceFlags" min="0" />
+        <div class="form-text">0 = protocol default (best visuals). Advanced: an ExtendedInfoPacket performanceFlags bitmask.</div>
+    </div>
+</div>

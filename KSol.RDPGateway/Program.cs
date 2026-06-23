@@ -52,6 +52,11 @@ public class Program
         builder.Services.AddDataProtection()
             .PersistKeysToFileSystem(new DirectoryInfo(dpKeysDir));
         builder.Services.AddSingleton<RDP.CredentialProtector>();
+        // Session-recording rules evaluation (per request: uses the scoped DbContext).
+        builder.Services.AddScoped<RDP.RecordingPolicy>();
+        // Background job that muxes captured raw streams into MP4 after sessions end (and picks up any
+        // recordings left Processing by a previous run — crash-resilient).
+        builder.Services.AddHostedService<RDP.RecordingMuxService>();
 
         builder.Services.AddControllersWithViews()
             .AddRazorRuntimeCompilation();

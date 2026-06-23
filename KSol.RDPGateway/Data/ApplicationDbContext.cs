@@ -14,6 +14,8 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
     public DbSet<RDPResource> RDPResources { get; set; }
     public DbSet<RDPResourceUserAuthorization> RDPResourceUserAuthorizations { get; set; }
     public DbSet<ProxmoxBackend> ProxmoxBackends { get; set; }
+    public DbSet<Recording> Recordings { get; set; }
+    public DbSet<RecordingRule> RecordingRules { get; set; }
 
     protected override void OnModelCreating(ModelBuilder builder)
     {

@@ -34,20 +34,23 @@ public sealed class RdpRelaySession
     private readonly int _port;
     private readonly KerberosAuth? _kerberos;
     private readonly VmCredentials? _presuppliedCreds;
+    private readonly IRdpMediaSink? _mediaSink;
     private readonly ILogger _logger;
 
     // Optional live structural decode + recording of the decrypted RDP stream (shared RdpWire engine).
-    // Enabled when RDPGW_DUMP_DIR is set. One recorder per session, fed by both pumps.
+    // Enabled when RDPGW_DUMP_DIR is set (diagnostics) or a media sink is supplied (session recording).
+    // One recorder per session, fed by both pumps.
     private RdpRecorder? _recorder;
 
     public RdpRelaySession(WebSocket ws, string host, int port, KerberosAuth? kerberos, ILogger logger,
-        VmCredentials? presuppliedCreds = null)
+        VmCredentials? presuppliedCreds = null, IRdpMediaSink? mediaSink = null)
     {
         _ws = ws;
         _host = host;
         _port = port;
         _kerberos = kerberos;
         _presuppliedCreds = presuppliedCreds;
+        _mediaSink = mediaSink;
         _logger = logger;
     }
 
@@ -175,7 +178,7 @@ public sealed class RdpRelaySession
 
         // 5) Relay the decrypted RDP stream both ways until either side closes.
         // Optional: live decode + record both directions through the shared RdpWire engine.
-        _recorder = RdpRecorder.TryCreate(_logger);
+        _recorder = RdpRecorder.TryCreate(_logger, _mediaSink);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var toWs = PumpSslToWsAsync(ssl, linked.Token);
         var toRdp = PumpWsToSslAsync(ssl, linked.Token);
@@ -293,36 +296,58 @@ public sealed class RdpRelaySession
     // Writes <dir>/pdus.log + pdus.jsonl (decoded PDU tree) and <dir>/meta.txt (per-chunk dir+ts+len, so
     // an offline `rdpmitm --replay <dir>` reconstructs true wire order). Both pumps feed one RdpSession
     // (server-learned channel/DVC/GFX state labels client traffic too); a lock serializes the two pumps.
+    // A no-op event sink for recording-only sessions (no RDPGW_DUMP_DIR diagnostic log). The decode tree
+    // is discarded; only the IRdpMediaSink callbacks (extracted H.264/PCM/NV12) matter.
+    private sealed class NullEventSink : IRdpEventSink
+    {
+        public static readonly NullEventSink Instance = new();
+        public void Emit(RdpDir dir, long elapsedMs, Node node, RoundTrip rt) { }
+    }
+
     private sealed class RdpRecorder : IDisposable
     {
-        private readonly RdpLogSink _sink;
+        private readonly RdpLogSink? _sink;          // diagnostic PDU log (only when RDPGW_DUMP_DIR set)
         private readonly RdpSession _session;
         private readonly StreamWriter? _meta;
         private readonly System.Diagnostics.Stopwatch _sw = System.Diagnostics.Stopwatch.StartNew();
         private readonly ILogger _logger;
-        // The structural decode (RdpSession.Feed) must NEVER run on the relay's hot path — it's diagnostic
-        // only, and blocking the s2c pump on a per-chunk decode back-pressures the host (it pauses mid-
-        // frame, which we were debugging). So Feed() just enqueues a copy; a single background task drains
-        // the queue and decodes serially (RdpSession is stateful/not thread-safe, so one consumer only).
+        // The structural decode (RdpSession.Feed) must NEVER run on the relay's hot path — blocking the
+        // s2c pump on a per-chunk decode back-pressures the host (it pauses mid-frame). So Feed() just
+        // enqueues a copy; a single background task drains the queue and decodes serially (RdpSession is
+        // stateful/not thread-safe, so one consumer only). The media extraction + ffmpeg writes also run
+        // on this drain task, off the hot path.
         private readonly System.Threading.Channels.Channel<(RdpDir dir, long ms, byte[] data)> _queue;
         private readonly Task _drain;
 
-        private RdpRecorder(string dir, ILogger logger)
+        private RdpRecorder(string? dumpDir, IRdpMediaSink? media, ILogger logger)
         {
             _logger = logger;
-            _sink = new RdpLogSink(dir, echoConsole: false);
-            _session = new RdpSession(_sink);
-            try { _meta = new StreamWriter(Path.Combine(dir, "meta.txt")) { AutoFlush = true }; } catch { _meta = null; }
+            IRdpEventSink eventSink;
+            if (!string.IsNullOrEmpty(dumpDir))
+            {
+                _sink = new RdpLogSink(dumpDir, echoConsole: false);
+                eventSink = _sink;
+                try { _meta = new StreamWriter(Path.Combine(dumpDir, "meta.txt")) { AutoFlush = true }; } catch { _meta = null; }
+            }
+            else eventSink = NullEventSink.Instance;
+            _session = new RdpSession(eventSink, media);
             _queue = System.Threading.Channels.Channel.CreateUnbounded<(RdpDir, long, byte[])>(
                 new System.Threading.Channels.UnboundedChannelOptions { SingleReader = true });
             _drain = Task.Run(DrainAsync);
         }
 
-        public static RdpRecorder? TryCreate(ILogger logger)
+        // Create a recorder if either diagnostics (RDPGW_DUMP_DIR) or real recording (a media sink) is
+        // requested. Returns null when neither is active (no decode overhead for ordinary sessions).
+        public static RdpRecorder? TryCreate(ILogger logger, IRdpMediaSink? media)
         {
             var dir = Environment.GetEnvironmentVariable("RDPGW_DUMP_DIR");
-            if (string.IsNullOrEmpty(dir)) return null;
-            try { Directory.CreateDirectory(dir); return new RdpRecorder(dir, logger); }
+            bool wantDump = !string.IsNullOrEmpty(dir);
+            if (!wantDump && media == null) return null;
+            try
+            {
+                if (wantDump) Directory.CreateDirectory(dir!);
+                return new RdpRecorder(wantDump ? dir : null, media, logger);
+            }
             catch (Exception ex) { logger.LogDebug(ex, "RDP recorder: init failed"); return null; }
         }
 
@@ -356,7 +381,7 @@ public sealed class RdpRelaySession
             _queue.Writer.TryComplete();
             try { _drain.Wait(TimeSpan.FromSeconds(5)); } catch { }
             try { _meta?.Dispose(); } catch { }
-            try { _sink.Dispose(); } catch { }
+            try { _sink?.Dispose(); } catch { }
         }
     }
 

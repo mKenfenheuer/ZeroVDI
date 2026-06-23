@@ -15,6 +15,7 @@ namespace KSol.RDPGateway.RDP;
 public sealed class RdpSession
 {
     private readonly IRdpEventSink _sink;
+    private readonly IRdpMediaSink? _media;
     private readonly System.Diagnostics.Stopwatch _sw = System.Diagnostics.Stopwatch.StartNew();
 
     // Per-direction inbound framing reassembly (the proxy hands us arbitrary partial reads).
@@ -49,7 +50,30 @@ public sealed class RdpSession
     private sealed class DvcReasm { public List<byte> Parts = new(); public long Total; }
     private sealed class SvcReasm { public List<byte> Parts = new(); public long Total; }
 
-    public RdpSession(IRdpEventSink sink) { _sink = sink; }
+    public RdpSession(IRdpEventSink sink) : this(sink, null) { }
+    public RdpSession(IRdpEventSink sink, IRdpMediaSink? media) { _sink = sink; _media = media; }
+
+    // ---- media-extraction state (used only when a media sink is attached) ----
+    // rdpsnd: negotiated PCM formats (indexed by wFormatNo) and the pending legacy WaveInfo stitch.
+    private readonly List<PcmFormat> _sndFormats = new();
+    private (int formatNo, byte[] head)? _pendingWave;
+    // audin (mic): negotiated PCM formats, separate index space from rdpsnd, and the active OPEN index.
+    private readonly List<PcmFormat> _audinFormats = new();
+    private int _audinOpenFormat;
+    // GFX: current frame from the most recent START_FRAME (per session — frames are not interleaved).
+    private long _gfxFrameId;
+    private long _gfxFrameTs;
+    // Camera (RDPECAM): the negotiated current media type from StartStreams, used to size NV12 frames.
+    private (int width, int height, int fps, int fmt)? _camMediaType;
+
+    internal IRdpMediaSink? Media => _media;
+    internal List<PcmFormat> SndFormats => _sndFormats;
+    internal List<PcmFormat> AudinFormats => _audinFormats;
+    internal int AudinOpenFormat { get => _audinOpenFormat; set => _audinOpenFormat = value; }
+    internal (int formatNo, byte[] head)? PendingWave { get => _pendingWave; set => _pendingWave = value; }
+    internal long GfxFrameId { get => _gfxFrameId; set => _gfxFrameId = value; }
+    internal long GfxFrameTs { get => _gfxFrameTs; set => _gfxFrameTs = value; }
+    internal (int width, int height, int fps, int fmt)? CamMediaType { get => _camMediaType; set => _camMediaType = value; }
 
     public void NotePatch(RdpDir dir, string what, uint val)
     {

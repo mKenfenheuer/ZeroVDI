@@ -24,8 +24,17 @@
                         <li class="nav-item">
                             <a class="nav-link text-dark" asp-area="" asp-controller="Home" asp-action="Index">Home</a>
                         </li>
+                        @if (User.Identity?.IsAuthenticated == true)
+                        {
+                            <li class="nav-item">
+                                <a class="nav-link text-dark" asp-area="" asp-controller="Recordings" asp-action="Index">Recordings</a>
+                            </li>
+                        }
                         @if (User.IsInRole("Admin"))
                         {
+                            <li class="nav-item">
+                                <a class="nav-link text-dark" asp-area="" asp-controller="RecordingRules" asp-action="Index">Recording Rules</a>
+                            </li>
                             <li class="nav-item">
                                 <a class="nav-link text-dark" asp-area="" asp-controller="RDPResources" asp-action="Index">Resources</a>
                             </li>

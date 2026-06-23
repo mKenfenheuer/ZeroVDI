@@ -23,6 +23,8 @@ public class RdpWebSocketController : Controller
     private readonly IRDPGWResourceResolver _resolver;
     private readonly ProxmoxBackendProvider _backends;
     private readonly CredentialProtector _credentials;
+    private readonly RecordingPolicy _recordingPolicy;
+    private readonly IConfiguration _config;
     private readonly ILogger<RdpWebSocketController> _logger;
 
     public RdpWebSocketController(
@@ -31,6 +33,8 @@ public class RdpWebSocketController : Controller
         IRDPGWResourceResolver resolver,
         ProxmoxBackendProvider backends,
         CredentialProtector credentials,
+        RecordingPolicy recordingPolicy,
+        IConfiguration config,
         ILogger<RdpWebSocketController> logger)
     {
         _context = context;
@@ -38,6 +42,8 @@ public class RdpWebSocketController : Controller
         _resolver = resolver;
         _backends = backends;
         _credentials = credentials;
+        _recordingPolicy = recordingPolicy;
+        _config = config;
         _logger = logger;
     }
 
@@ -100,8 +106,44 @@ public class RdpWebSocketController : Controller
                     _credentials.Unprotect(authorization.ProtectedDomain));
         }
 
+        // Recording: evaluate the rules engine for this (user, resource, roles). When it says record,
+        // create a Recording row and a SessionRecorder (the media sink the relay feeds through RdpWire).
+        Recording? recording = null;
+        SessionRecorder? recorder = null;
+        try
+        {
+            var roles = await _userManager.GetRolesAsync(authorization.User ?? (await _userManager.FindByIdAsync(userId))!);
+            if (await _recordingPolicy.ShouldRecordAsync(userId, id, roles))
+            {
+                var dir = _config["Recording:Directory"]
+                    ?? Path.Combine(Directory.GetCurrentDirectory(), "Data", "recordings");
+                var recId = Guid.NewGuid().ToString();
+                var baseDir = Path.Combine(dir, recId);
+                Directory.CreateDirectory(baseDir);
+                var desktopPath = Path.Combine(baseDir, "desktop.mp4");
+                var cameraPath = Path.Combine(baseDir, "camera.mp4");
+                recording = new Recording
+                {
+                    Id = recId,
+                    UserId = userId,
+                    RDPResourceId = id,
+                    StartedUtc = DateTime.UtcNow,
+                    Status = RecordingStatus.Recording,
+                    DesktopFilePath = desktopPath,
+                    CameraFilePath = cameraPath,
+                };
+                _context.Recordings.Add(recording);
+                await _context.SaveChangesAsync();
+                // Capture RAW elementary streams under baseDir during the session; a background job
+                // (RecordingMuxService) muxes them into the MP4 paths above after the session ends.
+                recorder = new SessionRecorder(baseDir, _logger);
+                _logger.LogInformation("RDP console: recording session {RecId} for {Resource}", recId, id);
+            }
+        }
+        catch (Exception ex) { _logger.LogWarning(ex, "RDP console: recording setup failed; continuing unrecorded"); }
+
         var socket = await HttpContext.WebSockets.AcceptWebSocketAsync();
-        var session = new RdpRelaySession(socket, host, port, kerberos, _logger, presupplied);
+        var session = new RdpRelaySession(socket, host, port, kerberos, _logger, presupplied, recorder);
 
         await _resolver.OnConnectedAsync(userId, id);
         try
@@ -115,6 +157,25 @@ public class RdpWebSocketController : Controller
         finally
         {
             await _resolver.OnDisconnectedAsync(userId, id);
+
+            // Finalize: close the raw streams (Dispose writes manifest.json), then hand off to the
+            // background mux job by marking the recording Processing. The job reads manifest.json from the
+            // base dir, builds the MP4(s), deletes the raws, and sets Completed/UnsupportedCodec/Failed.
+            if (recording != null)
+            {
+                try
+                {
+                    recorder?.Dispose();
+                    recording.EndedUtc = DateTime.UtcNow;
+                    recording.VideoCodec = recorder?.VideoCodec ?? "none";
+                    if (recorder == null) recording.Status = RecordingStatus.Failed;
+                    else if (!recorder.HasDesktop && !recorder.HasCamera) recording.Status = RecordingStatus.Failed; // nothing captured
+                    else recording.Status = RecordingStatus.Processing;
+                    _context.Recordings.Update(recording);
+                    await _context.SaveChangesAsync();
+                }
+                catch (Exception ex) { _logger.LogWarning(ex, "RDP console: finalizing recording {RecId} failed", recording.Id); }
+            }
         }
     }
 

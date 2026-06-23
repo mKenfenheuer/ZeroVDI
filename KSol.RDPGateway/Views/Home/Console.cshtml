@@ -151,7 +151,7 @@
                            (most compatible). The GFX modes use MS-RDPEGFX surfaces; H.264 needs the host
                            to grant AVC over GFX (server GPU + the "Prioritize H.264/AVC 444" policy),
                            otherwise the host streams ClearCodec, which we also decode. *@
-                        @{ var gfxMode = defaults?.GfxMode ?? "off"; }
+                        @{ var gfxMode = defaults?.GfxMode ?? "avc420"; }
                         <select class="form-select form-select-sm" id="opt-gfx-mode" style="font-size:.82rem; max-width: 22rem;">
                             <option value="off" selected="@(gfxMode == "off")">Legacy bitmaps (most compatible)</option>
                             <option value="clearcodec" selected="@(gfxMode == "clearcodec")">GFX — ClearCodec</option>

@@ -1,0 +1,55 @@
+@model KSol.RDPGateway.Models.Recording
+@using KSol.RDPGateway.Models
+@{
+    ViewData["Title"] = "Replay recording";
+}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+        <h1 class="h3 mb-0">Replay</h1>
+        <p class="text-muted mb-0">
+            @(Model.RDPResource?.Name ?? Model.RDPResourceId) — @(Model.User?.UserName ?? Model.UserId)
+            — @Model.StartedUtc.ToString("yyyy-MM-dd HH:mm:ss") UTC
+        </p>
+    </div>
+    <a asp-action="Index" class="btn btn-outline-secondary btn-sm">Back to list</a>
+</div>
+
+@if (Model.Status == RecordingStatus.UnsupportedCodec)
+{
+    <div class="alert alert-warning">
+        The desktop graphics codec for this session wasn't H.264, so the desktop video could not be
+        recorded without re-rendering. Audio (and camera/mic, if any) were still recorded.
+    </div>
+}
+
+<div class="row g-4">
+    <div class="col-lg-8">
+        <h2 class="h6">Desktop @(Model.VideoCodec != null ? $"({Model.VideoCodec})" : "")</h2>
+        @if (Model.DesktopFilePath != null)
+        {
+            <video controls preload="metadata" class="w-100 border rounded bg-dark"
+                   src="@Url.Action("File", new { id = Model.Id, which = "desktop" })">
+                Your browser cannot play this recording.
+            </video>
+        }
+        else
+        {
+            <p class="text-muted">No desktop recording available.</p>
+        }
+    </div>
+    <div class="col-lg-4">
+        <h2 class="h6">Camera</h2>
+        @if (Model.CameraFilePath != null)
+        {
+            <video controls preload="metadata" class="w-100 border rounded bg-dark"
+                   src="@Url.Action("File", new { id = Model.Id, which = "camera" })">
+                Your browser cannot play this recording.
+            </video>
+        }
+        else
+        {
+            <p class="text-muted">No camera recording (camera/mic not used or not captured).</p>
+        }
+    </div>
+</div>

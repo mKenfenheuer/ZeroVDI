@@ -3,6 +3,7 @@ using System;
 using KSol.RDPGateway.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace KSol.RDPGateway.Data.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260623102426_AddStoredCredentialsAndDefaults")]
+    partial class AddStoredCredentialsAndDefaults
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "9.0.0");
@@ -208,79 +211,6 @@ namespace KSol.RDPGateway.Data.Migrations
                     b.HasIndex("UserId");
 
                     b.ToTable("RDPResourceUserAuthorizations");
-                });
-
-            modelBuilder.Entity("KSol.RDPGateway.Models.Recording", b =>
-                {
-                    b.Property<string>("Id")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("CameraFilePath")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("DesktopFilePath")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTime?>("EndedUtc")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("RDPResourceId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTime>("StartedUtc")
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("Status")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("UserId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("VideoCodec")
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("RDPResourceId");
-
-                    b.HasIndex("UserId");
-
-                    b.ToTable("Recordings");
-                });
-
-            modelBuilder.Entity("KSol.RDPGateway.Models.RecordingRule", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("Action")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("Description")
-                        .HasColumnType("TEXT");
-
-                    b.Property<bool>("Enabled")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("Order")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("RDPResourceId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("RoleName")
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("Scope")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("UserId")
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.ToTable("RecordingRules");
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRole", b =>
@@ -777,21 +707,6 @@ namespace KSol.RDPGateway.Data.Migrations
                         });
 
                     b.Navigation("ConnectionDefaults");
-
-                    b.Navigation("RDPResource");
-
-                    b.Navigation("User");
-                });
-
-            modelBuilder.Entity("KSol.RDPGateway.Models.Recording", b =>
-                {
-                    b.HasOne("KSol.RDPGateway.Models.RDPResource", "RDPResource")
-                        .WithMany()
-                        .HasForeignKey("RDPResourceId");
-
-                    b.HasOne("KSol.RDPGateway.Models.ApplicationUser", "User")
-                        .WithMany()
-                        .HasForeignKey("UserId");
 
                     b.Navigation("RDPResource");
 

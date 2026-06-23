@@ -9,7 +9,16 @@
     <a asp-action="Index" class="btn btn-outline-secondary btn-sm">Back to list</a>
 </div>
 
-<div class="card shadow-sm">
+@if (TempData["CredStatus"] is string credStatus)
+{
+    <div class="alert alert-success">@credStatus</div>
+}
+@if (TempData["CredError"] is string credError)
+{
+    <div class="alert alert-danger">@credError</div>
+}
+
+<div class="card shadow-sm mb-3">
     <div class="card-body">
         <form asp-action="Edit">
             <div asp-validation-summary="ModelOnly" class="text-danger"></div>
@@ -26,10 +35,52 @@
                     <span asp-validation-for="RDPResourceId" class="text-danger"></span>
                 </div>
             </div>
-            <div class="d-flex gap-2">
+
+            <h2 class="h5 mt-4">Connection defaults</h2>
+            <p class="text-muted small">When set together with stored credentials below, the in-browser console auto-connects without showing the login form.</p>
+            @{ await Html.RenderPartialAsync("_ConnectionDefaultsEditor", Model.ConnectionDefaults ?? new KSol.RDPGateway.Models.ConnectionDefaults()); }
+
+            <div class="d-flex gap-2 mt-3">
                 <button type="submit" class="btn btn-primary">Save</button>
                 <a asp-action="Index" class="btn btn-link">Cancel</a>
             </div>
+        </form>
+    </div>
+</div>
+
+<div class="card shadow-sm">
+    <div class="card-body">
+        <h2 class="h5">Stored VM credentials (single sign-on)</h2>
+        @if (Model.HasStoredCredentials)
+        {
+            <p class="mb-2"><span class="badge bg-success">Credentials stored</span> — the console will auto-connect for this user.</p>
+            <form asp-action="ClearCredentials" asp-route-id="@Model.Id" method="post" class="mb-3">
+                <button type="submit" class="btn btn-outline-danger btn-sm">Clear stored credentials</button>
+            </form>
+            <hr />
+            <p class="text-muted small">Replace the stored credentials:</p>
+        }
+        else
+        {
+            <p class="mb-2"><span class="badge bg-secondary">No credentials stored</span> — the user enters them at connect time.</p>
+        }
+        <form asp-action="SetCredentials" asp-route-id="@Model.Id" method="post">
+            <div class="row g-3">
+                <div class="col-md-4">
+                    <label class="form-label" for="cred-user">Username</label>
+                    <input class="form-control" id="cred-user" name="username" autocomplete="off" />
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label" for="cred-pass">Password</label>
+                    <input class="form-control" id="cred-pass" name="password" type="password" autocomplete="new-password" />
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label" for="cred-domain">Domain (optional)</label>
+                    <input class="form-control" id="cred-domain" name="domain" autocomplete="off" />
+                </div>
+            </div>
+            <div class="form-text mb-2">Stored encrypted at rest; the password is never shown again after saving.</div>
+            <button type="submit" class="btn btn-primary btn-sm">Store credentials</button>
         </form>
     </div>
 </div>

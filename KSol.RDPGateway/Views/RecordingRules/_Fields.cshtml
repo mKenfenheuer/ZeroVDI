@@ -1,0 +1,52 @@
+@model KSol.RDPGateway.Models.RecordingRule
+
+<div asp-validation-summary="ModelOnly" class="text-danger"></div>
+
+<div class="row g-3">
+    <div class="col-md-3">
+        <label asp-for="Order" class="form-label">Order</label>
+        <input asp-for="Order" class="form-control" />
+        <div class="form-text">Lower = evaluated first.</div>
+    </div>
+    <div class="col-md-3">
+        <label asp-for="Scope" class="form-label">Scope</label>
+        <select asp-for="Scope" class="form-select" asp-items="Html.GetEnumSelectList<KSol.RDPGateway.Models.RecordingRuleScope>()"></select>
+    </div>
+    <div class="col-md-3">
+        <label asp-for="Action" class="form-label">Action</label>
+        <select asp-for="Action" class="form-select" asp-items="Html.GetEnumSelectList<KSol.RDPGateway.Models.RecordingRuleAction>()"></select>
+    </div>
+    <div class="col-md-3 d-flex align-items-end">
+        <div class="form-check">
+            <input asp-for="Enabled" class="form-check-input" />
+            <label asp-for="Enabled" class="form-check-label">Enabled</label>
+        </div>
+    </div>
+</div>
+
+<p class="text-muted small mt-3 mb-1">Fill the field matching the selected scope (the others are ignored):</p>
+<div class="row g-3">
+    <div class="col-md-4">
+        <label asp-for="UserId" class="form-label">User (scope = User)</label>
+        <select asp-for="UserId" class="form-select" asp-items="ViewBag.UserId">
+            <option value="">— none —</option>
+        </select>
+    </div>
+    <div class="col-md-4">
+        <label asp-for="RDPResourceId" class="form-label">Resource (scope = Resource)</label>
+        <select asp-for="RDPResourceId" class="form-select" asp-items="ViewBag.RDPResourceId">
+            <option value="">— none —</option>
+        </select>
+    </div>
+    <div class="col-md-4">
+        <label asp-for="RoleName" class="form-label">Role (scope = Role)</label>
+        <select asp-for="RoleName" class="form-select" asp-items="ViewBag.RoleName">
+            <option value="">— none —</option>
+        </select>
+    </div>
+</div>
+
+<div class="mt-3">
+    <label asp-for="Description" class="form-label">Description</label>
+    <input asp-for="Description" class="form-control" />
+</div>

@@ -1,0 +1,23 @@
+@model KSol.RDPGateway.Models.RecordingRule
+@{
+    ViewData["Title"] = "Delete recording rule";
+}
+
+<h1 class="h3 mb-3">Delete recording rule</h1>
+
+<div class="card shadow-sm">
+    <div class="card-body">
+        <p>Delete this rule? Sessions will then fall through to the next matching rule or the global default.</p>
+        <dl class="row">
+            <dt class="col-sm-3">Order</dt><dd class="col-sm-9">@Model.Order</dd>
+            <dt class="col-sm-3">Scope</dt><dd class="col-sm-9">@Model.Scope</dd>
+            <dt class="col-sm-3">Action</dt><dd class="col-sm-9">@Model.Action</dd>
+            <dt class="col-sm-3">Description</dt><dd class="col-sm-9">@Model.Description</dd>
+        </dl>
+        <form asp-action="Delete">
+            <input type="hidden" asp-for="Id" />
+            <button type="submit" class="btn btn-danger">Delete</button>
+            <a asp-action="Index" class="btn btn-link">Cancel</a>
+        </form>
+    </div>
+</div>

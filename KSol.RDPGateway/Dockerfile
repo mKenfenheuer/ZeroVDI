@@ -18,9 +18,16 @@ RUN dotnet publish "KSol.RDPGateway.csproj" -c Release -o /app/publish
 
 FROM base AS final
 WORKDIR /app
+# ffmpeg is required for server-side session recording: the background RecordingMuxService remuxes the
+# captured raw H.264 + PCM into MP4 (and encodes the redirected camera NV12). Slim install, apt lists
+# pruned to keep the image small.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=publish /app/publish .
 ENV ASPNETCORE_HTTP_PORTS=80
-# Persist the SQLite database and the generated OAuth/OIDC signing & encryption certificates.
-# Both live in /app/Data so issued tokens survive container restarts/recreation.
+# Persist the SQLite database, the generated OAuth/OIDC signing & encryption certificates, the
+# DataProtection keyring (stored VM credentials), and session recordings — all under /app/Data so they
+# survive container restarts/recreation.
 VOLUME ["/app/Data"]
 ENTRYPOINT ["dotnet", "KSol.RDPGateway.dll"]

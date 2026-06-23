@@ -52,30 +52,109 @@ internal static class RdpChannels
 
         switch (name)
         {
-            case "rdpsnd": DecodeRdpSnd(hdr, payload); break;
+            case "rdpsnd": DecodeRdpSnd(s, dir, hdr, payload); break;
             case "cliprdr": DecodeClipRdr(hdr, payload); break;
             case "rdpdr": DecodeRdpDr(hdr, payload); break;
             default: hdr.FieldHex("payload", payload); break;
         }
     }
 
-    private static void DecodeRdpSnd(Node parent, byte[] payload)
+    private static void DecodeRdpSnd(RdpSession s, RdpDir dir, Node parent, byte[] payload)
     {
-        var c = new Cur(payload);
         var n = new Node("rdpsnd");
+
+        // A pending legacy WaveInfo body arrives as a bare PDU (no SNDPROLOG): 4-byte bPad then the rest
+        // of the audio data. Detect it by the pending-wave state before parsing a SNDPROLOG header.
+        // (Mirrors rdpsnd.js _onWaveBody.)
+        if (s.Media != null && s.PendingWave is { } pw)
+        {
+            s.PendingWave = null;
+            if (payload.Length >= 4)
+            {
+                var rest = payload.AsSpan(4);
+                var full = new byte[pw.head.Length + rest.Length];
+                pw.head.CopyTo(full, 0);
+                rest.CopyTo(full.AsSpan(pw.head.Length));
+                EmitRemoteWave(s, dir, pw.formatNo, full);
+            }
+            n.Field("note", "wave body (legacy stitch)").Field("len", payload.Length);
+            parent.Child(n);
+            return;
+        }
+
+        var c = new Cur(payload);
+        byte msgType = 0; int bodySize = 0;
         if (c.Remaining >= 4)
         {
-            byte msgType = c.U8(); c.U8(); int bodySize = c.U16le();
+            msgType = c.U8(); c.U8(); bodySize = c.U16le();
             n.Field("msgType", "0x" + msgType.ToString("X2") + " " + msgType switch
             {
                 0x01 => "WaveInfo", 0x02 => "Wave", 0x03 => "Close", 0x04 => "WaveConfirm",
                 0x05 => "Training", 0x06 => "Formats", 0x07 => "CryptKey", 0x08 => "WaveEncrypt",
                 0x09 => "UDPWave", 0x0A => "UDPWaveLast", 0x0B => "Quality", 0x0C => "Volume",
-                0x0D => "Pitch", 0x38 => "WaveV2", _ => "?",
+                0x0D => "WaveV2", 0x38 => "WaveV2", _ => "?",
             }).Field("bodySize", bodySize);
         }
         n.Field("len", payload.Length);
-        parent.Child(n); // logging only; bytes already echoed by CHANNEL_PDU_HEADER.Raw
+        parent.Child(n);
+
+        // Media extraction (server→client only): negotiate formats, then capture wave PCM.
+        if (s.Media == null || dir != RdpDir.ServerToClient) return;
+        var body = c.Rest(); // bytes after the 4-byte SNDPROLOG
+        switch (msgType)
+        {
+            case 0x07: // SNDC_FORMATS (msgType 0x07 server formats) — [MS-RDPEA] 2.2.2.1
+                ParseSndFormats(s.SndFormats, body);
+                break;
+            case 0x01: // SNDC_WAVEINFO: wTimeStamp(2) wFormatNo(2) cBlockNo(1) bPad(3) head(4)
+                if (body.Length >= 12)
+                {
+                    int formatNo = body[2] | (body[3] << 8);
+                    s.PendingWave = (formatNo, body.Slice(8, 4).ToArray());
+                }
+                break;
+            case 0x0D: // SNDC_WAVE2: wTimeStamp(2) wFormatNo(2) cBlockNo(1) bPad(3) dwAudioTimeStamp(4) data
+                if (body.Length >= 12)
+                {
+                    int formatNo = body[2] | (body[3] << 8);
+                    EmitRemoteWave(s, dir, formatNo, body.Slice(12).ToArray());
+                }
+                break;
+        }
+    }
+
+    // SNDC_FORMATS body: dwFlags(4) dwVolume(4) dwPitch(4) wDGramPort(2) wNumberOfFormats(2) wVersion(2)
+    // bPad(1) then wNumberOfFormats * TS_AUDIO_FORMAT. Keep only PCM (wFormatTag 1); the agreed index
+    // space (wFormatNo in WAVE PDUs) is the list of PCM formats, matching rdpsnd.js.
+    private static void ParseSndFormats(List<PcmFormat> formats, ReadOnlySpan<byte> body)
+    {
+        if (body.Length < 20) return;
+        formats.Clear();
+        var c = new Cur(body);
+        c.U32le(); c.U32le(); c.U32le(); c.U16le();
+        int count = c.U16le(); c.U16le(); c.U8();
+        for (int i = 0; i < count && c.Remaining >= 18; i++)
+        {
+            int wFormatTag = c.U16le();
+            int nChannels = c.U16le();
+            long nSamplesPerSec = c.U32le();
+            c.U32le(); // nAvgBytesPerSec
+            c.U16le(); // nBlockAlign
+            int wBitsPerSample = c.U16le();
+            int cbSize = c.U16le();
+            if (cbSize > 0) c.O += cbSize;
+            if (wFormatTag == 0x0001) // WAVE_FORMAT_PCM
+                formats.Add(new PcmFormat((int)nSamplesPerSec, wBitsPerSample, nChannels));
+        }
+    }
+
+    private static void EmitRemoteWave(RdpSession s, RdpDir dir, int formatNo, byte[] pcm)
+    {
+        if (s.Media == null || pcm.Length == 0) return;
+        var fmt = formatNo >= 0 && formatNo < s.SndFormats.Count ? s.SndFormats[formatNo]
+                : s.SndFormats.Count > 0 ? s.SndFormats[0]
+                : new PcmFormat(44100, 16, 2);
+        s.Media.OnRemoteAudio(fmt, pcm, s.ElapsedMs);
     }
 
     private static void DecodeClipRdr(Node parent, byte[] payload)
@@ -234,13 +313,116 @@ internal static class RdpChannels
             return;
         }
         if (name == "Microsoft::Windows::RDS::DisplayControl") { DecodeDisplayControl(parent, data); return; }
-        if (name == "AUDIO_PLAYBACK_DVC" || name == "AUDIO_INPUT") { DecodeRdpSndInline(parent, name, data); return; }
+        if (name == "AUDIO_PLAYBACK_DVC")
+        {
+            // Modern Windows carries remote sound (rdpsnd / MS-RDPEA) over THIS dynamic channel, not the
+            // static "rdpsnd" channel — the DVC payload is a complete SNDPROLOG-framed rdpsnd message, so
+            // it runs through the same wave-extraction path. (The client binds a full RdpSnd parser here.)
+            DecodeRdpSnd(s, dir, parent, data);
+            return;
+        }
+        if (name == "AUDIO_INPUT")
+        {
+            DecodeRdpSndInline(parent, name, data);
+            if (s.Media != null) ExtractMicAudio(s, dir, data);
+            return;
+        }
         if (name.StartsWith("Microsoft::Windows::RDS::Video") || name.StartsWith("Microsoft::Windows::RDS::Geometry"))
         { var n = new Node("dvc.payload"); n.Field("channel", name).Field("len", data.Length).FieldHex("preview", data); parent.Child(n); return; }
-        // Camera (MS-RDPECAM) and anything else: log structurally-unknown payload.
+        // Camera (MS-RDPECAM): the device channel carries StartStreams (s2c, sets geometry) and
+        // SampleResponse (c2s, NV12 frame). The enumerator channel carries only control.
+        if (s.Media != null && name.StartsWith("RDPGWCam"))
+        {
+            ExtractCameraFrame(s, dir, data);
+        }
+        // Camera and anything else: log structurally-unknown payload.
         var u = new Node("dvc.payload");
         u.Field("channel", name).Field("len", data.Length).FieldHex("preview", data);
         parent.Child(u);
+    }
+
+    // audin (MS-RDPEAI) mic extraction. The DVC payload is a SNDIN message: msgId(1) then body.
+    //   server→client: FORMATS(0x02) advertises capture formats; OPEN(0x03) picks one by index into the
+    //     PCM subset (matching the client's reply order). FORMATCHANGE(0x07) re-selects.
+    //   client→server: DATA(0x06) carries raw PCM after the 1-byte header.
+    private static void ExtractMicAudio(RdpSession s, RdpDir dir, byte[] data)
+    {
+        if (data.Length < 1) return;
+        byte msgId = data[0];
+        var body = data.AsSpan(1);
+        if (dir == RdpDir.ServerToClient)
+        {
+            switch (msgId)
+            {
+                case 0x02: // MSG_SNDIN_FORMATS: NumFormats(4) cbSize(4) then AUDIO_FORMAT records
+                    if (body.Length >= 8)
+                    {
+                        s.AudinFormats.Clear();
+                        int num = body[0] | (body[1] << 8) | (body[2] << 16) | (body[3] << 24);
+                        var fc = new Cur(body); fc.U32le(); fc.U32le();
+                        for (int i = 0; i < num && fc.Remaining >= 18; i++)
+                        {
+                            int tag = fc.U16le(); int ch = fc.U16le(); long rate = fc.U32le();
+                            fc.U32le(); fc.U16le(); int bits = fc.U16le(); int cb = fc.U16le();
+                            if (cb > 0) fc.O += cb;
+                            if (tag == 0x0001) s.AudinFormats.Add(new PcmFormat((int)rate, bits, ch));
+                        }
+                    }
+                    break;
+                case 0x03: // MSG_SNDIN_OPEN: FramesPerPacket(4) initialFormat(4) ...
+                case 0x07: // MSG_SNDIN_FORMATCHANGE: NewFormat(4)
+                    // tracked implicitly: EmitMic uses the active format index; OPEN's index is at off 4,
+                    // FORMATCHANGE's at off 0. Store as the "current" first format if list non-empty.
+                    break;
+            }
+            // Active format: OPEN/FORMATCHANGE select an index; we keep the simplest robust choice — use
+            // index 0 unless an OPEN told us otherwise. Stash it on the session via a single-slot list.
+            if (msgId == 0x03 && body.Length >= 8)
+            {
+                int idx = body[4] | (body[5] << 8) | (body[6] << 16) | (body[7] << 24);
+                s.AudinOpenFormat = idx >= 0 && idx < s.AudinFormats.Count ? idx : 0;
+            }
+            else if (msgId == 0x07 && body.Length >= 4)
+            {
+                int idx = body[0] | (body[1] << 8) | (body[2] << 16) | (body[3] << 24);
+                s.AudinOpenFormat = idx >= 0 && idx < s.AudinFormats.Count ? idx : 0;
+            }
+            return;
+        }
+        // client→server DATA(0x06): raw PCM.
+        if (msgId == 0x06 && body.Length > 0)
+        {
+            var fmt = s.AudinFormats.Count > 0 && s.AudinOpenFormat < s.AudinFormats.Count
+                ? s.AudinFormats[s.AudinOpenFormat]
+                : new PcmFormat(44100, 16, 1);
+            s.Media!.OnMicAudio(fmt, body, s.ElapsedMs);
+        }
+    }
+
+    // Camera (MS-RDPECAM) NV12 extraction. Payload = version(1) msgId(1) body.
+    //   server→client StartStreams(0x0F): streamIndex(1) + 30-byte media type → sets geometry.
+    //   client→server SampleResponse(0x12): streamIndex(1) + raw NV12 frame.
+    private static void ExtractCameraFrame(RdpSession s, RdpDir dir, byte[] data)
+    {
+        if (data.Length < 2) return;
+        byte msgId = data[1];
+        var body = data.AsSpan(2);
+        if (dir == RdpDir.ServerToClient && msgId == 0x0F && body.Length >= 1 + 26)
+        {
+            // media type at body[1..]: Format(1) Width(4) Height(4) FrameRateNum(4) ...
+            int fmt = body[1];
+            int width = body[2] | (body[3] << 8) | (body[4] << 16) | (body[5] << 24);
+            int height = body[6] | (body[7] << 8) | (body[8] << 16) | (body[9] << 24);
+            int fps = body[10] | (body[11] << 8) | (body[12] << 16) | (body[13] << 24);
+            s.CamMediaType = (width, height, fps <= 0 ? 30 : fps, fmt);
+        }
+        else if (dir == RdpDir.ClientToServer && msgId == 0x12 && body.Length >= 1)
+        {
+            var frame = body.Slice(1); // skip streamIndex
+            if (frame.Length == 0 || s.CamMediaType is not { } mt) return;
+            string fmtName = mt.fmt switch { 0x04 => "nv12", 0x05 => "i420", 0x02 => "mjpeg", 0x01 => "h264", _ => "raw" };
+            s.Media!.OnCameraFrame(mt.width, mt.height, frame, fmtName, s.ElapsedMs);
+        }
     }
 
     private static void DecodeRdpSndInline(Node parent, string chan, byte[] data)
@@ -314,13 +496,13 @@ internal static class RdpChannels
             var body = inflated.AsSpan(off + 8, (int)pduLength - 8);
             var p = new Node("gfx." + GfxName(cmdId));
             p.Field("cmdId", "0x" + cmdId.ToString("X4") + " " + GfxName(cmdId)).Field("pduLength", pduLength);
-            DecodeGfxBody(cmdId, body, p);
+            DecodeGfxBody(s, cmdId, body, p);
             gfx.Child(p);
             off += (int)pduLength;
         }
     }
 
-    private static void DecodeGfxBody(int cmdId, ReadOnlySpan<byte> body, Node p)
+    private static void DecodeGfxBody(RdpSession s, int cmdId, ReadOnlySpan<byte> body, Node p)
     {
         var c = new Cur(body);
         switch (cmdId)
@@ -347,7 +529,12 @@ internal static class RdpChannels
                 if (c.Remaining >= 20) { p.Field("surfaceId", c.U16le()); c.U16le(); p.Field("originX", c.U32le()).Field("originY", c.U32le()).Field("targetWidth", c.U32le()).Field("targetHeight", c.U32le()); }
                 break;
             case 0x000b: // START_FRAME
-                if (c.Remaining >= 8) p.Field("timestamp", c.U32le()).Field("frameId", c.U32le());
+                if (c.Remaining >= 8)
+                {
+                    long ts = c.U32le(); long fid = c.U32le();
+                    p.Field("timestamp", ts).Field("frameId", fid);
+                    s.GfxFrameId = fid; s.GfxFrameTs = ts;
+                }
                 break;
             case 0x000c: // END_FRAME
                 if (c.Remaining >= 4) p.Field("frameId", c.U32le());
@@ -361,13 +548,16 @@ internal static class RdpChannels
             case 0x0001: // WIRE_TO_SURFACE_1
                 if (c.Remaining >= 17)
                 {
-                    p.Field("surfaceId", c.U16le());
+                    int surfaceId = c.U16le();
+                    p.Field("surfaceId", surfaceId);
                     int codecId = c.U16le();
                     p.Field("codecId", "0x" + codecId.ToString("X4") + " " + GfxCodec(codecId));
                     p.Field("pixelFormat", "0x" + c.U8().ToString("X2"));
                     p.Field("destLeft", c.U16le()).Field("destTop", c.U16le()).Field("destRight", c.U16le()).Field("destBottom", c.U16le());
                     long bdl = c.U32le();
                     p.Field("bitmapDataLength", bdl + " (opaque " + GfxCodec(codecId) + " bitstream)");
+                    if (s.Media != null && c.Remaining >= bdl && bdl > 0)
+                        ExtractDesktopVideo(s, codecId, surfaceId, c.Rest().Slice(0, (int)bdl));
                 }
                 break;
             case 0x0002: // WIRE_TO_SURFACE_2
@@ -389,6 +579,63 @@ internal static class RdpChannels
                 if (body.Length > 0) p.FieldHex("body", body);
                 break;
         }
+    }
+
+    // Extract the H.264 access unit(s) from a WIRE_TO_SURFACE_1 bitstream and push to the media sink.
+    // AVC420 ([MS-RDPEGFX] 2.2.4.4): RFX_AVC420_METABLOCK then the Annex-B H.264. AVC444/v2 (2.2.4.5):
+    // a 4-byte word { LC[31:30], cbAvc420EncodedBitstream1[29:0] } then stream1 (a full AVC420 bitmap
+    // stream, the 4:2:0 main/luma view) and optionally stream2 (chroma-aux). v1 records the main view
+    // and forwards the aux bytes for callers that want them. Non-AVC codecs have no server pixel decoder
+    // and are passed through as GfxVideoCodec.Other (the recorder marks the recording unsupported-codec).
+    private static void ExtractDesktopVideo(RdpSession s, int codecId, int surfaceId, ReadOnlySpan<byte> bitmapData)
+    {
+        var media = s.Media!;
+        if (codecId == 0x000b) // AVC420
+        {
+            var au = StripAvc420Metablock(bitmapData);
+            media.OnDesktopVideo(GfxVideoCodec.Avc420, surfaceId, au, ReadOnlySpan<byte>.Empty,
+                s.GfxFrameId, s.GfxFrameTs);
+        }
+        else if (codecId == 0x000e || codecId == 0x000f) // AVC444 / AVC444v2
+        {
+            if (bitmapData.Length < 4) return;
+            uint w = (uint)(bitmapData[0] | (bitmapData[1] << 8) | (bitmapData[2] << 16) | (bitmapData[3] << 24));
+            int lc = (int)(w >> 30);
+            int cb1 = (int)(w & 0x3FFFFFFF);
+            var after = bitmapData.Slice(4);
+            // LC: 0 = both streams (cb1 = stream1 length), 1 = stream1 only, 2 = stream2 only.
+            ReadOnlySpan<byte> s1, s2;
+            if (lc == 1) { s1 = after; s2 = ReadOnlySpan<byte>.Empty; }
+            else if (lc == 2) { s1 = ReadOnlySpan<byte>.Empty; s2 = after; }
+            else
+            {
+                if (cb1 > after.Length) cb1 = after.Length;
+                s1 = after.Slice(0, cb1);
+                s2 = after.Slice(cb1);
+            }
+            var main = s1.IsEmpty ? ReadOnlySpan<byte>.Empty : StripAvc420Metablock(s1);
+            var aux = s2.IsEmpty ? ReadOnlySpan<byte>.Empty : StripAvc420Metablock(s2);
+            media.OnDesktopVideo(codecId == 0x000f ? GfxVideoCodec.Avc444v2 : GfxVideoCodec.Avc444,
+                surfaceId, main, aux, s.GfxFrameId, s.GfxFrameTs);
+        }
+        else
+        {
+            // ClearCodec / Progressive / planar / uncompressed: no server-side pixel decoder.
+            media.OnDesktopVideo(GfxVideoCodec.Other, surfaceId, ReadOnlySpan<byte>.Empty,
+                ReadOnlySpan<byte>.Empty, s.GfxFrameId, s.GfxFrameTs);
+        }
+    }
+
+    // Skip the RFX_AVC420_METABLOCK ([MS-RDPEGFX] 2.2.4.4.1): numRegionRects(4) + numRegionRects*RFX_RECT
+    // (8 bytes each) + numRegionRects*RFX_AVC420_QUANT_QUALITY (2 bytes each). What remains is the H.264
+    // Annex-B access unit. On any inconsistency, return the input unchanged (best-effort).
+    private static ReadOnlySpan<byte> StripAvc420Metablock(ReadOnlySpan<byte> stream)
+    {
+        if (stream.Length < 4) return stream;
+        uint numRegionRects = (uint)(stream[0] | (stream[1] << 8) | (stream[2] << 16) | (stream[3] << 24));
+        long meta = 4L + numRegionRects * 8L + numRegionRects * 2L;
+        if (numRegionRects == 0 || meta < 0 || meta > stream.Length) return stream;
+        return stream.Slice((int)meta);
     }
 
     // Heuristic: does this look like an uncompressed RDPGFX PDU header (cmdId(2) flags(2) pduLength(4))?

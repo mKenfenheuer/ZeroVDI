@@ -1,0 +1,32 @@
+---
+name: sso-and-recording
+description: SSO stored-credentials/auto-connect + server-side MP4 session recording (rules engine, replay). Architecture + the ffmpeg FIFO deadlock fix.
+metadata:
+  type: project
+---
+
+Two features built 2026-06-23 (plan: ~/.claude/plans/wondrous-roaming-rain.md).
+
+## Feature 1 — SSO / one-click connect
+- `RDPResourceUserAuthorization` gained `Protected{Username,Password,Domain}` (DataProtection-encrypted, via `RDP/CredentialProtector.cs`, keyring under `DataProtection:KeysDir` default `Data/dp-keys`) + a JSON-column `ConnectionDefaults` (`Models/ConnectionDefaults.cs`: Audio/Clipboard/Microphone/Camera/GfxMode/PerformanceFlags — console-form-shaped, NOT the .rdp-shaped `RdpOptions`).
+- Flow (chosen: release-to-browser, NOT zero-knowledge): the VM password is needed in TWO places — gateway NLA/CredSSP AND the browser's inner RDP Client Info auto-logon PDU (`protocol.js clientInfoPdu`). So `HomeController.Console` releases stored creds to the user's own browser over HTTPS (ViewData AutoConnect/Stored*), and `RdpWebSocketController` passes them to `RdpRelaySession` (new `VmCredentials? presuppliedCreds` ctor arg → skips `ReadCredentialsAsync`). `client.js` suppresses the credentials WS frame when `window.RDP_AUTOCONNECT` (else the relay, already bridging, would mis-read it as RDP bytes). Console.cshtml auto-fires the existing login-form submit on load.
+- Admin UI: RUA Edit has a SetCredentials/ClearCredentials POST pair (Protected* never form-bound) + a `_ConnectionDefaultsEditor` partial. Edit POST is load-then-mutate (never `Update()` a fresh graph — that would null stored creds).
+
+## Feature 2 — server-side MP4 recording
+Architecture: the gateway relays opaque RDP bytes; recording reuses RdpWire's structural decode to EXTRACT media (no pixel decode), then ffmpeg-MUXES (remux, not re-encode) to MP4.
+- `RdpWire/RdpMediaSink.cs`: `IRdpMediaSink` (OnDesktopVideo/OnRemoteAudio/OnMicAudio/OnCameraFrame). `RdpSession(sink, media)` overload. Extraction in `RdpChannels.cs`:
+  - Desktop video: GFX `WIRE_TO_SURFACE_1` → strip RFX_AVC420_METABLOCK → H.264 Annex-B. AVC420 (0x0b) clean; AVC444/v2 (0x0e/0x0f) split LC|cb1 word, record MAIN (4:2:0) view only (chroma-aux dropped — v1). Non-AVC → `GfxVideoCodec.Other` → recorder marks `UnsupportedCodec`, audio-only.
+  - Remote sound: rdpsnd is uncompressed PCM (WAVE_FORMAT_PCM only); parse SNDC_FORMATS, emit WaveInfo/Wave2 PCM (legacy two-PDU stitch via session `PendingWave`). **★ Modern Windows carries rdpsnd over the `AUDIO_PLAYBACK_DVC` DYNAMIC channel, NOT the static `rdpsnd` channel** (the static one is advertised but unused for audio). `DispatchDvcPayload` routes `AUDIO_PLAYBACK_DVC` through the same `DecodeRdpSnd` wave-extractor (the DVC payload is a complete SNDPROLOG-framed message). Routing it to the old log-only `DecodeRdpSndInline` = silent desktop audio (was a bug).
+  - Mic: audin (AUDIO_INPUT DVC) MSG_SNDIN_DATA(0x06) PCM, c2s. Camera: RDPECAM `RDPGWCam*` device channel — StartStreams(0x0F, s2c) sets NV12 geometry, SampleResponse(0x12, c2s) = raw NV12 frame.
+- **Recording is TWO-PHASE (raw capture → background mux), NOT live ffmpeg.** This replaced an earlier live-ffmpeg-via-FIFOs design that deadlocked (ffmpeg probes the video input before opening the audio FIFO; and a video-only session — remote sound off — never launched because launch was keyed on first audio). Current:
+  - `RDP/SessionRecorder.cs` (implements IRdpMediaSink): during the session just APPENDS raw elementary streams to files under the recording's base dir — `desktop.h264` (concatenated H.264 Annex-B AUs), `desktop.pcm`, `camera.nv12`, `mic.pcm` — plus a `manifest.json` sidecar (audio PcmFormat, camera WxH/fps, observed codec). No ffmpeg, no pipes, no process during the session → cheap, crash-resilient (partial raws still mux). Plugged into `RdpRelaySession.RdpRecorder` (generalized to take an `IRdpMediaSink` + `NullEventSink`; runs whenever a media sink OR `RDPGW_DUMP_DIR` is set), fed off the relay hot path via the existing bounded-Channel drain task.
+  - On session end the controller closes the recorder (writes manifest) and sets `Recording.Status = Processing`.
+  - `RDP/RecordingMuxService.cs` (hosted `BackgroundService`, 5s poll): claims `Processing` recordings, reads manifest, runs ffmpeg per output reading REAL files (no FIFO/launch race) — desktop `-r 30 -f h264 -c:v copy` [+ PCM→aac], camera NV12 `-c:v libx264` [+ mic→aac], `-movflags +faststart`. Sets Completed/UnsupportedCodec, DELETES raws on success (keeps them on Failed for retry). Also recovers recordings left `Processing` by a crash.
+  - **★ Timing alignment (samples have no inline PTS — must be reconstructed or playback is wrong):** SessionRecorder tracks per-stream first/last timestamp + count and writes to the manifest: real **CameraFps** = (n−1)/span (camera samples at irregular sub-30 rates; muxing at fixed 30fps plays it too fast), and audio **offset** (firstTs − epoch) for desktop audio and (micFirstTs − cameraFirstTs) for mic. The mux uses the real fps for `-r` and **silence-pads audio with `-af adelay=<ms>:all=1`** so a sample that played at t=offset lands there instead of bunched at t=0 (fixed: camera-too-fast, mic-at-wrong-place). Desktop H.264 still `-r 30` (its own AUs have no PTS — approximate; future: per-AU PTS sidecar from the timestamps already captured).
+- `RecordingStatus` adds `Processing=4`. ffmpeg still needed in the Dockerfile (`coreutils` no longer required — no mkfifo).
+- Rules: `Models/RecordingRule.cs` (ordered; Scope Global/User/Resource/Role + Allow/Deny) + `RDP/RecordingPolicy.cs` (`ShouldRecordAsync`, first-match-wins, else `Recording:DefaultEnabled`). Evaluated in `RdpWebSocketController.Connect` before the session. Admin CRUD `RecordingRulesController`.
+- `Models/Recording.cs` + `Recordings`/`RecordingRules` DbSets + migration `AddRecordingsAndRules`. Files under `Recording:Directory` (default `Data/recordings/<id>/{desktop,camera}.mp4`, on the /app/Data volume). `RecordingsController`: Index (admin=all, user=own), Play, File (range-served, outside wwwroot). Nav links in `_Layout`.
+
+Migrations: `AddStoredCredentialsAndDefaults`, `AddRecordingsAndRules` (auto-applied at startup). ffmpeg 7.x verified locally; both mux pipelines produce valid h264+aac MP4s.
+
+Related: [[gfx-stall-mitm-findings]] (the RdpWire decode engine this reuses), [[gfx-dvc-v3-required]].
