@@ -1,0 +1,52 @@
+before_script:
+  - export CI_ENVIRONMENT_HOST=$(echo $CI_ENVIRONMENT_URL | sed 's~http[s]*://~~g')
+
+stages:
+ - build
+ - deploy
+
+build_amd64_image:
+  stage: build
+  tags:
+    - docker
+    - build
+    - shell
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build -f KSol.RDPGateway/Dockerfile -t $CI_COMMIT_BRANCH KSol.RDPGateway/
+    - docker image tag $CI_COMMIT_BRANCH $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+    - docker image push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+    - docker image prune -a
+
+# Shared deploy logic. Prod and dev run as two isolated compose projects on the
+# same host: distinct project names give each its own pgdata + keys volumes, so
+# the ES256 signing key is generated once per environment and persisted across
+# redeploys. The key never leaves the server (no key material in CI variables).
+.deploy_template: &deploy_template
+  needs:
+    - build_amd64_image
+  stage: deploy
+  allow_failure: false
+  tags:
+    - docker
+    - prod
+    - no-gpu
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - export APP_IMAGE=$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+    - export COMPOSE_PROJECT="rdpgw"
+    - export STACK_NAME="$COMPOSE_PROJECT"
+    - docker compose -p $COMPOSE_PROJECT pull api || true
+    - docker compose -p $COMPOSE_PROJECT up -d --remove-orphans
+    - docker image prune -af
+
+deploy_production:
+  <<: *deploy_template
+  only:
+    - main
+  environment:
+    name: prod
+  variables:
+    DEPLOY_ENV: prod
+    ASPNETCORE_ENVIRONMENT: Production
+    # POSTGRES_PASSWORD is provided as a protected CI/CD variable (scoped to prod).

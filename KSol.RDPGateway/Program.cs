@@ -58,8 +58,7 @@ public class Program
         // recordings left Processing by a previous run — crash-resilient).
         builder.Services.AddHostedService<RDP.RecordingMuxService>();
 
-        builder.Services.AddControllersWithViews()
-            .AddRazorRuntimeCompilation();
+        builder.Services.AddControllersWithViews();
 
         builder.Services.AddRDPGW();
         builder.Services.AddSingleton<IRDPGWAuthenticationHandler, RDPAuthenticationHandler>();

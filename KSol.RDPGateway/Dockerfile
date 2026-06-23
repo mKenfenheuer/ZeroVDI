@@ -18,11 +18,12 @@ RUN dotnet publish "KSol.RDPGateway.csproj" -c Release -o /app/publish
 
 FROM base AS final
 WORKDIR /app
-# ffmpeg is required for server-side session recording: the background RecordingMuxService remuxes the
-# captured raw H.264 + PCM into MP4 (and encodes the redirected camera NV12). Slim install, apt lists
-# pruned to keep the image small.
+# Server-side session recording (background RecordingMuxService): ffmpeg remuxes the captured raw H.264
+# + PCM into MP4 and encodes the redirected camera NV12; mkvmerge (mkvtoolnix) applies the per-frame
+# timestamps to the copied H.264 for true variable-frame-rate output (ffmpeg can't take a per-frame PTS
+# sidecar for -c copy). Slim install, apt lists pruned to keep the image small.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg mkvtoolnix \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=publish /app/publish .
 ENV ASPNETCORE_HTTP_PORTS=80

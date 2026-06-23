@@ -105,6 +105,7 @@ internal static class RdpChannels
         {
             case 0x07: // SNDC_FORMATS (msgType 0x07 server formats) — [MS-RDPEA] 2.2.2.1
                 ParseSndFormats(s.SndFormats, body);
+                s.Media?.OnDiagnostic($"rdpsnd SNDC_FORMATS: {s.SndFormats.Count} PCM format(s)");
                 break;
             case 0x01: // SNDC_WAVEINFO: wTimeStamp(2) wFormatNo(2) cBlockNo(1) bPad(3) head(4)
                 if (body.Length >= 12)
@@ -247,6 +248,7 @@ internal static class RdpChannels
                 if (dir == RdpDir.ServerToClient)
                 {
                     s.DvcById[channelId] = name;
+                    s.Media?.OnDiagnostic($"DVC create id={channelId} name={name}");
                 }
                 else if (c.Remaining >= 4)
                 {
@@ -324,7 +326,11 @@ internal static class RdpChannels
         if (name == "AUDIO_INPUT")
         {
             DecodeRdpSndInline(parent, name, data);
-            if (s.Media != null) ExtractMicAudio(s, dir, data);
+            if (s.Media != null)
+            {
+                if (data.Length >= 1) s.Media.OnDiagnostic($"audin msg 0x{data[0]:X2} {dir} len={data.Length}");
+                ExtractMicAudio(s, dir, data);
+            }
             return;
         }
         if (name.StartsWith("Microsoft::Windows::RDS::Video") || name.StartsWith("Microsoft::Windows::RDS::Geometry"))

@@ -22,6 +22,7 @@ public sealed class RecordingMuxService : BackgroundService
     private readonly IConfiguration _config;
     private readonly ILogger<RecordingMuxService> _logger;
     private readonly string _ffmpeg;
+    private readonly string _mkvmerge;
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
     public RecordingMuxService(IServiceScopeFactory scopes, IConfiguration config, ILogger<RecordingMuxService> logger)
@@ -30,6 +31,7 @@ public sealed class RecordingMuxService : BackgroundService
         _config = config;
         _logger = logger;
         _ffmpeg = config["Recording:FfmpegPath"] ?? "ffmpeg";
+        _mkvmerge = config["Recording:MkvmergePath"] ?? "mkvmerge";
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -76,46 +78,58 @@ public sealed class RecordingMuxService : BackgroundService
         _logger.LogInformation("RecordingMuxService: muxing recording {Id}", rec.Id);
         bool anyFailed = false;
         var rawFiles = new List<string>();
+        var tmpFiles = new List<string>();
 
-        // --- desktop.mp4: H.264 (copy) + remote PCM (→ aac) ---
+        // --- desktop.mp4: H.264 (copy, true VFR via per-frame timestamps) + remote PCM (→ aac) ---
         string? desktopOut = null;
         if (manifest.DesktopVideo != null || manifest.DesktopAudio != null)
         {
-            var args = new List<string> { "-hide_banner", "-loglevel", "warning" };
             string? vIn = manifest.DesktopVideo != null ? Path.Combine(baseDir, manifest.DesktopVideo) : null;
+            string? tsIn = manifest.DesktopVideoTs != null ? Path.Combine(baseDir, manifest.DesktopVideoTs) : null;
             string? aIn = manifest.DesktopAudio != null ? Path.Combine(baseDir, manifest.DesktopAudio) : null;
-            if (vIn != null && File.Exists(vIn)) { args.AddRange(new[] { "-r", "30", "-f", "h264", "-i", vIn }); rawFiles.Add(vIn); } else vIn = null;
-            if (aIn != null && File.Exists(aIn) && manifest.RemoteAudio is { } rf)
-            { args.AddRange(PcmInput(rf, aIn)); rawFiles.Add(aIn); } else aIn = null;
-            if (vIn != null || aIn != null)
-            {
-                if (vIn != null) args.AddRange(new[] { "-c:v", "copy" });
-                if (aIn != null) { args.AddRange(new[] { "-c:a", "aac" }); args.AddRange(AudioDelay(manifest.DesktopAudioOffsetMs)); }
-                args.AddRange(new[] { "-movflags", "+faststart", "-y", rec.DesktopFilePath! });
-                if (await RunFfmpegAsync(args, rec.Id, "desktop", ct)) desktopOut = rec.DesktopFilePath;
-                else anyFailed = true;
-            }
+            if (vIn != null && File.Exists(vIn)) rawFiles.Add(vIn); else vIn = null;
+            if (aIn != null && File.Exists(aIn) && manifest.RemoteAudio != null) rawFiles.Add(aIn); else aIn = null;
+            if (tsIn != null) rawFiles.Add(tsIn);
+
+            // Apply per-frame timestamps to the elementary H.264 → VFR MKV (copy), then ffmpeg muxes that
+            // (copy) with the offset-aligned audio into the final MP4.
+            string? vfrMkv = vIn != null ? await BuildVfrMkvAsync(vIn, tsIn, rec.Id, "desktop", tmpFiles, ct) : null;
+            if (vIn != null && vfrMkv == null) anyFailed = true;
+            else if (await MuxFinalAsync(vfrMkv, aIn, manifest.RemoteAudio, manifest.DesktopAudioOffsetMs,
+                         rec.DesktopFilePath!, rec.Id, "desktop", ct)) desktopOut = rec.DesktopFilePath;
+            else if (vfrMkv != null || aIn != null) anyFailed = true;
         }
 
-        // --- camera.mp4: NV12 (→ libx264) + mic PCM (→ aac) ---
+        // --- camera.mp4: NV12 → H.264 (encode), VFR via timestamps, + mic PCM (→ aac) ---
         string? cameraOut = null;
         if (manifest.CameraVideo != null && manifest.CameraWidth > 0 && manifest.CameraHeight > 0)
         {
-            var args = new List<string> { "-hide_banner", "-loglevel", "warning" };
             string vIn = Path.Combine(baseDir, manifest.CameraVideo);
+            string? tsIn = manifest.CameraVideoTs != null ? Path.Combine(baseDir, manifest.CameraVideoTs) : null;
             string? aIn = manifest.MicAudio != null ? Path.Combine(baseDir, manifest.MicAudio) : null;
             if (File.Exists(vIn))
             {
-                args.AddRange(new[] { "-f", "rawvideo", "-pix_fmt", "nv12", "-s",
-                    $"{manifest.CameraWidth}x{manifest.CameraHeight}", "-r",
-                    manifest.CameraFps.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture), "-i", vIn });
                 rawFiles.Add(vIn);
-                if (aIn != null && File.Exists(aIn) && manifest.MicFormat is { } mf) { args.AddRange(PcmInput(mf, aIn)); rawFiles.Add(aIn); } else aIn = null;
-                args.AddRange(new[] { "-c:v", "libx264", "-pix_fmt", "yuv420p" });
-                if (aIn != null) { args.AddRange(new[] { "-c:a", "aac" }); args.AddRange(AudioDelay(manifest.MicOffsetMs)); }
-                args.AddRange(new[] { "-movflags", "+faststart", "-y", rec.CameraFilePath! });
-                if (await RunFfmpegAsync(args, rec.Id, "camera", ct)) cameraOut = rec.CameraFilePath;
-                else anyFailed = true;
+                if (tsIn != null) rawFiles.Add(tsIn);
+                if (aIn != null && File.Exists(aIn) && manifest.MicFormat != null) rawFiles.Add(aIn); else aIn = null;
+
+                // NV12 has no encoded form mkvmerge can take, so encode to elementary H.264 first (frame
+                // order preserved, 1:1), then apply the timestamps for VFR, then mux with mic.
+                string camH264 = Path.Combine(baseDir, "camera.enc.h264");
+                tmpFiles.Add(camH264);
+                var enc = new List<string> { "-hide_banner", "-loglevel", "warning",
+                    "-f", "rawvideo", "-pix_fmt", "nv12", "-s", $"{manifest.CameraWidth}x{manifest.CameraHeight}",
+                    "-i", vIn, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-bsf:v", "h264_mp4toannexb",
+                    "-f", "h264", "-y", camH264 };
+                if (!await RunFfmpegAsync(enc, rec.Id, "camera-enc", ct)) anyFailed = true;
+                else
+                {
+                    string? vfrMkv = await BuildVfrMkvAsync(camH264, tsIn, rec.Id, "camera", tmpFiles, ct);
+                    if (vfrMkv == null) anyFailed = true;
+                    else if (await MuxFinalAsync(vfrMkv, aIn, manifest.MicFormat, manifest.MicOffsetMs,
+                                 rec.CameraFilePath!, rec.Id, "camera", ct)) cameraOut = rec.CameraFilePath;
+                    else anyFailed = true;
+                }
             }
         }
 
@@ -127,42 +141,84 @@ public sealed class RecordingMuxService : BackgroundService
             : RecordingStatus.Completed;
         await db.SaveChangesAsync(ct);
 
-        // Delete the raws on success (keep them on failure for retry/debugging).
-        if (!anyFailed)
+        // Intermediates (encoded camera h264, VFR mkvs) are always removed. Raws are removed only on
+        // success (kept on failure for retry/debugging).
+        foreach (var f in tmpFiles) { try { File.Delete(f); } catch { } }
+        /*if (!anyFailed)
         {
             foreach (var f in rawFiles) { try { File.Delete(f); } catch { } }
             try { File.Delete(Path.Combine(baseDir, "manifest.json")); } catch { }
-        }
+        }*/
         _logger.LogInformation("RecordingMuxService: recording {Id} → {Status}", rec.Id, rec.Status);
     }
 
-    private static string[] PcmInput(PcmFormat f, string path)
-        => new[] { "-f", f.BitsPerSample == 8 ? "u8" : "s16le", "-ar", f.SampleRate.ToString(),
-                   "-ac", Math.Max(1, f.Channels).ToString(), "-i", path };
+    // Apply per-frame timestamps to an elementary H.264 stream via mkvmerge → a true-VFR MKV (copy, no
+    // re-encode). Returns the MKV path, or null on failure. When no timestamp sidecar exists, mkvmerge
+    // still produces a playable (CFR-ish) MKV so recording isn't lost.
+    private async Task<string?> BuildVfrMkvAsync(string h264, string? tsFile, string recId, string tag,
+        List<string> tmpFiles, CancellationToken ct)
+    {
+        string mkv = h264 + ".vfr.mkv";
+        tmpFiles.Add(mkv);
+        var args = new List<string> { "-o", mkv };
+        if (tsFile != null && File.Exists(tsFile)) { args.Add("--timestamps"); args.Add("0:" + tsFile); }
+        args.Add(h264);
+        if (await RunAsync(_mkvmerge, args, recId, tag + "-mkv", ct, allowExit1: true)) return mkv;
+        return null;
+    }
 
-    // Audio gap/offset alignment: prepend real silence to the audio so a sample that played at t=offsetMs
-    // lands there instead of bunched at t=0. adelay inserts silence samples (robust across players), and
-    // is applied during the AAC re-encode (incompatible with stream-copy, but audio is always encoded).
-    private static string[] AudioDelay(long offsetMs)
-        => offsetMs > 0 ? new[] { "-af", $"adelay={offsetMs}:all=1" } : Array.Empty<string>();
+    // Final mux: VFR video MKV (copy) + optional PCM audio (→ aac, silence-padded by offsetMs) → MP4.
+    private async Task<bool> MuxFinalAsync(string? videoMkv, string? pcm, PcmFormat? fmt, long offsetMs,
+        string outPath, string recId, string tag, CancellationToken ct)
+    {
+        if (videoMkv == null && pcm == null) return false;
+        var args = new List<string> { "-hide_banner", "-loglevel", "warning" };
+        if (videoMkv != null) { args.Add("-i"); args.Add(videoMkv); }
+        if (pcm != null && fmt is { } f)
+        {
+            args.AddRange(new[] { "-f", f.BitsPerSample == 8 ? "u8" : "s16le", "-ar", f.SampleRate.ToString(),
+                                  "-ac", Math.Max(1, f.Channels).ToString(), "-i", pcm });
+        }
+        else pcm = null;
+        if (videoMkv != null) args.AddRange(new[] { "-c:v", "copy" });
+        if (pcm != null)
+        {
+            args.AddRange(new[] { "-c:a", "aac" });
+            // adelay inserts real leading silence so audio that started at t=offset lands there.
+            if (offsetMs > 0) { args.Add("-af"); args.Add($"adelay={offsetMs}:all=1"); }
+        }
+        args.AddRange(new[] { "-movflags", "+faststart", "-y", outPath });
+        return await RunFfmpegAsync(args, recId, tag, ct);
+    }
 
-    private async Task<bool> RunFfmpegAsync(List<string> args, string recId, string tag, CancellationToken ct)
+    private Task<bool> RunFfmpegAsync(List<string> args, string recId, string tag, CancellationToken ct)
+        => RunAsync(_ffmpeg, args, recId, tag, ct);
+
+    // Run a child process, capturing stderr. allowExit1: mkvmerge returns 1 for non-fatal warnings (still
+    // produces valid output), so treat exit 1 as success but log it.
+    private async Task<bool> RunAsync(string exe, List<string> args, string recId, string tag,
+        CancellationToken ct, bool allowExit1 = false)
     {
         try
         {
-            var psi = new ProcessStartInfo { FileName = _ffmpeg, RedirectStandardError = true, UseShellExecute = false };
+            var psi = new ProcessStartInfo { FileName = exe, RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false };
             foreach (var a in args) psi.ArgumentList.Add(a);
             using var p = Process.Start(psi);
-            if (p == null) { _logger.LogWarning("RecordingMuxService: ffmpeg failed to start ({Id}/{Tag})", recId, tag); return false; }
-            var err = await p.StandardError.ReadToEndAsync(ct);
+            if (p == null) { _logger.LogWarning("RecordingMuxService: {Exe} failed to start ({Id}/{Tag})", exe, recId, tag); return false; }
+            // Read both streams concurrently (avoids a pipe-buffer deadlock). mkvmerge writes its errors to
+            // STDOUT, not stderr, so capture both.
+            var outTask = p.StandardOutput.ReadToEndAsync(ct);
+            var errTask = p.StandardError.ReadToEndAsync(ct);
             await p.WaitForExitAsync(ct);
-            if (p.ExitCode != 0)
+            var diag = ((await outTask) + " " + (await errTask)).Trim();
+            if (p.ExitCode == 0 || (allowExit1 && p.ExitCode == 1))
             {
-                _logger.LogWarning("RecordingMuxService: ffmpeg exit {Code} for {Id}/{Tag}: {Err}", p.ExitCode, recId, tag, err);
-                return false;
+                if (p.ExitCode == 1) _logger.LogDebug("RecordingMuxService: {Exe} warned ({Id}/{Tag}): {Diag}", exe, recId, tag, diag);
+                return true;
             }
-            return true;
+            _logger.LogWarning("RecordingMuxService: {Exe} exit {Code} for {Id}/{Tag}: {Diag}", exe, p.ExitCode, recId, tag, diag);
+            return false;
         }
-        catch (Exception ex) { _logger.LogWarning(ex, "RecordingMuxService: ffmpeg run failed ({Id}/{Tag})", recId, tag); return false; }
+        catch (Exception ex) { _logger.LogWarning(ex, "RecordingMuxService: {Exe} run failed ({Id}/{Tag})", exe, recId, tag); return false; }
     }
 }

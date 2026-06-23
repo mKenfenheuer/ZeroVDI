@@ -37,13 +37,24 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
     private FileStream? _cameraVideo;
     private FileStream? _micAudio;
 
-    // Per-stream timing, used by the mux step to reconstruct the real timeline (silence-pad audio gaps,
-    // derive the true camera frame rate) instead of packing samples back-to-back. We track first/last
-    // timestamps and counts; per-chunk audio gap handling uses firstTs as the offset and total span.
-    private long _epochMs = -1;                          // first media timestamp across the whole session
+    // Monotonic arrival clock. The GFX START_FRAME wire timestamp (passed as timestampMs) is NOT a
+    // reliable monotonic PTS — it can repeat/regress across frames (observed: first two frames both
+    // ts=0), which mkvmerge's v2 timestamp format rejects ("timestamps not ordered"). The relay only ever
+    // sees ARRIVAL time anyway, so we stamp every sample with our own stopwatch — monotonic by
+    // construction — and use that for both the per-frame video timeline and the audio offsets.
+    private readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
+
+    // Per-frame video timestamp sidecars (mkvmerge "v2" format: one ms timestamp per frame, strictly
+    // increasing). The mux applies these to the copied elementary streams → true variable frame rate.
+    private StreamWriter? _desktopVideoTs;
+    private StreamWriter? _cameraVideoTs;
+    private long _desktopVideoFirstMs = -1, _desktopVideoLastTs = -1;
+    private long _cameraVideoFirstMs = -1, _cameraVideoLastTs = -1;
+
+    // Audio timing (first arrival ms) so the mux can silence-pad the front to align with video start.
+    private long _epochMs = -1;                          // first media arrival across the whole session
     private readonly Timing _desktopAudioT = new();
     private readonly Timing _micAudioT = new();
-    private readonly Timing _cameraT = new();
 
     private sealed class Timing
     {
@@ -55,10 +66,21 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
     private PcmFormat? _remoteAudioFmt;
     private PcmFormat? _micFmt;
     private (int w, int h, int fps)? _cameraGeom;
+    // Black NV12 frame (Y=0x00, UV=0x80) sized to the camera geometry, lazily built, reused to pad
+    // inactive periods. Cadence: one black frame per ~200ms of gap (5 fps) — plenty for "no camera".
+    private byte[]? _blackNv12;
+    private long _cameraLastEpochMs = -1;     // epoch-relative ms of the last camera frame WRITTEN (real or black)
+    private const long BlackPadCadenceMs = 200;
     private bool _loggedFirstVideo;
+    private bool _anyAvc;            // got at least one H.264 (AVC) desktop frame
+    private bool _anyOtherCodec;     // saw at least one non-AVC desktop frame
+    private bool _loggedUnsupported;
 
-    /// <summary>Set when a desktop video unit used a codec we can't remux (non-H.264).</summary>
-    public bool UnsupportedVideoCodec { get; private set; }
+    /// <summary>
+    /// True only when the desktop had video but NONE of it was H.264 (e.g. pure ClearCodec/Progressive) —
+    /// i.e. we can't produce desktop video. A mix of AVC + non-AVC is NOT unsupported (we keep the AVC).
+    /// </summary>
+    public bool UnsupportedVideoCodec => _anyOtherCodec && !_anyAvc;
     /// <summary>The desktop video codec observed (for the Recording row), or null if none.</summary>
     public string? VideoCodec { get; private set; }
     /// <summary>True if any desktop media (video or audio) was captured.</summary>
@@ -81,15 +103,20 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
         if (_disposed) return;
         if (codec == GfxVideoCodec.Other)
         {
-            if (!UnsupportedVideoCodec)
+            // This host interleaves AVC444v2 keyframes with codecId=0x0000 UNCOMPRESSED (and other
+            // non-AVC) delta rects we can't remux. Only treat the session as unsupported if we NEVER get
+            // an AVC frame; once we have H.264, just skip the non-AVC frames and keep recording (the
+            // recording is then slightly incomplete on those deltas, but usable — far better than nothing).
+            _anyOtherCodec = true;
+            if (!_anyAvc && !_loggedUnsupported)
             {
-                UnsupportedVideoCodec = true;
-                VideoCodec ??= "unsupported";
-                _logger.LogWarning("SessionRecorder: non-H.264 GFX codec — desktop video not recorded (audio only)");
+                _loggedUnsupported = true;
+                _logger.LogWarning("SessionRecorder: non-H.264 GFX codec (no AVC yet) — desktop video skipped so far");
             }
             return;
         }
         if (bitstream.IsEmpty) return;
+        _anyAvc = true;
         VideoCodec ??= codec.ToString();
         if (!_loggedFirstVideo)
         {
@@ -97,25 +124,33 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
             var head = bitstream.Slice(0, Math.Min(16, bitstream.Length));
             _logger.LogInformation("SessionRecorder: first {Codec} AU {Len}B head={Head}", codec, bitstream.Length, Convert.ToHexString(head));
         }
-        // v1: record only the main (4:2:0) view; the AVC444 chroma-aux substream is dropped.
-        NoteEpoch(timestampMs);
-        if (Append(ref _desktopVideo, "desktop.h264", bitstream)) HasDesktop = true;
+        // v1: record only the main (4:2:0) view; the AVC444 chroma-aux substream is dropped. Use our
+        // monotonic arrival clock (the passed wire timestamp isn't a reliable monotonic PTS).
+        long now = _clock.ElapsedMilliseconds;
+        NoteEpoch(now);
+        if (Append(ref _desktopVideo, "desktop.h264", bitstream))
+        {
+            HasDesktop = true;
+            WriteFrameTs(ref _desktopVideoTs, "desktop.ts.txt", ref _desktopVideoFirstMs, ref _desktopVideoLastTs, now);
+        }
     }
 
     public void OnRemoteAudio(PcmFormat format, ReadOnlySpan<byte> pcm, long timestampMs)
     {
         if (_disposed || pcm.IsEmpty) return;
         _remoteAudioFmt ??= format;
-        NoteEpoch(timestampMs);
-        if (Append(ref _desktopAudio, "desktop.pcm", pcm)) { HasDesktop = true; _desktopAudioT.Note(timestampMs, pcm.Length); }
+        long now = _clock.ElapsedMilliseconds;
+        NoteEpoch(now);
+        if (Append(ref _desktopAudio, "desktop.pcm", pcm)) { HasDesktop = true; _desktopAudioT.Note(now, pcm.Length); }
     }
 
     public void OnMicAudio(PcmFormat format, ReadOnlySpan<byte> pcm, long timestampMs)
     {
         if (_disposed || pcm.IsEmpty) return;
         _micFmt ??= format;
-        NoteEpoch(timestampMs);
-        if (Append(ref _micAudio, "mic.pcm", pcm)) { HasCamera = true; _micAudioT.Note(timestampMs, pcm.Length); }
+        long now = _clock.ElapsedMilliseconds;
+        NoteEpoch(now);
+        if (Append(ref _micAudio, "mic.pcm", pcm)) { HasCamera = true; _micAudioT.Note(now, pcm.Length); }
     }
 
     public void OnCameraFrame(int width, int height, ReadOnlySpan<byte> frame, string mediaFormat, long timestampMs)
@@ -124,11 +159,51 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
         // Only raw NV12 is muxable without a decoder. Other formats (mjpeg/h264/i420/rgb) are skipped in v1.
         if (mediaFormat != "nv12") return;
         _cameraGeom ??= (width, height, 30);
-        NoteEpoch(timestampMs);
-        if (Append(ref _cameraVideo, "camera.nv12", frame)) { HasCamera = true; _cameraT.Note(timestampMs, frame.Length); }
+        long now = _clock.ElapsedMilliseconds;
+        NoteEpoch(now);
+        if (Append(ref _cameraVideo, "camera.nv12", frame))
+        {
+            HasCamera = true;
+            WriteFrameTs(ref _cameraVideoTs, "camera.ts.txt", ref _cameraVideoFirstMs, ref _cameraVideoLastTs, now);
+        }
+    }
+
+    // Diagnostic breadcrumbs from the decoder (DVC creates, audio msg types). Deduped to "first prefix"
+    // so a high-rate stream (audin DATA) logs once, not per packet — enough to tell us a channel was
+    // created and a message type arrived when a recording captured no audio.
+    private readonly HashSet<string> _seenDiag = new();
+    public void OnDiagnostic(string message)
+    {
+        if (_disposed) return;
+        // Key on text up to the first ' len=' so per-packet length variation collapses to one log line.
+        int cut = message.IndexOf(" len=", StringComparison.Ordinal);
+        string key = cut > 0 ? message.Substring(0, cut) : message;
+        bool isNew;
+        lock (_lock) { isNew = _seenDiag.Add(key); }
+        if (isNew) _logger.LogDebug("SessionRecorder media diag: {Message}", message);
     }
 
     private void NoteEpoch(long ms) { if (_epochMs < 0) _epochMs = ms; }
+
+    // Append one frame's presentation time (ms, relative to this stream's first frame) to its mkvmerge
+    // v2 timestamp sidecar. v2 requires STRICTLY INCREASING timestamps, so if two frames land in the same
+    // (or an earlier) ms we bump to lastTs+1 — monotonicity matters more than sub-ms precision here.
+    private void WriteFrameTs(ref StreamWriter? ts, string name, ref long firstMs, ref long lastTs, long ms)
+    {
+        try
+        {
+            lock (_lock)
+            {
+                if (_disposed) return;
+                if (ts == null) { ts = new StreamWriter(Path_(name)); ts.WriteLine("# timestamp format v2"); firstMs = ms; lastTs = -1; }
+                long rel = Math.Max(0, ms - firstMs);
+                if (rel <= lastTs) rel = lastTs + 1;
+                lastTs = rel;
+                ts.WriteLine(rel);
+            }
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "SessionRecorder: writing {Name} failed", name); }
+    }
 
     // Append to a lazily-opened raw file. Errors fault that stream (set to null-ish) but never throw to
     // the decode task — recording is best-effort.
@@ -154,39 +229,32 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
         {
             if (_disposed) return;
             _disposed = true;
-            foreach (var s in new[] { _desktopVideo, _desktopAudio, _cameraVideo, _micAudio })
+            foreach (var s in new Stream?[] { _desktopVideo, _desktopAudio, _cameraVideo, _micAudio })
             { try { s?.Flush(); s?.Dispose(); } catch { } }
+            try { _desktopVideoTs?.Flush(); _desktopVideoTs?.Dispose(); } catch { }
+            try { _cameraVideoTs?.Flush(); _cameraVideoTs?.Dispose(); } catch { }
         }
 
         try
         {
-            // Real camera frame rate from the timeline (the host samples the camera at irregular, often
-            // sub-30 intervals; muxing those at a fixed 30fps plays the video too fast). fps = (n-1)/span.
-            double camFps = _cameraGeom?.fps ?? 30;
-            if (_cameraT.Count > 1 && _cameraT.LastMs > _cameraT.FirstMs)
-            {
-                camFps = (_cameraT.Count - 1) * 1000.0 / (_cameraT.LastMs - _cameraT.FirstMs);
-                camFps = Math.Clamp(camFps, 1, 60);
-            }
-
             var manifest = new RecordingManifest
             {
                 VideoCodec = VideoCodec,
                 UnsupportedVideoCodec = UnsupportedVideoCodec,
                 DesktopVideo = _desktopVideo != null ? "desktop.h264" : null,
+                DesktopVideoTs = _desktopVideoTs != null ? "desktop.ts.txt" : null,
                 DesktopAudio = _desktopAudio != null ? "desktop.pcm" : null,
                 CameraVideo = _cameraVideo != null ? "camera.nv12" : null,
+                CameraVideoTs = _cameraVideoTs != null ? "camera.ts.txt" : null,
                 MicAudio = _micAudio != null ? "mic.pcm" : null,
                 RemoteAudio = _remoteAudioFmt,
                 MicFormat = _micFmt,
                 CameraWidth = _cameraGeom?.w ?? 0,
                 CameraHeight = _cameraGeom?.h ?? 0,
-                CameraFps = camFps,
-                // Audio start offsets so the mux can silence-pad the front (and gaps): desktop audio is
-                // aligned to the session epoch (== desktop video start); mic is aligned to the camera
-                // video start (the two go in the camera file together).
+                // Audio start offsets so the mux silence-pads the front to align with the video start:
+                // desktop audio → session epoch (== desktop video start); mic → camera video start.
                 DesktopAudioOffsetMs = _desktopAudioT.FirstMs >= 0 && _epochMs >= 0 ? Math.Max(0, _desktopAudioT.FirstMs - _epochMs) : 0,
-                MicOffsetMs = _micAudioT.FirstMs >= 0 && _cameraT.FirstMs >= 0 ? Math.Max(0, _micAudioT.FirstMs - _cameraT.FirstMs)
+                MicOffsetMs = _micAudioT.FirstMs >= 0 && _cameraVideoFirstMs >= 0 ? Math.Max(0, _micAudioT.FirstMs - _cameraVideoFirstMs)
                             : _micAudioT.FirstMs >= 0 && _epochMs >= 0 ? Math.Max(0, _micAudioT.FirstMs - _epochMs) : 0,
             };
             File.WriteAllText(Path_("manifest.json"), JsonSerializer.Serialize(manifest));
@@ -204,15 +272,15 @@ public sealed class RecordingManifest
     public string? VideoCodec { get; set; }
     public bool UnsupportedVideoCodec { get; set; }
     public string? DesktopVideo { get; set; }   // relative file name, or null if absent
+    public string? DesktopVideoTs { get; set; } // mkvmerge v2 per-frame timestamp sidecar
     public string? DesktopAudio { get; set; }
     public string? CameraVideo { get; set; }
+    public string? CameraVideoTs { get; set; }
     public string? MicAudio { get; set; }
     public PcmFormat? RemoteAudio { get; set; }
     public PcmFormat? MicFormat { get; set; }
     public int CameraWidth { get; set; }
     public int CameraHeight { get; set; }
-    /// <summary>Real (measured) camera frame rate, derived from frame timestamps.</summary>
-    public double CameraFps { get; set; }
     /// <summary>Milliseconds of silence to prepend to the desktop audio so it aligns with the video start.</summary>
     public long DesktopAudioOffsetMs { get; set; }
     /// <summary>Milliseconds of silence to prepend to the mic audio so it aligns with the camera video start.</summary>

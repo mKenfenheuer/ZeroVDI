@@ -53,4 +53,11 @@ public interface IRdpMediaSink
 
     /// <summary>A camera video frame redirected to the host (RDPECAM, client→server).</summary>
     void OnCameraFrame(int width, int height, ReadOnlySpan<byte> frame, string mediaFormat, long timestampMs);
+
+    /// <summary>
+    /// Low-volume diagnostic breadcrumbs from the media decoders (DVC channel creates, audio message
+    /// types) so a recording that captured no audio/camera can be diagnosed from the logs. Default no-op;
+    /// must stay cheap (the recorder just LogDebug's it). NOT for per-frame data.
+    /// </summary>
+    void OnDiagnostic(string message) { }
 }
