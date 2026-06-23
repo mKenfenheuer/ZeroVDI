@@ -15,10 +15,12 @@ namespace KSol.RDPGateway.Controllers
     public class RDPResourceUserAuthorizationsController : Controller
     {
         private readonly ApplicationDbContext _context;
+        private readonly RDP.CredentialProtector _credentials;
 
-        public RDPResourceUserAuthorizationsController(ApplicationDbContext context)
+        public RDPResourceUserAuthorizationsController(ApplicationDbContext context, RDP.CredentialProtector credentials)
         {
             _context = context;
+            _credentials = credentials;
         }
 
         // GET: RDPResourceUserAuthorizations
@@ -93,40 +95,78 @@ namespace KSol.RDPGateway.Controllers
         }
 
         // POST: RDPResourceUserAuthorizations/Edit/5
-        // To protect from overposting attacks, enable the specific properties you want to bind to.
-        // For more details, see http://go.microsoft.com/fwlink/?LinkId=317598.
+        // Binds only the user/resource link and the console ConnectionDefaults. The encrypted
+        // credential envelopes (Protected*) are NEVER bound here — they are managed separately by
+        // SetCredentials/ClearCredentials so a form submit can't clear or overpost them. We load the
+        // tracked entity and mutate the allowed fields rather than Update() a fresh graph (which would
+        // null the stored creds).
         [HttpPost]
         [ValidateAntiForgeryToken]
-        public async Task<IActionResult> Edit(string id, [Bind("Id,UserId,RDPResourceId")] RDPResourceUserAuthorization rDPResourceUserAuthorization)
+        public async Task<IActionResult> Edit(string id, [Bind("Id,UserId,RDPResourceId,ConnectionDefaults")] RDPResourceUserAuthorization rDPResourceUserAuthorization)
         {
             if (id != rDPResourceUserAuthorization.Id)
             {
                 return NotFound();
             }
 
+            var existing = await _context.RDPResourceUserAuthorizations.FindAsync(id);
+            if (existing == null)
+            {
+                return NotFound();
+            }
+
             if (ModelState.IsValid)
             {
-                try
-                {
-                    _context.Update(rDPResourceUserAuthorization);
-                    await _context.SaveChangesAsync();
-                }
-                catch (DbUpdateConcurrencyException)
-                {
-                    if (!RDPResourceUserAuthorizationExists(rDPResourceUserAuthorization.Id))
-                    {
-                        return NotFound();
-                    }
-                    else
-                    {
-                        throw;
-                    }
-                }
+                existing.UserId = rDPResourceUserAuthorization.UserId;
+                existing.RDPResourceId = rDPResourceUserAuthorization.RDPResourceId;
+                existing.ConnectionDefaults = rDPResourceUserAuthorization.ConnectionDefaults;
+                await _context.SaveChangesAsync();
                 return RedirectToAction(nameof(Index));
             }
             ViewData["RDPResourceId"] = new SelectList(_context.RDPResources, "Id", "Name", rDPResourceUserAuthorization.RDPResourceId);
             ViewData["UserId"] = new SelectList(_context.Users, "Id", "UserName", rDPResourceUserAuthorization.UserId);
             return View(rDPResourceUserAuthorization);
+        }
+
+        // POST: RDPResourceUserAuthorizations/SetCredentials/5
+        // Stores (encrypted) VM credentials for one (user, resource) authorization, enabling SSO
+        // auto-connect from the in-browser console. The plaintext password is never persisted or
+        // echoed back — only the DataProtection envelopes are stored.
+        [HttpPost]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> SetCredentials(string id, string username, string password, string? domain)
+        {
+            var auth = await _context.RDPResourceUserAuthorizations.FindAsync(id);
+            if (auth == null) return NotFound();
+
+            if (string.IsNullOrWhiteSpace(username) || string.IsNullOrEmpty(password))
+            {
+                TempData["CredError"] = "Username and password are both required to store credentials.";
+                return RedirectToAction(nameof(Edit), new { id });
+            }
+
+            auth.ProtectedUsername = _credentials.Protect(username);
+            auth.ProtectedPassword = _credentials.Protect(password);
+            auth.ProtectedDomain = _credentials.Protect(domain);
+            await _context.SaveChangesAsync();
+            TempData["CredStatus"] = "Stored VM credentials updated.";
+            return RedirectToAction(nameof(Edit), new { id });
+        }
+
+        // POST: RDPResourceUserAuthorizations/ClearCredentials/5
+        [HttpPost]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> ClearCredentials(string id)
+        {
+            var auth = await _context.RDPResourceUserAuthorizations.FindAsync(id);
+            if (auth == null) return NotFound();
+
+            auth.ProtectedUsername = null;
+            auth.ProtectedPassword = null;
+            auth.ProtectedDomain = null;
+            await _context.SaveChangesAsync();
+            TempData["CredStatus"] = "Stored VM credentials cleared.";
+            return RedirectToAction(nameof(Edit), new { id });
         }
 
         // GET: RDPResourceUserAuthorizations/Delete/5

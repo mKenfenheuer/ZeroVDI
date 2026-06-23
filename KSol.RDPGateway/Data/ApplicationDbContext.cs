@@ -23,6 +23,11 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
         // so the option set can evolve without a migration per field.
         builder.Entity<RDPResource>().OwnsOne(r => r.RdpOptions, b => b.ToJson());
 
+        // Per-(user, resource) console connect defaults, stored as a JSON column on the authorization
+        // (same rationale as RdpOptions above). Stored credentials are plain encrypted-string columns.
+        builder.Entity<RDPResourceUserAuthorization>()
+            .OwnsOne(a => a.ConnectionDefaults, b => b.ToJson());
+
         // Register the OpenIddict applications/authorizations/scopes/tokens entity sets so the
         // self-hosted OAuth/OIDC server persists its state in the same database.
         builder.UseOpenIddict();

@@ -101,12 +101,17 @@ Client.prototype.connect = function (creds) {
     this._handshakeDone = false;
 
     this.socket.onopen = function () {
-        // First frame: credentials JSON (text).
-        self.socket.send(JSON.stringify({
-            user: creds.user,
-            password: creds.password,
-            domain: creds.domain || "",
-        }));
+        // First frame: credentials JSON (text). SKIP this when the gateway already holds the
+        // credentials (SSO auto-connect, window.RDP_AUTOCONNECT): the relay then bridges immediately
+        // and would mis-read a credentials frame as RDP bytes. The browser still uses creds for the
+        // inner RDP auto-logon (Client Info PDU) via _startProtocol.
+        if (!window.RDP_AUTOCONNECT) {
+            self.socket.send(JSON.stringify({
+                user: creds.user,
+                password: creds.password,
+                domain: creds.domain || "",
+            }));
+        }
         self._status("connecting", "authenticating…");
     };
 

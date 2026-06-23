@@ -1,8 +1,14 @@
+@using KSol.RDPGateway.Models
 @{
     Layout = null;
     var resourceId = ViewData["ResourceId"] as string;
     var resourceName = ViewData["ResourceName"] as string;
     var defaultUser = ViewData["DefaultUser"] as string;
+    var autoConnect = ViewData["AutoConnect"] is true;
+    var storedUser = ViewData["StoredUser"] as string ?? defaultUser ?? "";
+    var storedPassword = ViewData["StoredPassword"] as string ?? "";
+    var storedDomain = ViewData["StoredDomain"] as string ?? "";
+    var defaults = ViewData["Defaults"] as ConnectionDefaults;
 }
 <!DOCTYPE html>
 <html lang="en">
@@ -109,34 +115,34 @@
             <form id="login-form" autocomplete="off">
                 <div class="mb-2">
                     <label for="vm-user">Username</label>
-                    <input class="form-control form-control-sm" id="vm-user" value="max" autocomplete="username" />
+                    <input class="form-control form-control-sm" id="vm-user" value="@storedUser" autocomplete="username" />
                 </div>
                 <div class="mb-2">
                     <label for="vm-pass">Password</label>
-                    <input class="form-control form-control-sm" id="vm-pass" type="password"  value="Start1234" autocomplete="current-password" />
+                    <input class="form-control form-control-sm" id="vm-pass" type="password" value="@storedPassword" autocomplete="current-password" />
                 </div>
                 <div class="mb-2">
                     <label for="vm-domain">Domain <span class="text-muted">(optional)</span></label>
-                    <input class="form-control form-control-sm" id="vm-domain" />
+                    <input class="form-control form-control-sm" id="vm-domain" value="@storedDomain" />
                 </div>
 
                 <details class="mb-2">
                     <summary style="cursor:pointer; font-size:.82rem; color:#bbb;">Session options</summary>
                     <div class="mt-2">
                         <div class="form-check form-check-sm">
-                            <input class="form-check-input" type="checkbox" id="opt-audio" checked />
+                            <input class="form-check-input" type="checkbox" id="opt-audio" checked="@(defaults?.Audio ?? true)" />
                             <label class="form-check-label" for="opt-audio" style="font-size:.82rem;">Remote sound</label>
                         </div>
                         <div class="form-check form-check-sm">
-                            <input class="form-check-input" type="checkbox" id="opt-clipboard" checked />
+                            <input class="form-check-input" type="checkbox" id="opt-clipboard" checked="@(defaults?.Clipboard ?? true)" />
                             <label class="form-check-label" for="opt-clipboard" style="font-size:.82rem;">Clipboard sync</label>
                         </div>
                         <div class="form-check form-check-sm">
-                            <input class="form-check-input" type="checkbox" id="opt-microphone" checked/>
+                            <input class="form-check-input" type="checkbox" id="opt-microphone" checked="@(defaults?.Microphone ?? true)"/>
                             <label class="form-check-label" for="opt-microphone" style="font-size:.82rem;">Microphone (prompts for permission)</label>
                         </div>
                         <div class="form-check form-check-sm">
-                            <input class="form-check-input" type="checkbox" id="opt-camera"  checked/>
+                            <input class="form-check-input" type="checkbox" id="opt-camera" checked="@(defaults?.Camera ?? true)"/>
                             <label class="form-check-label" for="opt-camera" style="font-size:.82rem;">Camera (prompts for permission)</label>
                         </div>
 
@@ -145,11 +151,12 @@
                            (most compatible). The GFX modes use MS-RDPEGFX surfaces; H.264 needs the host
                            to grant AVC over GFX (server GPU + the "Prioritize H.264/AVC 444" policy),
                            otherwise the host streams ClearCodec, which we also decode. *@
+                        @{ var gfxMode = defaults?.GfxMode ?? "off"; }
                         <select class="form-select form-select-sm" id="opt-gfx-mode" style="font-size:.82rem; max-width: 22rem;">
-                            <option value="off" selected>Legacy bitmaps (most compatible)</option>
-                            <option value="clearcodec">GFX — ClearCodec</option>
-                            <option value="avc420" selected>GFX — H.264 (AVC420), fallback ClearCodec</option>
-                            <option value="avc444">GFX — H.264 (AVC444), fallback ClearCodec</option>
+                            <option value="off" selected="@(gfxMode == "off")">Legacy bitmaps (most compatible)</option>
+                            <option value="clearcodec" selected="@(gfxMode == "clearcodec")">GFX — ClearCodec</option>
+                            <option value="avc420" selected="@(gfxMode == "avc420")">GFX — H.264 (AVC420), fallback ClearCodec</option>
+                            <option value="avc444" selected="@(gfxMode == "avc444")">GFX — H.264 (AVC444), fallback ClearCodec</option>
                         </select>
 
                         <div class="mt-2" style="font-size:.78rem; color:#999;">Visual quality</div>
@@ -234,6 +241,13 @@
     <script src="~/lib/rdpweb/protocol.js" asp-append-version="true"></script>
     <script src="~/lib/rdpweb/client.js" asp-append-version="true"></script>
 
+    <script>
+        // SSO auto-connect: when the gateway has stored credentials + defaults for this (user,
+        // resource), it renders these so the page connects on load without the login overlay. The
+        // gateway also has the credentials for NLA, so client.js must NOT send a credentials frame.
+        window.RDP_AUTOCONNECT = @(autoConnect ? "true" : "false");
+        window.RDP_DEFAULT_PERF = @(defaults?.PerformanceFlags ?? 0);
+    </script>
     <script>
         (function () {
             var wsUrl = "/ws/rdp/@resourceId";
@@ -447,6 +461,27 @@
             document.addEventListener("fullscreenchange", onViewportChange);
 
             window.addEventListener("beforeunload", function () { client.disconnect(); });
+
+            // ---- SSO auto-connect -------------------------------------------------------------------
+            // Reflect the stored PerformanceFlags onto the perf checkboxes (so the existing submit
+            // handler reassembles the same mask), then submit the form programmatically. The submit
+            // handler reads all fields/checkboxes exactly as for a manual login; the only difference is
+            // client.js suppresses the credentials WS frame (window.RDP_AUTOCONNECT), since the gateway
+            // already holds the credentials for NLA.
+            if (window.RDP_AUTOCONNECT) {
+                var PERF = window.RDP_PERF || {};
+                var mask = window.RDP_DEFAULT_PERF | 0;
+                document.querySelectorAll(".perf-flag").forEach(function (cb) {
+                    var bit = PERF[cb.getAttribute("data-perf")] || 0;
+                    var set = bit ? (mask & bit) !== 0 : false;
+                    var invert = cb.getAttribute("data-invert") === "1";
+                    // checked = "keep eye-candy": for an inverted (DISABLE_*) flag, checked means the
+                    // bit is NOT set; for a plain ENABLE_* flag, checked means the bit IS set.
+                    cb.checked = invert ? !set : set;
+                });
+                var form = document.getElementById("login-form");
+                if (form.requestSubmit) form.requestSubmit(); else form.dispatchEvent(new Event("submit", { cancelable: true }));
+            }
         })();
     </script>
 </body>

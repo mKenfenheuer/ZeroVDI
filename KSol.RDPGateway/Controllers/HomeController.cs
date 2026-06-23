@@ -16,14 +16,16 @@ public class HomeController : Controller
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly RdpFileGenerator _rdpGenerator;
     private readonly PaaTokenService _paa;
+    private readonly RDP.CredentialProtector _credentials;
 
-    public HomeController(ILogger<HomeController> logger, ApplicationDbContext context, UserManager<ApplicationUser> userManager, RdpFileGenerator rdpGenerator, PaaTokenService paa)
+    public HomeController(ILogger<HomeController> logger, ApplicationDbContext context, UserManager<ApplicationUser> userManager, RdpFileGenerator rdpGenerator, PaaTokenService paa, RDP.CredentialProtector credentials)
     {
         _logger = logger;
         _context = context;
         _userManager = userManager;
         _rdpGenerator = rdpGenerator;
         _paa = paa;
+        _credentials = credentials;
     }
 
     /// <summary>
@@ -138,6 +140,27 @@ public class HomeController : Controller
         ViewData["ResourceId"] = id;
         ViewData["ResourceName"] = authorization.RDPResource.Name ?? id;
         ViewData["DefaultUser"] = _userManager.GetUserName(User);
+
+        // SSO: when VM credentials are stored for this (user, resource), release them to this user's
+        // own browser (over the authenticated HTTPS session) so the console auto-connects without the
+        // login overlay. The browser needs the password for the inner RDP auto-logon (Client Info PDU);
+        // the gateway also uses the stored creds for NLA. Same trust boundary as a manual login — the
+        // win is storage + one-click connect.
+        if (authorization.HasStoredCredentials)
+        {
+            var user = _credentials.Unprotect(authorization.ProtectedUsername);
+            var password = _credentials.Unprotect(authorization.ProtectedPassword);
+            if (!string.IsNullOrEmpty(user) && password != null)
+            {
+                var defaults = authorization.ConnectionDefaults ?? new ConnectionDefaults();
+                ViewData["AutoConnect"] = true;
+                ViewData["StoredUser"] = user;
+                ViewData["StoredPassword"] = password;
+                ViewData["StoredDomain"] = _credentials.Unprotect(authorization.ProtectedDomain) ?? string.Empty;
+                ViewData["Defaults"] = defaults;
+            }
+        }
+
         return View();
     }
 

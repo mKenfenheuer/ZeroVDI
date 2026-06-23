@@ -22,6 +22,7 @@ public class RdpWebSocketController : Controller
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly IRDPGWResourceResolver _resolver;
     private readonly ProxmoxBackendProvider _backends;
+    private readonly CredentialProtector _credentials;
     private readonly ILogger<RdpWebSocketController> _logger;
 
     public RdpWebSocketController(
@@ -29,12 +30,14 @@ public class RdpWebSocketController : Controller
         UserManager<ApplicationUser> userManager,
         IRDPGWResourceResolver resolver,
         ProxmoxBackendProvider backends,
+        CredentialProtector credentials,
         ILogger<RdpWebSocketController> logger)
     {
         _context = context;
         _userManager = userManager;
         _resolver = resolver;
         _backends = backends;
+        _credentials = credentials;
         _logger = logger;
     }
 
@@ -84,8 +87,21 @@ public class RdpWebSocketController : Controller
         var (host, port) = resolved.Value;
         var kerberos = await ResolveKerberosAsync(resource);
 
+        // SSO: if VM credentials are stored for this (user, resource), decrypt them and pass them to
+        // the relay so the browser never sends a credentials frame. Decryption returning null (empty
+        // store, or keyring lost) falls back to the browser-supplied first-frame credentials.
+        RdpRelaySession.VmCredentials? presupplied = null;
+        if (authorization.HasStoredCredentials)
+        {
+            var user = _credentials.Unprotect(authorization.ProtectedUsername);
+            var password = _credentials.Unprotect(authorization.ProtectedPassword);
+            if (!string.IsNullOrEmpty(user) && password != null)
+                presupplied = new RdpRelaySession.VmCredentials(user, password,
+                    _credentials.Unprotect(authorization.ProtectedDomain));
+        }
+
         var socket = await HttpContext.WebSockets.AcceptWebSocketAsync();
-        var session = new RdpRelaySession(socket, host, port, kerberos, _logger);
+        var session = new RdpRelaySession(socket, host, port, kerberos, _logger, presupplied);
 
         await _resolver.OnConnectedAsync(userId, id);
         try

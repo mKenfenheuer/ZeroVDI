@@ -33,36 +33,52 @@ public sealed class RdpRelaySession
     private readonly string _host;
     private readonly int _port;
     private readonly KerberosAuth? _kerberos;
+    private readonly VmCredentials? _presuppliedCreds;
     private readonly ILogger _logger;
 
     // Optional live structural decode + recording of the decrypted RDP stream (shared RdpWire engine).
     // Enabled when RDPGW_DUMP_DIR is set. One recorder per session, fed by both pumps.
     private RdpRecorder? _recorder;
 
-    public RdpRelaySession(WebSocket ws, string host, int port, KerberosAuth? kerberos, ILogger logger)
+    public RdpRelaySession(WebSocket ws, string host, int port, KerberosAuth? kerberos, ILogger logger,
+        VmCredentials? presuppliedCreds = null)
     {
         _ws = ws;
         _host = host;
         _port = port;
         _kerberos = kerberos;
+        _presuppliedCreds = presuppliedCreds;
         _logger = logger;
     }
 
-    private sealed record VmCredentials(string user, string password, string? domain);
+    /// <summary>
+    /// VM credentials for the NLA/CredSSP handshake. Supplied either by the browser (first WS frame,
+    /// manual login) or by the controller from the per-(user, resource) stored credentials (SSO).
+    /// </summary>
+    public sealed record VmCredentials(string user, string password, string? domain);
 
     public async Task RunAsync(CancellationToken ct)
     {
-        // 1) First WS frame = JSON VM credentials (over the already-HTTPS browser connection).
+        // 1) Obtain VM credentials. With SSO (per-(user,resource) stored credentials), the controller
+        // pre-supplies them and the browser sends NO credentials frame. Otherwise the first WS frame is
+        // JSON VM credentials (over the already-HTTPS browser connection).
         VmCredentials creds;
-        try
+        if (_presuppliedCreds != null)
         {
-            creds = await ReadCredentialsAsync(ct);
+            creds = _presuppliedCreds;
         }
-        catch (Exception ex)
+        else
         {
-            await SendStatusAsync("error", "missing or invalid credentials", ct);
-            _logger.LogWarning(ex, "RDP relay: failed to read credentials frame");
-            return;
+            try
+            {
+                creds = await ReadCredentialsAsync(ct);
+            }
+            catch (Exception ex)
+            {
+                await SendStatusAsync("error", "missing or invalid credentials", ct);
+                _logger.LogWarning(ex, "RDP relay: failed to read credentials frame");
+                return;
+            }
         }
 
         await SendStatusAsync("connecting", null, ct);

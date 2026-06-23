@@ -6,6 +6,7 @@ using RDPGW.Extensions;
 using RDPGW.AspNetCore;
 using KSol.RDPGateway.RDP;
 using KSol.RDPGateway.Models;
+using Microsoft.AspNetCore.DataProtection;
 
 namespace KSol.RDPGateway;
 
@@ -41,6 +42,16 @@ public class Program
         // NT hash on every password set, enabling Digest and NTLM/Negotiate gateway auth without
         // asking the user for anything extra.
         builder.Services.AddScoped<IPasswordHasher<ApplicationUser>, DerivingPasswordHasher>();
+
+        // Persist the DataProtection keyring on disk so credentials encrypted with
+        // CredentialProtector (stored VM passwords) remain decryptable across restarts. The directory
+        // defaults to a subdir of the persisted /app/Data volume; override via DataProtection:KeysDir.
+        var dpKeysDir = builder.Configuration["DataProtection:KeysDir"]
+            ?? Path.Combine(builder.Environment.ContentRootPath, "Data", "dp-keys");
+        Directory.CreateDirectory(dpKeysDir);
+        builder.Services.AddDataProtection()
+            .PersistKeysToFileSystem(new DirectoryInfo(dpKeysDir));
+        builder.Services.AddSingleton<RDP.CredentialProtector>();
 
         builder.Services.AddControllersWithViews()
             .AddRazorRuntimeCompilation();
