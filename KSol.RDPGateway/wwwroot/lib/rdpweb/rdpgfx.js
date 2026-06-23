@@ -335,9 +335,27 @@ RdpGfx.prototype._onStartFrame = function (r) {
 RdpGfx.prototype._onEndFrame = function (r) {
     const frameId = r.u32le();
     this.framesDecoded++;
-    // queueDepth: real decodeQueueSize was tested and did NOT change the host's mid-large-frame pause, so
-    // it's not the flow gate. Back to QUEUE_DEPTH_UNAVAILABLE (the macOS app also sends 0 for most frames).
-    this._sendFrameAck(frameId, RDPGFX_QUEUE_DEPTH_UNAVAILABLE);
+    // FLOW CONTROL ([MS-RDPEGFX] 3.2.5.13 + 3.2.1.2 Unacknowledged Frames). GROUND TRUTH from the working
+    // mstsc MITM capture against THIS host (/tmp/rdpmitm, 3.6MB s2c, true wire order): mstsc sends a real
+    // FRAME_ACKNOWLEDGE (cmdId 0x0d) with queueDepth=0 for EVERY frame (45 frame-acks, almost all
+    // queueDepth=0x0, a few real buffered-byte counts like 0x55/0x15E/0x1778), PLUS a QOE ack per frame.
+    // The host's GFX scheduler is DRIVEN by this per-frame FRAME_ACK feedback loop — it streams a burst,
+    // waits for the ack, streams more. mstsc sends SUSPEND (0xFFFFFFFF) exactly ONCE, at the very END of
+    // the session (frame ~45, during teardown) — never up front.
+    //
+    // A previous experiment sent SUSPEND on the FIRST END_FRAME (then stopped FRAME_ACKs). That is the
+    // OPPOSITE of mstsc and it DETERMINISTICALLY stalls this host at frame 2-4: with no per-frame ack the
+    // host has no queueDepth signal and simply stops scheduling GFX (spec says it MUST NOT *block*, but
+    // "not block" ≠ "keep streaming" — this host throttles to nothing without the ack loop). So: mirror
+    // mstsc exactly — FRAME_ACK queueDepth=0 every frame + QOE every frame. (RDP_GFX_SUSPEND=1 forces the
+    // old up-front-SUSPEND behavior for A/B testing only.)
+    const RDPGFX_SUSPEND_FRAME_ACK = 0xFFFFFFFF;
+    const forceSuspend = (typeof window !== "undefined" && window.RDP_GFX_SUSPEND);
+    if (forceSuspend) {
+        if (!this._suspendSent) { this._sendFrameAck(frameId, RDPGFX_SUSPEND_FRAME_ACK); this._suspendSent = true; }
+    } else {
+        this._sendFrameAck(frameId, RDPGFX_QUEUE_DEPTH_UNAVAILABLE);
+    }
     this._sendQoeFrameAck(frameId);
     if (!(typeof window !== "undefined" && window.RDP_GFX_QUIET))
         this._log("rdpgfx: END_FRAME " + frameId + " acked (FRAME_ACK+QOE), totalDecoded=" + this.framesDecoded);

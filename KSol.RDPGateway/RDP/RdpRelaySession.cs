@@ -283,8 +283,13 @@ public sealed class RdpRelaySession
         private readonly RdpSession _session;
         private readonly StreamWriter? _meta;
         private readonly System.Diagnostics.Stopwatch _sw = System.Diagnostics.Stopwatch.StartNew();
-        private readonly object _gate = new();
         private readonly ILogger _logger;
+        // The structural decode (RdpSession.Feed) must NEVER run on the relay's hot path — it's diagnostic
+        // only, and blocking the s2c pump on a per-chunk decode back-pressures the host (it pauses mid-
+        // frame, which we were debugging). So Feed() just enqueues a copy; a single background task drains
+        // the queue and decodes serially (RdpSession is stateful/not thread-safe, so one consumer only).
+        private readonly System.Threading.Channels.Channel<(RdpDir dir, long ms, byte[] data)> _queue;
+        private readonly Task _drain;
 
         private RdpRecorder(string dir, ILogger logger)
         {
@@ -292,6 +297,9 @@ public sealed class RdpRelaySession
             _sink = new RdpLogSink(dir, echoConsole: false);
             _session = new RdpSession(_sink);
             try { _meta = new StreamWriter(Path.Combine(dir, "meta.txt")) { AutoFlush = true }; } catch { _meta = null; }
+            _queue = System.Threading.Channels.Channel.CreateUnbounded<(RdpDir, long, byte[])>(
+                new System.Threading.Channels.UnboundedChannelOptions { SingleReader = true });
+            _drain = Task.Run(DrainAsync);
         }
 
         public static RdpRecorder? TryCreate(ILogger logger)
@@ -302,56 +310,94 @@ public sealed class RdpRelaySession
             catch (Exception ex) { logger.LogDebug(ex, "RDP recorder: init failed"); return null; }
         }
 
+        // Hot-path: copy + enqueue only. Never blocks on decode. (The copy is required because the
+        // caller's buffer is reused after this returns.)
         public void Feed(RdpDir dir, ReadOnlySpan<byte> data)
         {
             if (data.Length == 0) return;
-            // RdpSession is stateful and not thread-safe; both pumps run concurrently, so serialize. The
-            // copy is required because the caller's buffer is reused after this returns.
-            var copy = data.ToArray();
-            lock (_gate)
+            _queue.Writer.TryWrite((dir, _sw.ElapsedMilliseconds, data.ToArray()));
+        }
+
+        private async Task DrainAsync()
+        {
+            try
             {
-                try
+                await foreach (var (dir, ms, data) in _queue.Reader.ReadAllAsync())
                 {
-                    _meta?.WriteLine($"{_sw.ElapsedMilliseconds,8} {(dir == RdpDir.ClientToServer ? "C2S" : "S2C")} {copy.Length}");
-                    _session.Feed(dir, copy);
+                    try
+                    {
+                        _meta?.WriteLine($"{ms,8} {(dir == RdpDir.ClientToServer ? "C2S" : "S2C")} {data.Length}");
+                        _session.Feed(dir, data);
+                    }
+                    catch (Exception ex) { _logger.LogDebug(ex, "RDP recorder: decode error"); }
                 }
-                catch (Exception ex) { _logger.LogDebug(ex, "RDP recorder: decode error"); }
             }
+            catch (Exception ex) { _logger.LogDebug(ex, "RDP recorder: drain ended"); }
         }
 
         public void Dispose()
         {
-            lock (_gate) { try { _meta?.Dispose(); } catch { } try { _sink.Dispose(); } catch { } }
+            _queue.Writer.TryComplete();
+            try { _drain.Wait(TimeSpan.FromSeconds(5)); } catch { }
+            try { _meta?.Dispose(); } catch { }
+            try { _sink.Dispose(); } catch { }
         }
     }
 
+    // Host→browser relay. CRITICAL: the host paces its GFX stream on the gateway draining its TCP socket.
+    // If we read-then-send in one loop, a slow browser WebSocket send back-pressures the host's TCP window
+    // and the host PAUSES MID-FRAME (observed: it stops at a fixed ~11KB into a 22KB frame and never
+    // resumes). A working mstsc receives 110KB frames in one uninterrupted burst — because its receiver
+    // drains promptly. So we split: a READER that drains the host SSL into a bounded in-memory queue as
+    // fast as the host sends, and a WRITER that forwards to the browser at the browser's pace. The host
+    // never sees our WebSocket latency. The bound caps memory; if the browser falls hopelessly behind we
+    // fail the session rather than buffer without limit.
     private async Task PumpSslToWsAsync(SslStream ssl, CancellationToken ct)
     {
-        var buffer = new byte[16 * 1024];
-        long total = 0;
-        long chunks = 0;
-        using var dump = OpenDump("our_s2c.bin");
+        // Bounded so a stuck browser can't OOM us. ~256 chunks * 16KB ≈ 4MB max in flight.
+        var pipe = System.Threading.Channels.Channel.CreateBounded<byte[]>(
+            new System.Threading.Channels.BoundedChannelOptions(256)
+            {
+                SingleReader = true,
+                SingleWriter = true,
+                FullMode = System.Threading.Channels.BoundedChannelFullMode.Wait,
+            });
+        long total = 0, chunks = 0;
+
+        // READER: drain host SSL promptly into the pipe. This is what keeps the host streaming.
+        var reader = Task.Run(async () =>
+        {
+            var buffer = new byte[16 * 1024];
+            using var dump = OpenDump("our_s2c.bin");
+            try
+            {
+                while (!ct.IsCancellationRequested)
+                {
+                    int n = await ssl.ReadAsync(buffer, ct);
+                    if (n == 0) { _logger.LogWarning("RDP relay: host→ws reader: host closed (0 bytes) after {Total} bytes / {Chunks} chunks", total, chunks); break; }
+                    total += n;
+                    chunks++;
+                    var slice = buffer.AsMemory(0, n).ToArray();
+                    if (dump != null) { await dump.WriteAsync(slice, ct); await dump.FlushAsync(ct); }
+                    _recorder?.Feed(RdpDir.ServerToClient, slice);
+                    await pipe.Writer.WriteAsync(slice, ct);
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { _logger.LogError(ex, "RDP relay: host→ws reader FAILED after {Total} bytes", total); }
+            finally { pipe.Writer.TryComplete(); }
+        }, ct);
+
+        // WRITER: forward to the browser at the browser's pace (may block on a slow WS without affecting
+        // the reader / the host).
         try
         {
-            while (!ct.IsCancellationRequested)
-            {
-                int n = await ssl.ReadAsync(buffer, ct);
-                if (n == 0) { _logger.LogWarning("RDP relay: host→ws pump: host closed (0 bytes) after {Total} bytes / {Chunks} chunks", total, chunks); break; }
-                total += n;
-                chunks++;
-                if (dump != null) { await dump.WriteAsync(buffer.AsMemory(0, n), ct); await dump.FlushAsync(ct); }
-                _recorder?.Feed(RdpDir.ServerToClient, buffer.AsSpan(0, n));
-                await _ws.SendAsync(buffer.AsMemory(0, n), WebSocketMessageType.Binary,
-                    endOfMessage: true, ct);
-            }
+            await foreach (var slice in pipe.Reader.ReadAllAsync(ct))
+                await _ws.SendAsync(slice, WebSocketMessageType.Binary, endOfMessage: true, ct);
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex)
-        {
-            // This is the pump that feeds the browser; if it dies the screen freezes. Surface the real
-            // exception (the macOS AppleCrypto SslStream post-handshake read quirk shows up here).
-            _logger.LogError(ex, "RDP relay: host→ws pump FAILED after {Total} bytes", total);
-        }
+        catch (Exception ex) { _logger.LogError(ex, "RDP relay: host→ws writer FAILED"); }
+        finally { try { await reader; } catch { } }
     }
 
     private async Task PumpWsToSslAsync(SslStream ssl, CancellationToken ct)

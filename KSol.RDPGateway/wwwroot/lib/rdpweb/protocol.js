@@ -485,13 +485,17 @@ function clientNetworkData(channels) {
     }
     return w.toArray();
 }
-// CS_MCS_MSGCHANNEL (0xC006) and CS_MULTITRANSPORT (0xC00A) client data blocks. A host that
-// advertises EXTENDED_CLIENT_DATA_SUPPORTED + DYNVC_GFX_PROTOCOL in its negotiation response expects
-// a GFX-capable client to include BOTH blocks in the GCC user data; if we set the GFX early-cap flag
-// but omit them, the host rejects our MCS Connect Initial (TCP drop right after we send it). Each is
-// a 4-byte header (type + length=8) + a 4-byte flags field. We advertise the blocks with flags=0 —
-// structurally present (so the GFX path is satisfied) while requesting no UDP multitransport (which
-// we don't implement; the relay is TCP-only).
+// NOTE: we deliberately DO NOT send CS_MCS_MSGCHANNEL (0xC006) or CS_MULTITRANSPORT (0xC00A).
+// A byte-diff of our Connect Initial vs a working mstsc session against the SAME host showed mstsc
+// sends NEITHER block (it sets the GFX early-cap flag and streams 3.6MB fine) — so they are NOT
+// required for the GFX path, contrary to an earlier note here. Worse, sending CS_MCS_MSGCHANNEL makes
+// the host GRANT a message channel (SC_MCS_MSGCHANNEL → MCS channel 1007) that must then be JOINED
+// ([MS-RDPBCGR] 3.2.5.3.2/3.2.5.3.3) and serviced for network auto-detect; a half-finished message
+// channel made the host throttle GFX to ~nothing after ~3 frames (the long-standing stall). Matching
+// mstsc — omit both blocks, don't set anything that opens a channel we won't service — is the fix.
+// (CS_MULTITRANSPORT is only for the RDP-UDP multitransport layer [MS-RDPEMT], which the TCP-only
+// relay cannot carry anyway.) Keep clientMcsMsgChannelData/clientMultitransportData defined but unused
+// in case a future host genuinely requires them; gate behind a flag if that ever resurfaces.
 // CS_CLUSTER (0xC004): FreeRDP sends this unconditionally with flags = 0x0D (verified by wire dump) =
 // REDIRECTION_SUPPORTED(0x01) | (REDIRECTION_VERSION4 (3) << 2 = 0x0C). redirectedSessionId 0.
 function clientClusterData() {
@@ -529,17 +533,14 @@ function clientUserData(selectedProtocol, width, height, channels) {
     if (rdpTryGfx()) w.bytes(clientClusterData());
     w.bytes(clientSecurityData());
     w.bytes(clientNetworkData(channels));
-    if (rdpTryGfx()) {
-        w.bytes(clientMcsMsgChannelData());
-        w.bytes(clientMultitransportData());
-    }
+    // CS_MCS_MSGCHANNEL / CS_MULTITRANSPORT intentionally omitted — see note above clientClusterData().
     return w.toArray();
 }
 
 // Parse the server user data (after GCC) to recover the global (I/O) MCS channel id and the
 // SC_CORE earlyCapabilityFlags (for RNS_UD_SC_SKIP_CHANNELJOIN_SUPPORTED).
 function parseServerUserData(r) {
-    const out = { mcsChannelId: 1003, skipChannelJoin: false, channelIds: [] };
+    const out = { mcsChannelId: 1003, skipChannelJoin: false, channelIds: [], msgChannelId: 0 };
     while (r.remaining() >= 4) {
         const dataType = r.u16le();
         let dataLen = r.u16le();
@@ -564,7 +565,16 @@ function parseServerUserData(r) {
                 for (let i = 0; i < channelCount; i++) out.channelIds.push(r.u16le());
                 break;
             }
-            // SC_SECURITY (0x0C02), SC_MSGCHANNEL (0x0C04), SC_MULTITRANSPORT (0x0C08): skipped.
+            case 0x0C04: { // SC_MCS_MSGCHANNEL ([MS-RDPBCGR] 2.2.1.4.5): MCSChannelId (2 bytes).
+                // The server grants a message channel because we advertised CS_MCS_MSGCHANNEL. Per
+                // 3.2.5.3.3 the client MUST join this channel during the channel-join phase — otherwise
+                // the host's connection sequence never completes the message channel and it gates
+                // network auto-detect (we set NETCHAR_AUTODETECT), throttling GFX bandwidth to ~nothing
+                // after the first few frames. Capture it so _onAttachUserConfirm joins it.
+                if (body >= 2) out.msgChannelId = r.u16le();
+                break;
+            }
+            // SC_SECURITY (0x0C02), SC_MULTITRANSPORT (0x0C08): skipped.
             default: break;
         }
         r.o = end; // jump to the next user data header regardless of how much we consumed
@@ -1244,6 +1254,7 @@ RdpProtocol.prototype._onConnectResponse = function (r) {
     const parsed = parseServerUserData(ud);
     this.mcsChannelId = parsed.mcsChannelId;
     this.skipChannelJoin = parsed.skipChannelJoin;
+    this.msgChannelId = parsed.msgChannelId; // SC_MCS_MSGCHANNEL grant (0 if not granted)
     // Map the positional SC_NET channel ids back to our static channel names (both directions).
     this.staticChannelIds = {};
     this.staticChannelById = {};
@@ -1282,6 +1293,10 @@ RdpProtocol.prototype._onAttachUserConfirm = function (r) {
         const id = this.staticChannelIds[name];
         if (id) this.joinQueue.push(id);
     }
+    // Join the MCS message channel if the server granted one (we advertised CS_MCS_MSGCHANNEL).
+    // [MS-RDPBCGR] 3.2.5.3.3: the message channel MUST be joined like any other channel; skipping it
+    // leaves the host's connection sequence waiting and it throttles GFX (network-autodetect gate).
+    if (this.msgChannelId) this.joinQueue.push(this.msgChannelId);
     this.state = ST.JOIN_CHANNELS;
     this._sendNextChannelJoin();
 };
