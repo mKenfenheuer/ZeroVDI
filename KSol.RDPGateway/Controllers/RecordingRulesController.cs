@@ -36,7 +36,7 @@ public class RecordingRulesController : Controller
     [HttpPost]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Create(
-        [Bind("Order,Scope,Action,Enabled,UserId,RDPResourceId,RoleName,Description")] RecordingRule rule)
+        [Bind("Order,Scope,Action,Enabled,NotifyUser,UserId,RDPResourceId,RoleName,Description")] RecordingRule rule)
     {
         if (ModelState.IsValid)
         {
@@ -59,7 +59,7 @@ public class RecordingRulesController : Controller
     [HttpPost]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Edit(int id,
-        [Bind("Id,Order,Scope,Action,Enabled,UserId,RDPResourceId,RoleName,Description")] RecordingRule rule)
+        [Bind("Id,Order,Scope,Action,Enabled,NotifyUser,UserId,RDPResourceId,RoleName,Description")] RecordingRule rule)
     {
         if (id != rule.Id) return NotFound();
         if (ModelState.IsValid)

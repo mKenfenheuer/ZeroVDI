@@ -46,7 +46,10 @@
                     </td>
                     <td>
                         @if (r.Action == KSol.RDPGateway.Models.RecordingRuleAction.Allow)
-                        { <span class="badge bg-success">Record</span> }
+                        {
+                            <span class="badge bg-success">Record</span>
+                            @if (r.NotifyUser) { <span class="badge bg-info text-dark ms-1" title="User is notified the session is recorded">Notify</span> }
+                        }
                         else { <span class="badge bg-secondary">Don't record</span> }
                     </td>
                     <td>@(r.Enabled ? "Yes" : "No")</td>

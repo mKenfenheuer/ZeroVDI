@@ -21,7 +21,12 @@ public sealed class RecordingPolicy
         _defaultEnabled = config.GetValue("Recording:DefaultEnabled", false);
     }
 
-    public async Task<bool> ShouldRecordAsync(string userId, string resourceId, IEnumerable<string> roles)
+    /// <summary>The recording decision for a session: whether to record, and whether to notify the user.</summary>
+    /// <param name="Record">True if the session should be recorded.</param>
+    /// <param name="Notify">True if the user should see a "this session is recorded" notice (only meaningful when <paramref name="Record"/> is true).</param>
+    public readonly record struct RecordingDecision(bool Record, bool Notify);
+
+    public async Task<RecordingDecision> EvaluateAsync(string userId, string resourceId, IEnumerable<string> roles)
     {
         var roleSet = roles as ICollection<string> ?? roles.ToList();
         var rules = await _db.RecordingRules
@@ -40,9 +45,16 @@ public sealed class RecordingPolicy
                 _ => false,
             };
             if (match)
-                return rule.Action == RecordingRuleAction.Allow;
+            {
+                var record = rule.Action == RecordingRuleAction.Allow;
+                return new RecordingDecision(record, record && rule.NotifyUser);
+            }
         }
 
-        return _defaultEnabled;
+        // No rule matched: the global default decides recording, and (when on) notifies by default.
+        return new RecordingDecision(_defaultEnabled, _defaultEnabled);
     }
+
+    public async Task<bool> ShouldRecordAsync(string userId, string resourceId, IEnumerable<string> roles)
+        => (await EvaluateAsync(userId, resourceId, roles)).Record;
 }

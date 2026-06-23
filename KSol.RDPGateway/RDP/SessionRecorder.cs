@@ -49,7 +49,7 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
     private StreamWriter? _desktopVideoTs;
     private StreamWriter? _cameraVideoTs;
     private long _desktopVideoFirstMs = -1, _desktopVideoLastTs = -1;
-    private long _cameraVideoFirstMs = -1, _cameraVideoLastTs = -1;
+    private long _cameraVideoLastTs = -1;
 
     // Audio timing (first arrival ms) so the mux can silence-pad the front to align with video start.
     private long _epochMs = -1;                          // first media arrival across the whole session
@@ -161,11 +161,58 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
         _cameraGeom ??= (width, height, 30);
         long now = _clock.ElapsedMilliseconds;
         NoteEpoch(now);
+        // Camera timestamps are EPOCH-relative (not first-camera-frame-relative) so the camera track
+        // spans the whole session and stays aligned with desktop/audio. Backfill black frames for the
+        // gap since the last written camera frame (covers the lead-in before the camera ever started and
+        // any mid-session pause where the client stopped sending NV12).
+        PadCameraBlack(now, width, height);
         if (Append(ref _cameraVideo, "camera.nv12", frame))
         {
             HasCamera = true;
-            WriteFrameTs(ref _cameraVideoTs, "camera.ts.txt", ref _cameraVideoFirstMs, ref _cameraVideoLastTs, now);
+            WriteCameraTs(now);
+            _cameraLastEpochMs = now;
         }
+    }
+
+    // Camera timestamp sidecar entry, epoch-relative. (Separate from the generic WriteFrameTs because the
+    // camera timeline is anchored at the session epoch, while desktop video is anchored at its own first
+    // frame.)
+    private void WriteCameraTs(long now)
+    {
+        long rel = _epochMs >= 0 ? Math.Max(0, now - _epochMs) : 0;
+        WriteFrameTsAbs(ref _cameraVideoTs, "camera.ts.txt", ref _cameraVideoLastTs, rel);
+    }
+
+    // Fill [_cameraLastEpochMs, now) with black NV12 frames at BlackPadCadenceMs cadence so inactive
+    // periods render as black instead of a frozen frame (or a too-short track). The very first call
+    // (last < 0) backfills from the session epoch — i.e. the lead-in before the camera turned on.
+    private void PadCameraBlack(long nowMs, int width, int height)
+    {
+        if (_epochMs < 0) return;
+        long fromEpochRel = _cameraLastEpochMs < 0
+            ? 0                                   // first ever camera frame: pad from session start
+            : Math.Max(0, _cameraLastEpochMs - _epochMs) + BlackPadCadenceMs;
+        long toEpochRel = Math.Max(0, nowMs - _epochMs);
+        if (toEpochRel - fromEpochRel < BlackPadCadenceMs) return; // gap too small to bother
+        var black = GetBlackFrame(width, height);
+        for (long t = fromEpochRel; t + BlackPadCadenceMs <= toEpochRel; t += BlackPadCadenceMs)
+        {
+            if (!Append(ref _cameraVideo, "camera.nv12", black)) return;
+            HasCamera = true;
+            WriteFrameTsAbs(ref _cameraVideoTs, "camera.ts.txt", ref _cameraVideoLastTs, t);
+        }
+    }
+
+    private byte[] GetBlackFrame(int width, int height)
+    {
+        if (_blackNv12 != null) return _blackNv12;
+        // NV12: width*height Y bytes (0x00 = black) then width*height/2 interleaved UV bytes (0x80 = neutral chroma).
+        int ySize = width * height, uvSize = width * height / 2;
+        var buf = new byte[ySize + uvSize];
+        // Y already 0; set UV plane to 0x80.
+        Array.Fill(buf, (byte)0x80, ySize, uvSize);
+        _blackNv12 = buf;
+        return buf;
     }
 
     // Diagnostic breadcrumbs from the decoder (DVC creates, audio msg types). Deduped to "first prefix"
@@ -175,9 +222,15 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
     public void OnDiagnostic(string message)
     {
         if (_disposed) return;
-        // Key on text up to the first ' len=' so per-packet length variation collapses to one log line.
-        int cut = message.IndexOf(" len=", StringComparison.Ordinal);
-        string key = cut > 0 ? message.Substring(0, cut) : message;
+        // Key on text up to the first variable token so per-packet variation collapses to one log line
+        // (we still log the FIRST occurrence in full, including its head/len, which is what we want).
+        int cut = message.Length;
+        foreach (var tok in new[] { " len=", " bodyLen=", " fmtNo=" })
+        {
+            int i = message.IndexOf(tok, StringComparison.Ordinal);
+            if (i >= 0 && i < cut) cut = i;
+        }
+        string key = message.Substring(0, cut);
         bool isNew;
         lock (_lock) { isNew = _seenDiag.Add(key); }
         if (isNew) _logger.LogDebug("SessionRecorder media diag: {Message}", message);
@@ -197,6 +250,25 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
                 if (_disposed) return;
                 if (ts == null) { ts = new StreamWriter(Path_(name)); ts.WriteLine("# timestamp format v2"); firstMs = ms; lastTs = -1; }
                 long rel = Math.Max(0, ms - firstMs);
+                if (rel <= lastTs) rel = lastTs + 1;
+                lastTs = rel;
+                ts.WriteLine(rel);
+            }
+        }
+        catch (Exception ex) { _logger.LogDebug(ex, "SessionRecorder: writing {Name} failed", name); }
+    }
+
+    // Like WriteFrameTs but the caller already computed the absolute (stream-relative) ms — used for the
+    // camera, whose timeline is anchored at the session epoch (so black-pad and real frames share one
+    // origin). Still enforces strict monotonicity for mkvmerge v2.
+    private void WriteFrameTsAbs(ref StreamWriter? ts, string name, ref long lastTs, long rel)
+    {
+        try
+        {
+            lock (_lock)
+            {
+                if (_disposed) return;
+                if (ts == null) { ts = new StreamWriter(Path_(name)); ts.WriteLine("# timestamp format v2"); lastTs = -1; }
                 if (rel <= lastTs) rel = lastTs + 1;
                 lastTs = rel;
                 ts.WriteLine(rel);
@@ -225,6 +297,11 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
     /// <summary>Closes the raw streams and writes manifest.json describing what was captured.</summary>
     public void Dispose()
     {
+        // Trailing black padding: if the camera was active but the session ran on after the last camera
+        // frame, fill to "now" with black so the camera track spans the full session (matches desktop).
+        if (_cameraLastEpochMs >= 0 && _cameraGeom is { } g)
+            PadCameraBlack(_clock.ElapsedMilliseconds, g.w, g.h);
+
         lock (_lock)
         {
             if (_disposed) return;
@@ -251,11 +328,12 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
                 MicFormat = _micFmt,
                 CameraWidth = _cameraGeom?.w ?? 0,
                 CameraHeight = _cameraGeom?.h ?? 0,
-                // Audio start offsets so the mux silence-pads the front to align with the video start:
-                // desktop audio → session epoch (== desktop video start); mic → camera video start.
+                // Audio start offsets so the mux silence-pads the front to align with the video start.
+                // Both video tracks are now anchored at the session epoch (desktop ts starts at its first
+                // frame ≈ epoch; camera ts is explicitly epoch-relative incl. black lead-in), so both
+                // audio offsets are simply "ms from session epoch to first audio sample".
                 DesktopAudioOffsetMs = _desktopAudioT.FirstMs >= 0 && _epochMs >= 0 ? Math.Max(0, _desktopAudioT.FirstMs - _epochMs) : 0,
-                MicOffsetMs = _micAudioT.FirstMs >= 0 && _cameraVideoFirstMs >= 0 ? Math.Max(0, _micAudioT.FirstMs - _cameraVideoFirstMs)
-                            : _micAudioT.FirstMs >= 0 && _epochMs >= 0 ? Math.Max(0, _micAudioT.FirstMs - _epochMs) : 0,
+                MicOffsetMs = _micAudioT.FirstMs >= 0 && _epochMs >= 0 ? Math.Max(0, _micAudioT.FirstMs - _epochMs) : 0,
             };
             File.WriteAllText(Path_("manifest.json"), JsonSerializer.Serialize(manifest));
         }

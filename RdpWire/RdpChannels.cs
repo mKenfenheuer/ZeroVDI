@@ -104,10 +104,16 @@ internal static class RdpChannels
         switch (msgType)
         {
             case 0x07: // SNDC_FORMATS (msgType 0x07 server formats) — [MS-RDPEA] 2.2.2.1
-                ParseSndFormats(s.SndFormats, body);
-                s.Media?.OnDiagnostic($"rdpsnd SNDC_FORMATS: {s.SndFormats.Count} PCM format(s)");
+            {
+                int total = ParseSndFormats(s.SndFormats, body);
+                int hn = Math.Min(28, body.Length);
+                s.Media?.OnDiagnostic($"rdpsnd SNDC_FORMATS: total={total} pcm={s.SndFormats.Count} bodyLen={body.Length} head={Convert.ToHexString(body.Slice(0, hn))}");
                 break;
-            case 0x01: // SNDC_WAVEINFO: wTimeStamp(2) wFormatNo(2) cBlockNo(1) bPad(3) head(4)
+            }
+            case 0x02: // SNDC_WAVE — the "WaveInfo" PDU that STARTS a wave ([MS-RDPEA] 2.2.3.3):
+                       // wTimeStamp(2) wFormatNo(2) cBlockNo(1) bPad(3) Data(4 — first 4 audio bytes).
+                       // The REST of the wave follows as a separate bare PDU (no SNDPROLOG): bPad(4) Data.
+                s.Media?.OnDiagnostic($"rdpsnd WaveInfo(0x02) fmtNo={(body.Length >= 4 ? body[2] | (body[3] << 8) : -1)} bodyLen={body.Length}");
                 if (body.Length >= 12)
                 {
                     int formatNo = body[2] | (body[3] << 8);
@@ -115,25 +121,34 @@ internal static class RdpChannels
                 }
                 break;
             case 0x0D: // SNDC_WAVE2: wTimeStamp(2) wFormatNo(2) cBlockNo(1) bPad(3) dwAudioTimeStamp(4) data
+                s.Media?.OnDiagnostic($"rdpsnd Wave2 fmtNo={(body.Length >= 4 ? body[2] | (body[3] << 8) : -1)} bodyLen={body.Length}");
                 if (body.Length >= 12)
                 {
                     int formatNo = body[2] | (body[3] << 8);
                     EmitRemoteWave(s, dir, formatNo, body.Slice(12).ToArray());
                 }
                 break;
+            default:
+                s.Media?.OnDiagnostic($"rdpsnd msg 0x{msgType:X2} bodyLen={body.Length}");
+                break;
         }
     }
 
-    // SNDC_FORMATS body: dwFlags(4) dwVolume(4) dwPitch(4) wDGramPort(2) wNumberOfFormats(2) wVersion(2)
-    // bPad(1) then wNumberOfFormats * TS_AUDIO_FORMAT. Keep only PCM (wFormatTag 1); the agreed index
-    // space (wFormatNo in WAVE PDUs) is the list of PCM formats, matching rdpsnd.js.
-    private static void ParseSndFormats(List<PcmFormat> formats, ReadOnlySpan<byte> body)
+    // SNDC_FORMATS body (Server Audio Formats and Version PDU, [MS-RDPEA] 2.2.2.1, the part AFTER the
+    // 4-byte SNDPROLOG): dwFlags(4) dwVolume(4) dwPitch(4) wDGramPort(2) wNumberOfFormats(2)
+    // cLastBlockConfirmed(1) wVersion(2) bPad(1) = 20-byte preamble, then wNumberOfFormats * AUDIO_FORMAT.
+    // (Earlier this was parsed as a 19-byte preamble — dropping cLastBlockConfirmed — which shifted every
+    // AUDIO_FORMAT by one byte so NO wFormatTag matched PCM. The host advertises 30 formats incl. PCM.)
+    // Keep only PCM (wFormatTag 1). The agreed index space (wFormatNo in WAVE PDUs) is the PCM-only
+    // subset in advertised order — see rdpsnd.js: the client advertises ONLY PCM, so the agreed list ==
+    // the server's PCM formats. Returns the TOTAL number of advertised formats (PCM + non-PCM) for diag.
+    private static int ParseSndFormats(List<PcmFormat> formats, ReadOnlySpan<byte> body)
     {
-        if (body.Length < 20) return;
         formats.Clear();
+        if (body.Length < 20) return 0;
         var c = new Cur(body);
         c.U32le(); c.U32le(); c.U32le(); c.U16le();
-        int count = c.U16le(); c.U16le(); c.U8();
+        int count = c.U16le(); c.U8(); c.U16le(); c.U8();
         for (int i = 0; i < count && c.Remaining >= 18; i++)
         {
             int wFormatTag = c.U16le();
@@ -147,14 +162,16 @@ internal static class RdpChannels
             if (wFormatTag == 0x0001) // WAVE_FORMAT_PCM
                 formats.Add(new PcmFormat((int)nSamplesPerSec, wBitsPerSample, nChannels));
         }
+        return count;
     }
 
     private static void EmitRemoteWave(RdpSession s, RdpDir dir, int formatNo, byte[] pcm)
     {
-        if (s.Media == null || pcm.Length == 0) return;
-        var fmt = formatNo >= 0 && formatNo < s.SndFormats.Count ? s.SndFormats[formatNo]
-                : s.SndFormats.Count > 0 ? s.SndFormats[0]
-                : new PcmFormat(44100, 16, 2);
+        if (s.Media == null || pcm.Length == 0 || s.SndFormats.Count == 0) return;
+        // wFormatNo indexes the AGREED format list, which (matching the browser's rdpsnd.js — it
+        // advertises ONLY PCM, so the agreed list = the server's PCM subset in advertised order) is our
+        // PCM-only `SndFormats`. Fall back to formats[0] if out of range, exactly like _deliverWave.
+        var fmt = formatNo >= 0 && formatNo < s.SndFormats.Count ? s.SndFormats[formatNo] : s.SndFormats[0];
         s.Media.OnRemoteAudio(fmt, pcm, s.ElapsedMs);
     }
 

@@ -9,6 +9,7 @@
     var storedPassword = ViewData["StoredPassword"] as string ?? "";
     var storedDomain = ViewData["StoredDomain"] as string ?? "";
     var defaults = ViewData["Defaults"] as ConnectionDefaults;
+    var recordingNotice = ViewData["RecordingNotice"] is true;
 }
 <!DOCTYPE html>
 <html lang="en">
@@ -46,7 +47,7 @@
         #floatbar-controls { display: flex; align-items: center; gap: .35rem; }
         #floatbar .btn { --bs-btn-padding-y: .15rem; --bs-btn-padding-x: .5rem; --bs-btn-font-size: .78rem; }
         /* A thin invisible strip along the top edge to reveal the bar when it's auto-hidden. */
-        #reveal-zone { position: fixed; top: 0; left: 0; right: 0; height: 14px; z-index: 39; }
+        #reveal-zone { position: fixed; top: 0; left: 30%; right: 30%; height: 5px; z-index: 39; }
         #screen-wrap {
             position: absolute; top: 0; left: 0; right: 0; bottom: 0;
             overflow: hidden; display: flex; align-items: center; justify-content: center;
@@ -87,9 +88,47 @@
         .fa-red {
             color: #f00;
         }
+
+        /* Recording indicator: a 5px red frame around the whole session and a dismissible banner.
+           Both are only rendered when the recording rule asks to notify the user. The frame sits above
+           the canvas but ignores pointer events so it never intercepts clicks meant for the desktop. */
+        #rec-frame {
+            position: fixed; inset: 0; z-index: 35; pointer-events: none;
+            border: 5px solid #e3342f; box-sizing: border-box;
+        }
+        #rec-banner {
+            position: fixed; top: 8px; left: 50%; transform: translateX(-50%);
+            z-index: 50; display: flex; align-items: center; gap: .55rem;
+            padding: .4rem .65rem .4rem .8rem; border-radius: 999px;
+            background: rgba(227,52,47,.95); color: #fff; font-size: .82rem; font-weight: 600;
+            box-shadow: 0 4px 18px rgba(0,0,0,.45);
+            transition: opacity .3s ease, transform .3s ease;
+        }
+        #rec-banner.hidden { opacity: 0; transform: translateX(-50%) translateY(-130%); pointer-events: none; }
+        #rec-banner .rec-dot {
+            width: .6rem; height: .6rem; border-radius: 50%; background: #fff;
+            animation: rec-blink 1.4s ease-in-out infinite;
+        }
+        @@keyframes rec-blink { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+        #rec-banner .rec-close {
+            appearance: none; background: transparent; border: none; color: #fff;
+            cursor: pointer; padding: 0 .15rem; font-size: .9rem; line-height: 1; opacity: .85;
+        }
+        #rec-banner .rec-close:hover { opacity: 1; }
     </style>
 </head>
 <body>
+    @if (recordingNotice)
+    {
+        @* Recording disclosure — shown only when the matched recording rule has NotifyUser=true. The red
+           frame and banner appear once the session is connected (see the "ready" status handler). *@
+        <div id="rec-frame" style="display:none;"></div>
+        <div id="rec-banner" class="hidden">
+            <span class="rec-dot"></span>
+            <span>This session is being recorded</span>
+            <button type="button" class="rec-close" id="rec-banner-close" title="Dismiss">&times;</button>
+        </div>
+    }
     <div id="reveal-zone"></div>
     <div id="floatbar" class="hidden">
         <span class="name">@resourceName</span>
@@ -263,6 +302,33 @@
             var floatbar = document.getElementById("floatbar");
             var revealZone = document.getElementById("reveal-zone");
 
+            // ---- recording disclosure -----------------------------------------------------------------
+            // Present only when the recording rule asked to notify (server-rendered #rec-frame/#rec-banner).
+            // On connect: show the red frame + banner; auto-hide the banner after 30s (frame stays for the
+            // whole session). The close button dismisses the banner early. Both hide when the session ends.
+            var recFrame = document.getElementById("rec-frame");
+            var recBanner = document.getElementById("rec-banner");
+            var recBannerTimer = null;
+            function showRecording() {
+                if (!recFrame) return;
+                recFrame.style.display = "block";
+                recBanner.classList.remove("hidden");
+                if (recBannerTimer) clearTimeout(recBannerTimer);
+                recBannerTimer = setTimeout(function () { recBanner.classList.add("hidden"); }, 30000);
+            }
+            function hideRecording() {
+                if (!recFrame) return;
+                if (recBannerTimer) clearTimeout(recBannerTimer);
+                recFrame.style.display = "none";
+                recBanner.classList.add("hidden");
+            }
+            if (recBanner) {
+                document.getElementById("rec-banner-close").addEventListener("click", function () {
+                    if (recBannerTimer) clearTimeout(recBannerTimer);
+                    recBanner.classList.add("hidden");
+                });
+            }
+
             var screenWrap = document.getElementById("screen-wrap");
             var canvas = document.getElementById("canvas");
             var client = new Client(wsUrl, "canvas");
@@ -276,6 +342,7 @@
                 btnConnect.textContent = "Connect";
                 if (hideTimer) clearTimeout(hideTimer);
                 floatbar.classList.add("hidden");
+                hideRecording();
                 loginError.textContent = "";
                 loginOverlay.style.display = "flex";
             }
@@ -289,6 +356,7 @@
                         btnDisconnect.disabled = false;
                         showBar();          // reveal the floating bar on connect, then auto-hide
                         scheduleAutoHide();
+                        showRecording();    // red frame + recording banner (no-op when not notifying)
                         break;
                     case "error":
                         loginError.textContent = message || "Connection failed";
@@ -297,6 +365,7 @@
                         btnConnect.textContent = "Connect";
                         btnDisconnect.disabled = true;
                         floatbar.classList.add("hidden");
+                        hideRecording();
                         break;
                     case "closed":
                         // Session ended (user disconnect or server drop): reset the screen to black

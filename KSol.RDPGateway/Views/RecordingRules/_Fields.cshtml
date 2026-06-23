@@ -24,6 +24,16 @@
     </div>
 </div>
 
+<div class="row g-3 mt-0">
+    <div class="col-md-12">
+        <div class="form-check">
+            <input asp-for="NotifyUser" class="form-check-input" />
+            <label asp-for="NotifyUser" class="form-check-label">Notify user (show a "this session is recorded" banner in the console)</label>
+        </div>
+        <div class="form-text">Only applies when this rule records the session (Action = Allow).</div>
+    </div>
+</div>
+
 <p class="text-muted small mt-3 mb-1">Fill the field matching the selected scope (the others are ignored):</p>
 <div class="row g-3">
     <div class="col-md-4">

@@ -43,6 +43,13 @@ public class RecordingRule
     public RecordingRuleAction Action { get; set; } = RecordingRuleAction.Allow;
     public bool Enabled { get; set; } = true;
 
+    /// <summary>
+    /// When this rule wins with <see cref="RecordingRuleAction.Allow"/>, show the user a "this session is
+    /// recorded" notice in the console. Ignored for Deny rules. Defaults true so recorded sessions are
+    /// disclosed unless an admin opts out.
+    /// </summary>
+    public bool NotifyUser { get; set; } = true;
+
     /// <summary>Target user id (Scope == User).</summary>
     public string? UserId { get; set; }
     /// <summary>Target resource id (Scope == Resource).</summary>

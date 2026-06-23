@@ -196,7 +196,7 @@ Client.prototype._startProtocol = function () {
         onActive: function () { self._onActive(); },
         onError: function (m) { console.error("rdp:", m); self._status("error", m); },
         onClose: function (graceful, m) { self._onProtocolClose(graceful, m); },
-        onLog: function (m) { console.log("rdp:", m); },
+        onLog: function (m) { if(window.RDP_LOG == 1) console.log("rdp:", m); },
         onResize: function (w, h) { self._onRemoteResize(w, h); },
         onDisplayControlReady: function () { self._displayControlReady = true; self._applyInitialScale(); },
         onAudio: function (fmt, pcm) { self._playPcm(fmt, pcm); },
@@ -359,7 +359,6 @@ Client.prototype._buildMicGraph = function (stream, fmt) {
     sink.gain.value = 0;
     node.connect(sink);
     sink.connect(this._micCtx.destination);
-    console.log("mic: capturing", self._micCtx.sampleRate + "Hz →", fmt.rate + "Hz/" + fmt.bits + "bit/" + fmt.channels + "ch");
 };
 
 // Linearly resample a mono Float32 block from `inRate` to fmt.rate and quantize to interleaved PCM in
@@ -954,9 +953,6 @@ Client.prototype._onGfxPaint = function (canvas, sx, sy, sw, sh, dx, dy) {
                 const px = this.ctx.getImageData(Math.floor(this.canvas.width / 2), Math.floor(this.canvas.height / 2), 1, 1).data;
                 sample = "centerPx=rgba(" + px[0] + "," + px[1] + "," + px[2] + "," + px[3] + ")";
             } catch (e) { sample = "centerPx=?(" + (e && e.message) + ")"; }
-            console.log("rdp: gfx paint #" + this._gfxPaintCount + " -> output " + this.canvas.width + "x" + this.canvas.height +
-                " css=" + this.canvas.style.width + "x" + this.canvas.style.height +
-                " src=" + sx + "," + sy + " " + sw + "x" + sh + " dst=" + dx + "," + dy + " " + sample);
         }
     } catch (e) {
         console.warn("gfx paint failed:", e);
@@ -971,7 +967,7 @@ Client.prototype._onGfxDirectFrame = function (frame, surfaceId, map) {
     try {
         this.ctx.drawImage(frame, ox, oy);
         const px = this.ctx.getImageData(Math.floor(this.canvas.width / 2), Math.floor(this.canvas.height / 2), 1, 1).data;
-        if (!this._directDbg) { this._directDbg = 1; console.log("rdp: DIRECT drawImage(frame) center=rgba(" + px[0] + "," + px[1] + "," + px[2] + "," + px[3] + ")"); }
+        if (!this._directDbg) { this._directDbg = 1; }
         if (frame.close) frame.close();
     } catch (e) {
         console.warn("DIRECT drawImage(frame) threw:", e);

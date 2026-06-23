@@ -113,15 +113,17 @@ public class RdpWebSocketController : Controller
         try
         {
             var roles = await _userManager.GetRolesAsync(authorization.User ?? (await _userManager.FindByIdAsync(userId))!);
-            if (await _recordingPolicy.ShouldRecordAsync(userId, id, roles))
+            if ((await _recordingPolicy.EvaluateAsync(userId, id, roles)).Record)
             {
                 var dir = _config["Recording:Directory"]
                     ?? Path.Combine(Directory.GetCurrentDirectory(), "Data", "recordings");
                 var recId = Guid.NewGuid().ToString();
                 var baseDir = Path.Combine(dir, recId);
                 Directory.CreateDirectory(baseDir);
-                var desktopPath = Path.Combine(baseDir, "desktop.mp4");
-                var cameraPath = Path.Combine(baseDir, "camera.mp4");
+                // One combined MP4 per session with up to four tracks (desktop video, camera video,
+                // remote audio, mic audio). DesktopFilePath holds that single file; CameraFilePath is
+                // unused now (kept on the model to avoid a migration).
+                var sessionPath = Path.Combine(baseDir, "session.mp4");
                 recording = new Recording
                 {
                     Id = recId,
@@ -129,8 +131,8 @@ public class RdpWebSocketController : Controller
                     RDPResourceId = id,
                     StartedUtc = DateTime.UtcNow,
                     Status = RecordingStatus.Recording,
-                    DesktopFilePath = desktopPath,
-                    CameraFilePath = cameraPath,
+                    DesktopFilePath = sessionPath,
+                    CameraFilePath = null,
                 };
                 _context.Recordings.Add(recording);
                 await _context.SaveChangesAsync();

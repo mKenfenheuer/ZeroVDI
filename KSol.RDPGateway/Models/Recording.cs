@@ -21,9 +21,10 @@ public enum RecordingStatus
 }
 
 /// <summary>
-/// One recorded console session. Produces up to two MP4 files on disk: the desktop (video + remote
-/// sound) and the camera (video + mic). Files live under the configured recordings directory, outside
-/// wwwroot, and are served only through the authorized RecordingsController.File action.
+/// One recorded console session. Produces a single combined MP4 (session.mp4) with up to four separate
+/// tracks: desktop video, camera video, remote audio, and microphone audio. The file lives under the
+/// configured recordings directory, outside wwwroot, and is served only through the authorized
+/// RecordingsController.GetFile action.
 /// </summary>
 public class Recording
 {
@@ -44,10 +45,10 @@ public class Recording
 
     public RecordingStatus Status { get; set; } = RecordingStatus.Recording;
 
-    /// <summary>Path to the desktop MP4 (video + remote sound), or null if not produced.</summary>
+    /// <summary>Path to the combined session MP4 (all tracks), or null if not produced.</summary>
     public string? DesktopFilePath { get; set; }
 
-    /// <summary>Path to the camera MP4 (camera video + mic), or null if no camera/mic was recorded.</summary>
+    /// <summary>Unused since the single-file change; kept to avoid a schema migration. Always null.</summary>
     public string? CameraFilePath { get; set; }
 
     /// <summary>The desktop video codec observed (e.g. "AVC420", "AVC444v2", or "none").</summary>

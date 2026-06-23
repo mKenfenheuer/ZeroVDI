@@ -24,32 +24,23 @@
 }
 
 <div class="row g-4">
-    <div class="col-lg-8">
-        <h2 class="h6">Desktop @(Model.VideoCodec != null ? $"({Model.VideoCodec})" : "")</h2>
+    <div class="col-12">
+        <h2 class="h6">Session @(Model.VideoCodec != null ? $"({Model.VideoCodec})" : "")</h2>
         @if (Model.DesktopFilePath != null)
         {
             <video controls preload="metadata" class="w-100 border rounded bg-dark"
-                   src="@Url.Action("GetFile", new { id = Model.Id, which = "desktop" })">
+                   src="@Url.Action("GetFile", new { id = Model.Id })">
                 Your browser cannot play this recording.
             </video>
+            <p class="text-muted small mt-2">
+                One file with up to four tracks: desktop video, camera video, remote audio, microphone.
+                The browser plays the desktop video and remote audio; the camera and mic tracks are also
+                in the file and selectable in a desktop player (VLC, mpv).
+            </p>
         }
         else
         {
-            <p class="text-muted">No desktop recording available.</p>
-        }
-    </div>
-    <div class="col-lg-4">
-        <h2 class="h6">Camera</h2>
-        @if (Model.CameraFilePath != null)
-        {
-            <video controls preload="metadata" class="w-100 border rounded bg-dark"
-                   src="@Url.Action("GetFile", new { id = Model.Id, which = "camera" })">
-                Your browser cannot play this recording.
-            </video>
-        }
-        else
-        {
-            <p class="text-muted">No camera recording (camera/mic not used or not captured).</p>
+            <p class="text-muted">No recording available.</p>
         }
     </div>
 </div>

@@ -46,17 +46,51 @@ public class RecordingsController : Controller
         return View(rec);
     }
 
-    // GET /Recordings/File/{id}?which=desktop|camera — streams the MP4 with range support.
-    public async Task<IActionResult> GetFile(string id, string which)
+    // GET /Recordings/File/{id} — streams the combined session MP4 with range support.
+    public async Task<IActionResult> GetFile(string id)
     {
         var rec = await LoadAuthorizedAsync(id);
         if (rec == null) return NotFound();
 
-        var path = which == "camera" ? rec.CameraFilePath : rec.DesktopFilePath;
+        var path = rec.DesktopFilePath;
         if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) return NotFound();
 
         var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
         return File(stream, "video/mp4", enableRangeProcessing: true);
+    }
+
+    // POST /Recordings/Delete/{id} — removes the DB row and the recording's files/base directory.
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> Delete(string id)
+    {
+        var rec = await LoadAuthorizedAsync(id);
+        if (rec == null) return NotFound();
+
+        // Delete the whole recording directory (combined MP4 plus any leftover raw streams / sidecars).
+        // The base dir is the parent of the session file; fall back to deleting the file itself.
+        try
+        {
+            var path = rec.DesktopFilePath;
+            if (!string.IsNullOrEmpty(path))
+            {
+                var baseDir = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(baseDir) && Directory.Exists(baseDir))
+                    Directory.Delete(baseDir, recursive: true);
+                else if (System.IO.File.Exists(path))
+                    System.IO.File.Delete(path);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Best-effort file cleanup: still drop the DB row so the orphaned files don't reappear in the UI.
+            HttpContext.RequestServices.GetService<ILogger<RecordingsController>>()?
+                .LogWarning(ex, "Deleting files for recording {RecId} failed; removing DB row anyway", rec.Id);
+        }
+
+        _context.Recordings.Remove(rec);
+        await _context.SaveChangesAsync();
+        return RedirectToAction(nameof(Index));
     }
 
     /// <summary>Loads a recording the caller may view (Admin: any; otherwise only their own).</summary>

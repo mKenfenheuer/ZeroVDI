@@ -17,8 +17,9 @@ public class HomeController : Controller
     private readonly RdpFileGenerator _rdpGenerator;
     private readonly PaaTokenService _paa;
     private readonly RDP.CredentialProtector _credentials;
+    private readonly RDP.RecordingPolicy _recordingPolicy;
 
-    public HomeController(ILogger<HomeController> logger, ApplicationDbContext context, UserManager<ApplicationUser> userManager, RdpFileGenerator rdpGenerator, PaaTokenService paa, RDP.CredentialProtector credentials)
+    public HomeController(ILogger<HomeController> logger, ApplicationDbContext context, UserManager<ApplicationUser> userManager, RdpFileGenerator rdpGenerator, PaaTokenService paa, RDP.CredentialProtector credentials, RDP.RecordingPolicy recordingPolicy)
     {
         _logger = logger;
         _context = context;
@@ -26,6 +27,7 @@ public class HomeController : Controller
         _rdpGenerator = rdpGenerator;
         _paa = paa;
         _credentials = credentials;
+        _recordingPolicy = recordingPolicy;
     }
 
     /// <summary>
@@ -140,6 +142,12 @@ public class HomeController : Controller
         ViewData["ResourceId"] = id;
         ViewData["ResourceName"] = authorization.RDPResource.Name ?? id;
         ViewData["DefaultUser"] = _userManager.GetUserName(User);
+
+        // Recording disclosure: if the rules engine would record this session AND the matched rule asks
+        // to notify, the console shows a "this session is recorded" banner. Mirrors the decision made in
+        // RdpWebSocketController.Connect (same user/resource/roles), so the notice matches what's captured.
+        var roles = await _userManager.GetRolesAsync(authorization.User ?? (await _userManager.FindByIdAsync(userId))!);
+        ViewData["RecordingNotice"] = (await _recordingPolicy.EvaluateAsync(userId, id, roles)).Notify;
 
         // SSO: when VM credentials are stored for this (user, resource), release them to this user's
         // own browser (over the authenticated HTTPS session) so the console auto-connects without the
