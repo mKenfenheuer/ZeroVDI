@@ -7,14 +7,13 @@ EXPOSE 80
 
 FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 WORKDIR /src
-COPY ["KSol.RDPGateway.csproj", "./"]
-RUN dotnet restore "KSol.RDPGateway.csproj"
 COPY . .
 WORKDIR "/src/"
-RUN dotnet build "KSol.RDPGateway.csproj" -c Release -o /app/build
+RUN dotnet restore "KSol.RDPGateway/KSol.RDPGateway.csproj"
+RUN dotnet build "KSol.RDPGateway/KSol.RDPGateway.csproj" -c Release -o /app/build
 
 FROM build AS publish
-RUN dotnet publish "KSol.RDPGateway.csproj" -c Release -o /app/publish
+RUN dotnet publish "KSol.RDPGateway/KSol.RDPGateway.csproj" -c Release -o /app/publish
 
 FROM base AS final
 WORKDIR /app

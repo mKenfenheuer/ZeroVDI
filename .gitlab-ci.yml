@@ -13,7 +13,7 @@ build_amd64_image:
     - shell
   script:
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
-    - docker build -f KSol.RDPGateway/Dockerfile -t $CI_COMMIT_BRANCH KSol.RDPGateway/
+    - docker build -t $CI_COMMIT_BRANCH .
     - docker image tag $CI_COMMIT_BRANCH $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
     - docker image push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
     - docker image prune -a
