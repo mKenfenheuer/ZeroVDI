@@ -84,7 +84,7 @@ public class HomeController : Controller
             .Select(r => r.RDPResource)
             .ToListAsync();
 
-        return View(resources ?? new List<RDPResource>());
+        return View(resources ?? new List<RDPResource?>());
     }
 
     public async Task<IActionResult> DownloadRdpFile(string id)

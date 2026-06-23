@@ -29,7 +29,7 @@
         @if (Model.DesktopFilePath != null)
         {
             <video controls preload="metadata" class="w-100 border rounded bg-dark"
-                   src="@Url.Action("File", new { id = Model.Id, which = "desktop" })">
+                   src="@Url.Action("GetFile", new { id = Model.Id, which = "desktop" })">
                 Your browser cannot play this recording.
             </video>
         }
@@ -43,7 +43,7 @@
         @if (Model.CameraFilePath != null)
         {
             <video controls preload="metadata" class="w-100 border rounded bg-dark"
-                   src="@Url.Action("File", new { id = Model.Id, which = "camera" })">
+                   src="@Url.Action("GetFile", new { id = Model.Id, which = "camera" })">
                 Your browser cannot play this recording.
             </video>
         }

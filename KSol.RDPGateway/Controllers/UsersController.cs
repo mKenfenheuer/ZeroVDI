@@ -121,8 +121,8 @@ namespace KSol.RDPGateway.Controllers
 
                     existingUser.UserName = user.UserName;
                     existingUser.Email = user.Email;
-                    existingUser.NormalizedUserName = user.UserName.ToUpper();
-                    existingUser.NormalizedEmail = user.Email.ToUpper();
+                    existingUser.NormalizedUserName = user.UserName?.ToUpper();
+                    existingUser.NormalizedEmail = user.Email?.ToUpper();
 
                     var result = await _userManager.UpdateAsync(existingUser);
                     if (result.Succeeded)

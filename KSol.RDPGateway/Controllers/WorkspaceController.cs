@@ -298,7 +298,11 @@ public class WorkspaceController : Controller
 
         // gatewayhostname must be the public host the client can reach, including a non-default
         // port. Request.Host.Value is host[:port] (resolved from forwarded headers behind a proxy).
-        var rdp = _rdpGenerator.Generate(authorization.RDPResource, Request.Host.Value, user.UserName);
+        var hostname = Request?.Host.Value;
+
+        if(hostname == null)
+            return BadRequest("Missing Hostname");
+        var rdp = _rdpGenerator.Generate(authorization.RDPResource, hostname, user.UserName);
         return File(Encoding.UTF8.GetBytes(rdp), "application/x-rdp");
     }
 

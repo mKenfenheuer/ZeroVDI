@@ -47,7 +47,7 @@ public class RecordingsController : Controller
     }
 
     // GET /Recordings/File/{id}?which=desktop|camera — streams the MP4 with range support.
-    public async Task<IActionResult> File(string id, string which)
+    public async Task<IActionResult> GetFile(string id, string which)
     {
         var rec = await LoadAuthorizedAsync(id);
         if (rec == null) return NotFound();
