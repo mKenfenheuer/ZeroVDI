@@ -5,6 +5,10 @@ metadata:
   type: project
 ---
 
+## ✅ SOLVED (2026-06-23, v6 confirmed live): GFX streams full Win11 desktop end-to-end
+Dropping CS_MCS_MSGCHANNEL + CS_MULTITRANSPORT from the Connect Initial (option B, matching mstsc) FIXED the stall — the browser now renders the live Win11 desktop (taskbar, window chrome, clock) continuously. The gate was the granted-but-unjoined MCS message channel throttling GFX. Confirmed by the user with a screenshot of the working remote desktop.
+FOLLOW-UP FIX (scaling): `chooseDesktopSize` had a hard-coded GFX resolution (2560x1606, a 2026-06-16 stall-chasing test). On a 1x-DPR display the 2560-wide surface overflowed the console (zoomed crop); on 2x it happened to fit. REMOVED the hard-code — `chooseDesktopSize` now sizes from the console panel (`screenWrap`) in device pixels for BOTH GFX and non-GFX, so the host renders exactly what fits. Also made `_fit` letterbox-scale the framebuffer to the wrapper (aspect-preserving) instead of the old `backingStore/dpr` (which only fit on 2x-DPR). Live window resize already wired: onViewportChange → _fit (instant) + debounced maybeResize → MONITOR_LAYOUT at the new console size. Input mapping (`_canvasCoords`) uses getBoundingClientRect so it follows the CSS size automatically.
+
 ## ★★★ ROOT CAUSE (2026-06-23, v6 — spec + Connect-Initial byte-diff): we never JOIN the MCS message channel
 Decisive CS_CORE/GCC byte-diff (same C# decoder on BOTH our_c2s.bin and mstsc c2s.bin):
 - mstsc GCC blocks: CS_CORE, CS_CLUSTER, CS_SECURITY, CS_NET. earlyCapabilityFlags=0x7af.

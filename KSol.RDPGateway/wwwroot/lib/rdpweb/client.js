@@ -45,14 +45,10 @@ Client.prototype._status = function (status, message) { if (this.statusCb) this.
 // RDP desktop dimensions must be even (bitmap rows are 16bpp; widths are safest as multiples of 4),
 // and are clamped to the [MS-RDPBCGR] valid range (200..8192 px per axis for typical hosts).
 Client.prototype.chooseDesktopSize = function (wrapEl) {
-    // TEST (2026-06-16): under GFX, force the EXACT resolution the working macOS Remote Desktop app used
-    // (2560x1606, its full native screen). Everything else (scale, DisplayControl, Geometry, acks) now
-    // matches the macOS app yet the host still does a 2nd RESET_GRAPHICS and stalls; resolution is the
-    // last structural difference (we connect at a small 1452x1438 window, the macOS app at 2560x1606 and
-    // gets ONE reset + flood). If the host now resets once and streams, sub-native res was the trigger.
-    if (typeof rdpGfxMode === "function" && rdpGfxMode() !== "off") {
-        return { width: 2560, height: 1606 };
-    }
+    // Match the remote desktop resolution to the actual console panel size (in device pixels), so the
+    // host renders exactly what fits — no hard-coded resolution, no scaling artifacts. (A 2026-06-16
+    // test pinned this to 2560x1606 while chasing the GFX stall; that stall is fixed now — the gate was
+    // the unjoined MCS message channel, not resolution — so we go back to sizing from the viewport.)
     const dpr = window.devicePixelRatio || 1;
     const cssW = Math.max(1, Math.floor(wrapEl.clientWidth));
     const cssH = Math.max(1, Math.floor(wrapEl.clientHeight));
@@ -74,13 +70,18 @@ Client.prototype.applyDesktopSize = function (wrapEl, size) {
     this._fit(wrapEl);
 };
 
-// Sets the canvas CSS size so the device-pixel backing store maps 1:1 to device pixels on screen
-// (i.e. cssSize = backingStore / devicePixelRatio), which fills the wrapper exactly when the desktop
-// size was chosen by chooseDesktopSize().
+// Fits the canvas on screen. The backing store is the host's framebuffer size (under GFX a fixed
+// 2560x1606, see chooseDesktopSize). We scale that to FIT the wrapper while preserving aspect ratio
+// (letterbox) so it always fills the panel regardless of the display's devicePixelRatio — the old
+// "cssSize = backingStore / dpr" only happened to fit on a 2x-DPR display and overflowed on 1x.
 Client.prototype._fit = function (wrapEl) {
-    const dpr = window.devicePixelRatio || 1;
-    this.canvas.style.width = (this.canvas.width / dpr) + "px";
-    this.canvas.style.height = (this.canvas.height / dpr) + "px";
+    const el = wrapEl || this._wrapEl;
+    const availW = el ? Math.max(1, el.clientWidth) : (this.canvas.width / (window.devicePixelRatio || 1));
+    const availH = el ? Math.max(1, el.clientHeight) : (this.canvas.height / (window.devicePixelRatio || 1));
+    // Scale the framebuffer to fit inside the available CSS box, preserving aspect ratio.
+    const scale = Math.min(availW / this.canvas.width, availH / this.canvas.height);
+    this.canvas.style.width = Math.round(this.canvas.width * scale) + "px";
+    this.canvas.style.height = Math.round(this.canvas.height * scale) + "px";
 };
 
 // creds = {user, password, domain, performanceFlags}
