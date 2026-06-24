@@ -28,6 +28,18 @@ public static class CertificateProvider
     public static X509Certificate2 GetEncryptionCertificate(IConfiguration config, IHostEnvironment env)
         => GetOrCreate(config, env, "oidc-encryption", "KSol.IT RDP Gateway OIDC Encryption", X509KeyUsageFlags.KeyEncipherment);
 
+    /// <summary>
+    /// Returns the certificate the gateway presents to RDP clients during the NLA man-in-the-middle TLS
+    /// handshake (the native RDGW path). Generated and persisted like the OIDC certs so the bound public
+    /// key — which CredSSP pins — is stable across restarts. Self-signed is acceptable: CredSSP's
+    /// public-key binding still detects a MITM on the inner auth, and RDP clients already tolerate
+    /// self-signed hosts. Can be replaced with a CA-issued cert by pointing <c>Oidc:CertificatePath</c>
+    /// at a directory containing <c>rdp-server.pfx</c>.
+    /// </summary>
+    public static X509Certificate2 GetRdpServerCertificate(IConfiguration config, IHostEnvironment env)
+        => GetOrCreate(config, env, "rdp-server", "KSol.IT RDP Gateway",
+            X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment);
+
     private static X509Certificate2 GetOrCreate(IConfiguration config, IHostEnvironment env, string fileName, string subject, X509KeyUsageFlags usage)
     {
         // Default to the "Data" directory next to the SQLite database (DataSource=Data/app_db.sqlite,

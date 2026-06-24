@@ -60,7 +60,10 @@ public class Program
 
         builder.Services.AddControllersWithViews();
 
-        builder.Services.AddRDPGW();
+        // Route native RDGW connections through the gateway's NLA man-in-the-middle so they share the
+        // browser console's pipeline: SSO (stored host creds swapped in) and session recording.
+        builder.Services.AddRDPGW()
+            .UseConnectionHandler<RDP.GatewayConnectionHandler>();
         builder.Services.AddSingleton<IRDPGWAuthenticationHandler, RDPAuthenticationHandler>();
         builder.Services.AddSingleton<IRDPGWAuthorizationHandler, RDPAutorizationHandler>();
         builder.Services.AddSingleton<RDP.RdpFileGenerator>();

@@ -23,11 +23,13 @@
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="9.0.0" />
     <PackageReference Include="OpenIddict.AspNetCore" Version="6.0.0" />
     <PackageReference Include="OpenIddict.EntityFrameworkCore" Version="6.0.0" />
-    <PackageReference Include="RDPGW" Version="1.0.0.1781369808" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\RdpWire\KSol.RDP.Wire.csproj" />
+    <!-- Local project reference to rdpgw.net while iterating on UseConnectionHandler; revert to the
+         RDPGW NuGet PackageReference once a version carrying these changes is published. -->
+    <ProjectReference Include="..\..\rdpgw.net\RDPGW\RDPGW.csproj" />
   </ItemGroup>
 
 </Project>

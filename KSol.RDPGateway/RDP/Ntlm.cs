@@ -132,6 +132,7 @@ public static class Ntlm
         public string Workstation = "";
         public byte[] NtChallengeResponse = Array.Empty<byte>();
         public byte[] LmChallengeResponse = Array.Empty<byte>();
+        public byte[] EncryptedRandomSessionKey = Array.Empty<byte>();
     }
 
     public static Type3? ParseType3(byte[] msg)
@@ -154,6 +155,8 @@ public static class Ntlm
             var domain = ReadField(28);
             var user = ReadField(36);
             var workstation = ReadField(44);
+            // EncryptedRandomSessionKeyFields at offset 52 (present when NEGOTIATE_KEY_EXCH was set).
+            var sessionKey = msg.Length >= 60 ? ReadField(52) : Array.Empty<byte>();
 
             return new Type3
             {
@@ -162,6 +165,7 @@ public static class Ntlm
                 Domain = Encoding.Unicode.GetString(domain),
                 User = Encoding.Unicode.GetString(user),
                 Workstation = Encoding.Unicode.GetString(workstation),
+                EncryptedRandomSessionKey = sessionKey,
             };
         }
         catch
