@@ -266,6 +266,10 @@ internal static class RdpChannels
                 {
                     s.DvcById[channelId] = name;
                     s.Media?.OnDiagnostic($"DVC create id={channelId} name={name}");
+                    // The camera enumerator precedes the per-device channels, which are opened with a
+                    // client-assigned (non-fixed) name — flag enumeration so DispatchDvcPayload can route
+                    // those unknown channels to the ECAM frame extractor.
+                    if (name == "RDCamera_Device_Enumerator") s.CameraEnumerated = true;
                 }
                 else if (c.Remaining >= 4)
                 {
@@ -352,9 +356,12 @@ internal static class RdpChannels
         }
         if (name.StartsWith("Microsoft::Windows::RDS::Video") || name.StartsWith("Microsoft::Windows::RDS::Geometry"))
         { var n = new Node("dvc.payload"); n.Field("channel", name).Field("len", data.Length).FieldHex("preview", data); parent.Child(n); return; }
-        // Camera (MS-RDPECAM): the device channel carries StartStreams (s2c, sets geometry) and
-        // SampleResponse (c2s, NV12 frame). The enumerator channel carries only control.
-        if (s.Media != null && name.StartsWith("RDPGWCam"))
+        // Camera (MS-RDPECAM): per-device channels carry StartStreams (s2c, sets geometry) and
+        // SampleResponse (c2s, NV12 frame). Their channel name is client-assigned (not a fixed string),
+        // so once the RDCamera_Device_Enumerator has appeared we treat any otherwise-unknown channel as a
+        // camera-device candidate; ExtractCameraFrame validates by ECAM msgId (0x0F/0x12) and ignores the
+        // rest, so non-camera payloads pass through harmlessly to the diagnostic log below.
+        if (s.Media != null && s.CameraEnumerated)
         {
             ExtractCameraFrame(s, dir, data);
         }

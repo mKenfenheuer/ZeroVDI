@@ -17,7 +17,8 @@ namespace KSol.RDPGateway.RDP;
 /// Files under the recording's base dir:
 ///   desktop.h264  — concatenated H.264 Annex-B access units (AVC420 / AVC444 main view)
 ///   desktop.pcm   — remote-sound PCM (rdpsnd)
-///   camera.nv12   — raw NV12 camera frames (RDPECAM)
+///   camera.h264   — H.264 Annex-B camera frames (RDPECAM, the usual format) — copied at mux
+///   camera.nv12   — raw NV12 camera frames (RDPECAM, when negotiated) — encoded at mux
 ///   mic.pcm       — microphone PCM (audin)
 ///   manifest.json — formats/geometry/codec for the mux step
 ///
@@ -66,10 +67,15 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
     private PcmFormat? _remoteAudioFmt;
     private PcmFormat? _micFmt;
     private (int w, int h, int fps)? _cameraGeom;
+    // The negotiated camera codec ("nv12" or "h264"), latched on the first frame. RDPECAM cameras
+    // commonly stream H.264 (Annex-B) rather than raw NV12; the two take different record/mux paths and
+    // cannot be mixed within a session, so we lock to whatever the first frame is.
+    private string? _cameraCodec;
     // Black NV12 frame (Y=0x00, UV=0x80) sized to the camera geometry, lazily built, reused to pad
     // inactive periods. Cadence: one black frame per ~200ms of gap (5 fps) — plenty for "no camera".
     private byte[]? _blackNv12;
     private long _cameraLastEpochMs = -1;     // epoch-relative ms of the last camera frame WRITTEN (real or black)
+    private long _cameraFirstClockMs = -1;    // clock ms of the first camera frame written (for the H.264 lead-in)
     private const long BlackPadCadenceMs = 200;
     private bool _loggedFirstVideo;
     private bool _anyAvc;            // got at least one H.264 (AVC) desktop frame
@@ -156,15 +162,31 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
     public void OnCameraFrame(int width, int height, ReadOnlySpan<byte> frame, string mediaFormat, long timestampMs)
     {
         if (_disposed || frame.IsEmpty) return;
-        // Only raw NV12 is muxable without a decoder. Other formats (mjpeg/h264/i420/rgb) are skipped in v1.
-        if (mediaFormat != "nv12") return;
+        // We can record raw NV12 (encoded at mux time) and H.264 (Annex-B, copied at mux time). Other
+        // formats (mjpeg/i420/rgb) have no muxable path yet and are skipped. Latch the codec on the first
+        // frame; a session never mixes camera codecs.
+        if (mediaFormat != "nv12" && mediaFormat != "h264") return;
+        _cameraCodec ??= mediaFormat;
+        if (mediaFormat != _cameraCodec) return;       // ignore a (spurious) codec switch mid-session
         _cameraGeom ??= (width, height, 30);
         long now = _clock.ElapsedMilliseconds;
         NoteEpoch(now);
-        // Camera timestamps are EPOCH-relative (not first-camera-frame-relative) so the camera track
-        // spans the whole session and stays aligned with desktop/audio. Backfill black frames for the
-        // gap since the last written camera frame (covers the lead-in before the camera ever started and
-        // any mid-session pause where the client stopped sending NV12).
+        if (mediaFormat == "h264")
+        {
+            // H.264 Annex-B access units, copied verbatim like the desktop stream. No black-padding: there
+            // is no synthesizable "black" H.264 frame, so the camera track simply starts at its first AU
+            // (the mux aligns it via the per-frame timestamp sidecar, which stays epoch-relative).
+            if (Append(ref _cameraVideo, "camera.h264", frame))
+            {
+                HasCamera = true;
+                if (_cameraFirstClockMs < 0) _cameraFirstClockMs = now;
+                WriteCameraTs(now);
+                _cameraLastEpochMs = now;
+            }
+            return;
+        }
+        // NV12: backfill black frames for the gap since the last written frame (covers the lead-in before
+        // the camera started and any mid-session pause where the client stopped sending frames).
         PadCameraBlack(now, width, height);
         if (Append(ref _cameraVideo, "camera.nv12", frame))
         {
@@ -297,9 +319,10 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
     /// <summary>Closes the raw streams and writes manifest.json describing what was captured.</summary>
     public void Dispose()
     {
-        // Trailing black padding: if the camera was active but the session ran on after the last camera
-        // frame, fill to "now" with black so the camera track spans the full session (matches desktop).
-        if (_cameraLastEpochMs >= 0 && _cameraGeom is { } g)
+        // Trailing black padding (NV12 only): if the camera was active but the session ran on after the
+        // last camera frame, fill to "now" with black so the camera track spans the full session (matches
+        // desktop). H.264 has no synthesizable black frame, so its track just ends at the last AU.
+        if (_cameraCodec == "nv12" && _cameraLastEpochMs >= 0 && _cameraGeom is { } g)
             PadCameraBlack(_clock.ElapsedMilliseconds, g.w, g.h);
 
         lock (_lock)
@@ -321,7 +344,8 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
                 DesktopVideo = _desktopVideo != null ? "desktop.h264" : null,
                 DesktopVideoTs = _desktopVideoTs != null ? "desktop.ts.txt" : null,
                 DesktopAudio = _desktopAudio != null ? "desktop.pcm" : null,
-                CameraVideo = _cameraVideo != null ? "camera.nv12" : null,
+                CameraVideo = _cameraVideo != null ? (_cameraCodec == "h264" ? "camera.h264" : "camera.nv12") : null,
+                CameraVideoCodec = _cameraCodec,
                 CameraVideoTs = _cameraVideoTs != null ? "camera.ts.txt" : null,
                 MicAudio = _micAudio != null ? "mic.pcm" : null,
                 RemoteAudio = _remoteAudioFmt,
@@ -334,6 +358,10 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
                 // audio offsets are simply "ms from session epoch to first audio sample".
                 DesktopAudioOffsetMs = _desktopAudioT.FirstMs >= 0 && _epochMs >= 0 ? Math.Max(0, _desktopAudioT.FirstMs - _epochMs) : 0,
                 MicOffsetMs = _micAudioT.FirstMs >= 0 && _epochMs >= 0 ? Math.Max(0, _micAudioT.FirstMs - _epochMs) : 0,
+                // Camera epoch-relative span, so the H.264 mux path can splice black lead-in/gaps/tail
+                // around the verbatim AUs (NV12 already bakes those in as real black frames).
+                CameraVideoOffsetMs = _cameraFirstClockMs >= 0 && _epochMs >= 0 ? Math.Max(0, _cameraFirstClockMs - _epochMs) : 0,
+                SessionDurationMs = _epochMs >= 0 ? Math.Max(0, _clock.ElapsedMilliseconds - _epochMs) : 0,
             };
             File.WriteAllText(Path_("manifest.json"), JsonSerializer.Serialize(manifest));
         }
@@ -353,6 +381,8 @@ public sealed class RecordingManifest
     public string? DesktopVideoTs { get; set; } // mkvmerge v2 per-frame timestamp sidecar
     public string? DesktopAudio { get; set; }
     public string? CameraVideo { get; set; }
+    /// <summary>Camera elementary-stream codec: "h264" (copy at mux) or "nv12" (encode at mux).</summary>
+    public string? CameraVideoCodec { get; set; }
     public string? CameraVideoTs { get; set; }
     public string? MicAudio { get; set; }
     public PcmFormat? RemoteAudio { get; set; }
@@ -363,4 +393,10 @@ public sealed class RecordingManifest
     public long DesktopAudioOffsetMs { get; set; }
     /// <summary>Milliseconds of silence to prepend to the mic audio so it aligns with the camera video start.</summary>
     public long MicOffsetMs { get; set; }
+    /// <summary>Epoch-relative ms of the first camera frame (the H.264 lead-in length to black-pad at mux).
+    /// Unused for NV12, which bakes the lead-in in as real black frames.</summary>
+    public long CameraVideoOffsetMs { get; set; }
+    /// <summary>Total session span in ms (epoch → end), so the H.264 camera mux can black-pad the trailing
+    /// tail to the full session length.</summary>
+    public long SessionDurationMs { get; set; }
 }

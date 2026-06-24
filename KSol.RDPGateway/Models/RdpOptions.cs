@@ -34,6 +34,13 @@ public class RdpOptions
     public bool RedirectLocation { get; set; } = false;
     /// <summary>drivestoredirect: which local drives to redirect (e.g. "*" for all, "" for none).</summary>
     public string DriveStoreRedirect { get; set; } = string.Empty;
+    /// <summary>camerastoredirect: which local cameras to redirect (e.g. "*" for all, "" for none).
+    /// Defaults to "*" so the camera-recording pipeline works out of the box; the Windows App hides the
+    /// camera control entirely unless this line permits redirection.</summary>
+    public string CameraStoreRedirect { get; set; } = "*";
+    /// <summary>redirected video capture encoding quality: 0 = medium, 1 = high, 2 = best. Companion to
+    /// <see cref="CameraStoreRedirect"/>; the Windows App emits it whenever camera redirect is on.</summary>
+    public int RedirectedVideoCaptureEncodingQuality { get; set; } = 0;
 
     // Audio
     /// <summary>audiomode: 0 = play on client, 1 = play on remote, 2 = do not play.</summary>

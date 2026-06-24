@@ -73,12 +73,25 @@ public class RdpFileGenerator
         Line(sb, "redirectclipboard", Bit(o.RedirectClipboard));
         Line(sb, "redirectposdevices", Bit(o.RedirectPosDevices));
         Line(sb, "drivestoredirect", "s", o.DriveStoreRedirect ?? string.Empty);
+        // null means the field predates this resource (EF leaves a missing JSON key null, NOT the "*"
+        // property initializer) → fall back to the on-by-default "*". An explicit "" is the user opting
+        // out and stays empty.
+        Line(sb, "camerastoredirect", "s", o.CameraStoreRedirect ?? "*");
+        // Companion to camerastoredirect: the redirected-video-capture encode quality (0 = medium,
+        // 1 = high, 2 = best). The Windows App emits this whenever camera redirection is enabled; without
+        // it the App may not activate the camera even when camerastoredirect is set.
+        Line(sb, "redirected video capture encoding quality", o.RedirectedVideoCaptureEncodingQuality);
 
         // Session
         Line(sb, "autoreconnection enabled", Bit(o.AutoReconnectionEnabled));
         Line(sb, "authentication level", 2);
         Line(sb, "prompt for credentials", 0);
         Line(sb, "negotiate security layer", 1);
+        // Security: advertise CredSSP/NLA support and allow all security protocols. The Windows App emits
+        // both whenever it exports a working connection; without them it can restrict device redirection
+        // (incl. the camera) on a gateway/feed connection it considers less trusted.
+        Line(sb, "enablecredsspsupport", 1);
+        Line(sb, "allowed security protocols", "s", "*");
         Line(sb, "remoteapplicationmode", Bit(o.RemoteApplicationMode));
         Line(sb, "alternate shell", "s", o.AlternateShell ?? string.Empty);
         Line(sb, "shell working directory", "s", string.Empty);

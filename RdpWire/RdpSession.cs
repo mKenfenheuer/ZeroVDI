@@ -65,6 +65,10 @@ public sealed class RdpSession
     private long _gfxFrameTs;
     // Camera (RDPECAM): the negotiated current media type from StartStreams, used to size NV12 frames.
     private (int width, int height, int fps, int fmt)? _camMediaType;
+    // Set once the server opens the RDCamera_Device_Enumerator DVC. Camera device channels are opened
+    // afterwards with a client-assigned (non-fixed) name, so once enumeration is seen we treat unknown
+    // channels carrying the ECAM version(1)/msgId framing as camera-device payloads.
+    private bool _cameraEnumerated;
 
     internal IRdpMediaSink? Media => _media;
     internal List<PcmFormat> SndFormats => _sndFormats;
@@ -74,6 +78,7 @@ public sealed class RdpSession
     internal long GfxFrameId { get => _gfxFrameId; set => _gfxFrameId = value; }
     internal long GfxFrameTs { get => _gfxFrameTs; set => _gfxFrameTs = value; }
     internal (int width, int height, int fps, int fmt)? CamMediaType { get => _camMediaType; set => _camMediaType = value; }
+    internal bool CameraEnumerated { get => _cameraEnumerated; set => _cameraEnumerated = value; }
 
     public void NotePatch(RdpDir dir, string what, uint val)
     {
