@@ -125,7 +125,16 @@ public sealed class NtlmClient
 
         // temp = Responserversion(1) HiResponserversion(1) Z(6) Timestamp(8) ClientChallenge(8) Z(4)
         //        TargetInfo Z(4)
-        long timestamp = DateTime.UtcNow.ToFileTimeUtc();
+        //
+        // When the CHALLENGE's TargetInfo carries an MsvAvTimestamp, [MS-NLMP] 3.1.5.1.2 requires the
+        // client to use THAT server timestamp in temp (not its own clock). FreeRDP-based NLA servers
+        // (e.g. GNOME Remote Desktop) reconstruct the AUTHENTICATE's NtProofStr/MIC using the timestamp
+        // they sent; using our own clock makes them derive a different ExportedSessionKey and reject the
+        // AUTHENTICATE with a MIC verification failure (SEC_E_MESSAGE_ALTERED). Windows is lenient and
+        // accepts our clock, which is why this only surfaced against FreeRDP hosts.
+        long timestamp = TryGetServerTimestamp(serverTargetInfo, out var serverTs)
+            ? serverTs
+            : DateTime.UtcNow.ToFileTimeUtc();
         using var tempMs = new MemoryStream();
         var tw = new BinaryWriter(tempMs);
         tw.Write((byte)1); tw.Write((byte)1);
@@ -182,6 +191,7 @@ public sealed class NtlmClient
 
     // AV_PAIR ids ([MS-NLMP] 2.2.2.1).
     private const ushort MsvAvEOL = 0x0000;
+    private const ushort MsvAvTimestamp = 0x0007;
     private const ushort MsvAvFlags = 0x0006;
     private const ushort MsvAvChannelBindings = 0x000A;
     private const ushort MsvAvTargetName = 0x0009;
@@ -239,6 +249,30 @@ public sealed class NtlmClient
             }
         }
         return outMs.ToArray();
+    }
+
+    /// <summary>
+    /// Extracts the server's MsvAvTimestamp (8-byte FILETIME) from the CHALLENGE TargetInfo, if present.
+    /// Per [MS-NLMP] 3.1.5.1.2 the client must echo this exact timestamp in the NTLMv2 temp blob.
+    /// </summary>
+    private static bool TryGetServerTimestamp(byte[] serverTargetInfo, out long timestamp)
+    {
+        int i = 0;
+        while (i + 4 <= serverTargetInfo.Length)
+        {
+            ushort id = BinaryPrimitives.ReadUInt16LittleEndian(serverTargetInfo.AsSpan(i, 2));
+            ushort len = BinaryPrimitives.ReadUInt16LittleEndian(serverTargetInfo.AsSpan(i + 2, 2));
+            if (i + 4 + len > serverTargetInfo.Length) break;
+            if (id == MsvAvTimestamp && len >= 8)
+            {
+                timestamp = BinaryPrimitives.ReadInt64LittleEndian(serverTargetInfo.AsSpan(i + 4, 8));
+                return true;
+            }
+            if (id == MsvAvEOL) break;
+            i += 4 + len;
+        }
+        timestamp = 0;
+        return false;
     }
 
     private static void WriteAv(Stream s, ushort id, byte[] value)
