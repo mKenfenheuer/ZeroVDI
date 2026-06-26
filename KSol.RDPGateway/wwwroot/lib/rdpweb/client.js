@@ -1,3 +1,4 @@
+window.RDP_LOG = 1;
 // client.js — browser RDP client over the gateway WebSocket relay.
 //
 // Flow:
@@ -165,6 +166,26 @@ Client.prototype._onControlFrame = function (text) {
             this._status("connecting", "negotiating session…");
             this._startProtocol();
             break;
+        case "redirect": {
+            // RDP Server Redirection: the host (e.g. GNOME Remote Desktop "Remote Login") handed the
+            // session off to the real target. The gateway cached the routing token; reconnect the
+            // WebSocket so it lands on the redirected session. Tear down the current protocol/socket and
+            // start over with the same credentials.
+            this._status("connecting", "redirecting…");
+            this.proto = null;
+            this.connected = false;
+            this._handshakeDone = false;
+            // CRITICAL: detach the OLD socket's handlers before closing it. Otherwise its (possibly late)
+            // onclose=deinitialize fires after we've started the reconnect and tears down the NEW session.
+            var old = this.socket;
+            if (old) { old.onclose = null; old.onmessage = null; old.onerror = null; old.onopen = null;
+                       try { old.close(); } catch (e) { /* ignore */ } }
+            this.socket = null;
+            // Reconnect on the next tick so the closing socket fully unwinds first.
+            var self = this;
+            setTimeout(function () { self.connect(self.creds); }, 100);
+            break;
+        }
         case "error":
             this._status("error", msg.message || "connection failed");
             try { this.socket.close(); } catch (e) { /* ignore */ }
@@ -806,6 +827,10 @@ Client.prototype._onActive = function () {
 };
 
 Client.prototype.deinitialize = function () {
+    // During an RDP Server Redirection we intentionally close the socket and immediately reconnect; skip
+    // the full teardown (which would flip the UI to "closed" and reset session state) — _onControlFrame's
+    // "redirect" handler already reset the protocol and is about to call connect() again.
+    if (this._redirecting) return;
     window.removeEventListener("keydown", this.handleKeyDown);
     window.removeEventListener("keyup", this.handleKeyUp);
     this.canvas.removeEventListener("mousemove", this.handleMouseMove);

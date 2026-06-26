@@ -86,7 +86,10 @@ public sealed class RecordingMuxService : BackgroundService
         // Build the (up to) two VFR video tracks as MKVs (H.264 copy + per-frame timestamps), then mux
         // everything — both videos + remote audio + mic audio — into ONE MP4 with four separate tracks.
 
-        // --- desktop video → VFR MKV (copy) ---
+        // --- desktop video → VFR MKV ---
+        // Two sources, mutually exclusive in practice: AVC (desktop.h264 = real Annex-B AUs, copied) or
+        // RemoteFX Progressive decoded server-side to raw BGRA (desktop.bgra → encode to H.264 like the
+        // NV12 camera path). Both apply desktop.ts.txt for true VFR.
         string? desktopMkv = null;
         if (manifest.DesktopVideo != null)
         {
@@ -98,6 +101,24 @@ public sealed class RecordingMuxService : BackgroundService
                 if (tsIn != null) rawFiles.Add(tsIn);
                 desktopMkv = await BuildVfrMkvAsync(vIn, tsIn, rec.Id, "desktop", tmpFiles, ct);
                 if (desktopMkv == null) anyFailed = true;
+            }
+        }
+        else if (manifest.DesktopRawVideo != null && manifest.DesktopRawWidth > 0 && manifest.DesktopRawHeight > 0)
+        {
+            string vIn = Path.Combine(baseDir, manifest.DesktopRawVideo);
+            string? tsIn = manifest.DesktopVideoTs != null ? Path.Combine(baseDir, manifest.DesktopVideoTs) : null;
+            if (File.Exists(vIn))
+            {
+                rawFiles.Add(vIn);
+                if (tsIn != null) rawFiles.Add(tsIn);
+                string deskH264 = Path.Combine(baseDir, "desktop.enc.h264");
+                tmpFiles.Add(deskH264);
+                var enc = new List<string> { "-hide_banner", "-loglevel", "warning",
+                    "-f", "rawvideo", "-pix_fmt", "bgra", "-s", $"{manifest.DesktopRawWidth}x{manifest.DesktopRawHeight}",
+                    "-i", vIn, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-bsf:v", "h264_mp4toannexb",
+                    "-f", "h264", "-y", deskH264 };
+                if (!await RunFfmpegAsync(enc, rec.Id, "desktop-enc", ct)) anyFailed = true;
+                else { desktopMkv = await BuildVfrMkvAsync(deskH264, tsIn, rec.Id, "desktop", tmpFiles, ct); if (desktopMkv == null) anyFailed = true; }
             }
         }
 

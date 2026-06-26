@@ -418,15 +418,14 @@ function clientCoreData(selectedProtocol, width, height) {
     w.u16le(gfx ? 0x0018 : 0x0010);     // highColorDepth: HIGH_COLOR_24BPP vs 16BPP
     w.u16le(gfx ? 0x000F : 0x0002);     // supportedColorDepths: 15/16/24/32 vs 16BPP only
     // earlyCapabilityFlags ([MS-RDPBCGR] 2.2.1.3.2).
-    // Match the WORKING macOS Remote Desktop app EXACTLY (decoded from its CS_CORE via MITM): it sends
     // 0x7AF = ERRINFO_PDU(0x01) | WANT_32BPP(0x02) | STATUSINFO_PDU(0x04) | STRONG_ASYMMETRIC_KEYS(0x08)
     //       | VALID_CONNECTION_TYPE(0x20) | NETCHAR_AUTODETECT(0x80) | DYNVC_GFX(0x100)
     //       | DYNAMIC_TIME_ZONE(0x200) | HEARTBEAT(0x400).
-    // KEY: the macOS app does NOT set SUPPORT_MONITOR_LAYOUT_PDU (0x40) — WE used to (old 0x05E3). That
-    // flag tells the host the client wants monitor-layout-driven reinit, and is the suspected trigger for
-    // the host's 2nd RESET_GRAPHICS (the GFX stall): the host re-RESETs us to drive a monitor layout we
-    // advertised support for but the macOS app didn't. Dropping 0x40 + matching the rest = 0x7AF.
-    // (DYNVC_GFX 0x100 + its prereqs are still present, so the rich DVC set / GFX channel stays enabled.)
+    // NETCHAR_AUTODETECT(0x80) + HEARTBEAT(0x400) make a FreeRDP host (GNOME Remote Desktop) run the
+    // connect-time Network Auto-Detect exchange over the MCS message channel. We support that: the
+    // client requests CS_MCS_MSGCHANNEL, joins the granted channel, and answers auto-detect requests on
+    // it (see _handleAutoDetect / _onAutoDetectRequest). We do NOT set SUPPORT_MONITOR_LAYOUT_PDU(0x40)
+    // (suspected trigger for a 2nd RESET_GRAPHICS). DYNVC_GFX(0x100) + prereqs stay set.
     w.u16le(gfx ? 0x07AF : 0x0001);
     w.zeros(64);         // clientDigProductId[64]
     // connectionType: MUST be 0 unless VALID_CONNECTION_TYPE is set. The macOS app sends 0x07
@@ -533,7 +532,13 @@ function clientUserData(selectedProtocol, width, height, channels) {
     if (rdpTryGfx()) w.bytes(clientClusterData());
     w.bytes(clientSecurityData());
     w.bytes(clientNetworkData(channels));
-    // CS_MCS_MSGCHANNEL / CS_MULTITRANSPORT intentionally omitted — see note above clientClusterData().
+    // CS_MCS_MSGCHANNEL: request the MCS message channel so the host's connect-time Network Auto-Detect
+    // (we advertise NETCHAR_AUTODETECT) has a channel to run on. The granted channel is joined in
+    // _onAttachUserConfirm and auto-detect requests are answered on it (_handleAutoDetect). Without it a
+    // FreeRDP host sends auto-detect on the I/O channel and our reply can't be routed back, aborting the
+    // session. Only sent on the GFX/extended path (the no-GFX baseline stays byte-identical to before).
+    // (CS_MULTITRANSPORT stays omitted — it's RDP-UDP multitransport, which the TCP-only relay can't carry.)
+    if (rdpTryGfx()) w.bytes(clientMcsMsgChannelData());
     return w.toArray();
 }
 
@@ -1173,6 +1178,8 @@ function RdpProtocol(transport, opts, callbacks) {
 
     this.state = null;
     this.rxBuf = new Uint8Array(0); // inbound reassembly buffer
+    this._bwStart = null;           // auto-detect bandwidth-measure window start (ms), null when idle
+    this._bwBytes = 0;              // bytes received during the current bandwidth-measure window
 
     // finalization progress flags
     this.fin = { sync: false, coop: false, granted: false, fontmap: false };
@@ -1205,6 +1212,9 @@ RdpProtocol.prototype.start = function () {
 
 // Append inbound bytes and process every complete PDU available.
 RdpProtocol.prototype.feed = function (chunk) {
+    // Count bytes received during an in-progress auto-detect bandwidth measurement so the
+    // Bandwidth Measure Results we report back to the host reflects the real payload size.
+    if (this._bwStart != null) this._bwBytes = (this._bwBytes || 0) + chunk.length;
     // grow rxBuf
     const merged = new Uint8Array(this.rxBuf.length + chunk.length);
     merged.set(this.rxBuf, 0);
@@ -1278,18 +1288,116 @@ RdpProtocol.prototype._handleSlowPath = function (x224) {
         case ST.JOIN_CHANNELS:
             return this._onChannelJoinConfirm(r);
         case ST.LICENSING:
-            return this._onLicensing(this._mcsSendDataIndication(r));
+            if (this._handleAutoDetect(this._mcsSendDataIndication(r))) return;
+            return this._onLicensing(r);
         case ST.CAPABILITIES:
-            return this._onDemandActive(this._mcsSendDataIndication(r));
+            if (this._handleAutoDetect(this._mcsSendDataIndication(r))) return;
+            return this._onDemandActive(r);
         case ST.FINALIZATION:
-            return this._onFinalization(this._mcsSendDataIndication(r));
+            if (this._handleAutoDetect(this._mcsSendDataIndication(r))) return;
+            return this._onFinalization(r);
         case ST.ACTIVE:
-            // Slow-path data during the active phase (e.g. error info / deactivate-all). Parse the
-            // share control header to detect deactivate-all & error info; otherwise ignore.
-            return this._onActiveSlowPath(this._mcsSendDataIndication(r));
+            // Slow-path data during the active phase (e.g. error info / deactivate-all, or a
+            // continuous-mode auto-detect request). Handle autodetect, else parse the share control
+            // header to detect deactivate-all & error info; otherwise ignore.
+            if (this._handleAutoDetect(this._mcsSendDataIndication(r))) return;
+            return this._onActiveSlowPath(r);
         default:
             return;
     }
+};
+
+// [MS-RDPBCGR] 2.2.1.4 security header flags relevant to the connection sequence.
+const SEC_AUTODETECT_REQ = 0x1000;
+const SEC_AUTODETECT_RSP = 0x2000;
+const SEC_HEARTBEAT = 0x4000;
+
+// If the SendDataIndication payload (r positioned at the RDP body / security header) is a Network
+// Auto-Detect Request ([MS-RDPBCGR] 2.2.14) or a Heartbeat PDU, handle it and return true so the
+// caller does NOT mis-route it as licensing/Demand-Active. FreeRDP-based hosts (GNOME Remote Desktop)
+// send these immediately after Client Info because we advertise RNS_UD_CS_SUPPORT_NETCHAR_AUTODETECT;
+// without a response the host stalls and the session never reaches the capabilities exchange.
+RdpProtocol.prototype._handleAutoDetect = function (r) {
+    const start = r.o;
+    if (r.remaining() < 4) { r.o = start; return false; }
+    const flags = r.u16le();
+    r.u16le(); // flagsHi
+    if (flags & SEC_HEARTBEAT) return true;      // server heartbeat: nothing to send, just absorb it
+    if (!(flags & SEC_AUTODETECT_REQ)) { r.o = start; return false; }
+
+    // RDP_AUTODETECT_REQUEST_PDU: headerLength(1) headerTypeId(1) sequenceNumber(2 LE) requestType(2 LE)
+    if (r.remaining() < 6) return true;
+    r.u8();                              // headerLength
+    const headerTypeId = r.u8();         // 0x00 = AUTODETECT_REQUEST
+    const seq = r.u16le();
+    const requestType = r.u16le();
+    if (headerTypeId !== 0x00) return true;
+    this._onAutoDetectRequest(seq, requestType);
+    return true;
+};
+
+// Respond to a single Network Auto-Detect Request. We implement the connect-time RTT + bandwidth
+// measurement exchange ([MS-RDPBCGR] 2.2.14.1): RTT requests get an RTT response; a Bandwidth-Stop
+// gets a Bandwidth-Measure-Results; Start/Payload/NetChar-Results need no reply.
+RdpProtocol.prototype._onAutoDetectRequest = function (seq, requestType) {
+    // requestType values per [MS-RDPBCGR] 2.2.14.1.* (and FreeRDP autodetect.c).
+    const RTT_CONTINUOUS = 0x0001, RTT_CONNECTTIME = 0x1001;
+    const BW_START_CONTINUOUS = 0x0014, BW_START_TUNNEL = 0x0114, BW_START_CONNECTTIME = 0x1014;
+    const BW_PAYLOAD = 0x0002;
+    const BW_STOP_CONNECTTIME = 0x002B, BW_STOP_CONTINUOUS = 0x0429, BW_STOP_TUNNEL = 0x0629;
+    const RTT_RESPONSE_TYPE = 0x0000;
+    const BW_RESULTS_CONNECTTIME = 0x0003, BW_RESULTS_CONTINUOUS = 0x000B;
+
+    if (requestType === RTT_CONNECTTIME || requestType === RTT_CONTINUOUS) {
+        //this._log("RDP: auto-detect RTT request (seq " + seq + ")");
+        this._sendAutoDetectRtt(seq);
+        return;
+    }
+    if (requestType === BW_START_CONNECTTIME || requestType === BW_START_CONTINUOUS || requestType === BW_START_TUNNEL) {
+        this._bwStart = (typeof performance !== "undefined" ? performance.now() : Date.now());
+        this._bwBytes = 0;
+        //this._log("RDP: auto-detect bandwidth-measure start (seq " + seq + ")");
+        return;
+    }
+    if (requestType === BW_PAYLOAD) {
+        // The payload bytes are the measured traffic; their size already passed through feed().
+        return;
+    }
+    if (requestType === BW_STOP_CONNECTTIME || requestType === BW_STOP_CONTINUOUS || requestType === BW_STOP_TUNNEL) {
+        const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
+        const delta = Math.max(0, Math.round(now - (this._bwStart || now)));
+        const respType = (requestType === BW_STOP_CONTINUOUS) ? BW_RESULTS_CONTINUOUS : BW_RESULTS_CONNECTTIME;
+        //this._log("RDP: auto-detect bandwidth-measure stop (seq " + seq + ", " + delta + "ms, " + (this._bwBytes || 0) + "B)");
+        this._sendAutoDetectBwResults(seq, respType, delta, this._bwBytes || 0);
+        this._bwStart = null;
+        return;
+    }
+    // NetChar Results (0x0840/0x0880/0x08C0) and anything else: informational, no response required.
+    //this._log("RDP: auto-detect request type 0x" + requestType.toString(16) + " (no reply)");
+};
+
+// Auto-detect responses MUST be sent on the MCS message channel ([MS-RDPBCGR] 2.2.14.2): that is where
+// a FreeRDP host reads them (it routes by messageChannelId). Fall back to the I/O channel only if no
+// message channel was granted (shouldn't happen now that we request CS_MCS_MSGCHANNEL).
+RdpProtocol.prototype._autoDetectChannel = function () {
+    return this.msgChannelId || this.mcsChannelId;
+};
+
+// RTT Measure Response ([MS-RDPBCGR] 2.2.14.2.1): headerLength=0x06, typeId=0x01, seq, responseType=0.
+RdpProtocol.prototype._sendAutoDetectRtt = function (seq) {
+    const w = new ByteWriter();
+    w.u16le(SEC_AUTODETECT_RSP).u16le(0); // security header
+    w.u8(0x06).u8(0x01).u16le(seq).u16le(0x0000);
+    this.t.send(tpktX224Wrap(mcsSendDataSerialize(this.userId, this._autoDetectChannel(), w.toArray())));
+};
+
+// Bandwidth Measure Results ([MS-RDPBCGR] 2.2.14.2.2): headerLength=0x0E, typeId=0x01, seq,
+// responseType, timeDelta(4 LE), byteCount(4 LE).
+RdpProtocol.prototype._sendAutoDetectBwResults = function (seq, responseType, timeDelta, byteCount) {
+    const w = new ByteWriter();
+    w.u16le(SEC_AUTODETECT_RSP).u16le(0); // security header
+    w.u8(0x0E).u8(0x01).u16le(seq).u16le(responseType).u32le(timeDelta >>> 0).u32le(byteCount >>> 0);
+    this.t.send(tpktX224Wrap(mcsSendDataSerialize(this.userId, this._autoDetectChannel(), w.toArray())));
 };
 
 // Reads the MCS Send-Data-Indication header. Records the source channel id on `this._lastChannelId`
@@ -1563,15 +1671,31 @@ RdpProtocol.prototype._onDemandActive = function (r) {
 
 RdpProtocol.prototype._onDemandActiveControl = function (r) {
     // The PDU type field packs the type in the low nibble and a protocol version in the high nibble
-    // (e.g. DEMANDACTIVE 0x11, CONFIRMACTIVE 0x13, DATAPDU 0x17). Compare on the low nibble.
+    // (e.g. DEMANDACTIVE 0x11, CONFIRMACTIVE 0x13, DEACTIVATEALL 0x16, DATAPDU 0x17). Compare on the
+    // low nibble.
     const startO = r.o;
     let totalLength = r.u16le();
-    let pduType = r.u16le() & 0xf;
-    if (pduType !== (PDUTYPE_DEMANDACTIVE & 0xf) && pduType !== (PDUTYPE_DATAPDU & 0xf)) {
-        // Probably a 4-byte security header preceded the share control header; rewind + skip it.
+    let pduTypeRaw = r.u16le();
+    let pduType = pduTypeRaw & 0xf;
+    // Recognize the share-control header directly. DEACTIVATEALL(0x16), DEMANDACTIVE(0x11) and
+    // DATAPDU(0x17) are the types we may see here; anything else means a 4-byte security header
+    // precedes the share control header, so rewind and skip it.
+    const known = function (t) {
+        return t === (PDUTYPE_DEMANDACTIVE & 0xf) || t === (PDUTYPE_DATAPDU & 0xf)
+            || t === (PDUTYPE_DEACTIVATEALL & 0xf);
+    };
+    if (!known(pduType)) {
         r.o = startO + 4;
         totalLength = r.u16le();
-        pduType = r.u16le() & 0xf;
+        pduTypeRaw = r.u16le();
+        pduType = pduTypeRaw & 0xf;
+    }
+    if (pduType === (PDUTYPE_DEACTIVATEALL & 0xf)) {
+        // GNOME Remote Desktop / FreeRDP sends a Deactivate-All at connect time (before the real
+        // Demand Active) to reset the share. Absorb it and keep waiting in CAPABILITIES — replying
+        // with a Confirm Active here (to a PDU that is NOT a Demand Active) makes the host abort.
+        this._log("RDP: Deactivate-All (pre-capabilities); waiting for Demand Active");
+        return;
     }
     if (pduType !== (PDUTYPE_DEMANDACTIVE & 0xf)) {
         // Not the demand-active yet (could be an early data PDU); ignore and keep waiting.

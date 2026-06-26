@@ -64,8 +64,14 @@ public sealed class RdpHostConnection
     /// MITM relay passes the <i>client's</i> requested protocols through unchanged so the host echoes the
     /// value the client expects in its MCS Connect-Response (otherwise the client aborts with 0x609).
     /// </param>
+    /// <param name="routingToken">
+    /// Optional X.224 routing token (the raw <c>Cookie: msts=...\r\n</c> bytes) from a Server Redirection.
+    /// When set it is prepended to the X.224 Connection Request so a load-balancer / session broker — e.g.
+    /// GNOME Remote Desktop's system "Remote Login" mode — routes this reconnect to the redirected session.
+    /// </param>
     public async Task<Connected> ConnectAsync(RdpRelaySession.VmCredentials creds,
-        uint requestedProtocols = PROTOCOL_HYBRID | PROTOCOL_SSL, CancellationToken ct = default)
+        uint requestedProtocols = PROTOCOL_HYBRID | PROTOCOL_SSL, CancellationToken ct = default,
+        byte[]? routingToken = null)
     {
         var tcp = new TcpClient();
         try
@@ -94,7 +100,7 @@ public sealed class RdpHostConnection
         uint selected;
         try
         {
-            selected = await NegotiateX224Async(netStream, requestedProtocols, ct);
+            selected = await NegotiateX224Async(netStream, requestedProtocols, routingToken, ct);
         }
         catch (Exception ex)
         {
@@ -174,7 +180,8 @@ public sealed class RdpHostConnection
     /// Sends the X.224 Connection Request asking for HYBRID|SSL, reads the Connection Confirm, and
     /// returns the protocol the server selected. Throws on a negotiation failure response.
     /// </summary>
-    private async Task<uint> NegotiateX224Async(NetworkStream net, uint requestedProtocols, CancellationToken ct)
+    private async Task<uint> NegotiateX224Async(NetworkStream net, uint requestedProtocols,
+        byte[]? routingToken, CancellationToken ct)
     {
         var neg = new byte[8];
         neg[0] = TYPE_RDP_NEG_REQ;
@@ -182,10 +189,24 @@ public sealed class RdpHostConnection
         neg[2] = 8; neg[3] = 0;
         BitConverter.GetBytes(requestedProtocols).CopyTo(neg, 4);
 
-        var x224 = new byte[7 + neg.Length];
+        // X.224 CR variable part: optional routing token (Cookie: msts=...\r\n) then the RDP_NEG_REQ.
+        // [MS-RDPBCGR] 2.2.1.1: the routing token, when present, precedes the negotiation request.
+        var cookie = routingToken ?? Array.Empty<byte>();
+        if (cookie.Length > 0)
+        {
+            int show = Math.Min(cookie.Length, 48);
+            var asc = new char[show];
+            for (int j = 0; j < show; j++) asc[j] = cookie[j] is >= (byte)0x20 and < (byte)0x7f ? (char)cookie[j] : '.';
+            _logger.LogInformation("RDP host: X.224 routing token {Len}B endsCRLF={Crlf} hex={Hex} ascii='{Ascii}'",
+                cookie.Length,
+                cookie.Length >= 2 && cookie[^2] == 0x0D && cookie[^1] == 0x0A,
+                Convert.ToHexString(cookie.AsSpan(0, show)), new string(asc));
+        }
+        var x224 = new byte[7 + cookie.Length + neg.Length];
         x224[0] = (byte)(x224.Length - 1); // LI
         x224[1] = 0xE0;                     // CR
-        neg.CopyTo(x224, 7);
+        cookie.CopyTo(x224, 7);
+        neg.CopyTo(x224, 7 + cookie.Length);
 
         int total = 4 + x224.Length;
         var pdu = new byte[total];

@@ -14,6 +14,8 @@ public class Program
 {
     public static void Main(string[] args)
     {
+        Environment.SetEnvironmentVariable("RDPGW_DUMP_DIR","../dump");
+
         var builder = WebApplication.CreateBuilder(args);
 
         // Force HTTP/1.1 on all Kestrel endpoints. The RemoteApp & Desktop Connections client
@@ -52,6 +54,8 @@ public class Program
         builder.Services.AddDataProtection()
             .PersistKeysToFileSystem(new DirectoryInfo(dpKeysDir));
         builder.Services.AddSingleton<RDP.CredentialProtector>();
+        // Holds RDP Server Redirection routing tokens between a redirect and the browser's reconnect.
+        builder.Services.AddSingleton<RDP.RedirectionTokenCache>();
         // Session-recording rules evaluation (per request: uses the scoped DbContext).
         builder.Services.AddScoped<RDP.RecordingPolicy>();
         // Background job that muxes captured raw streams into MP4 after sessions end (and picks up any

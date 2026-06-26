@@ -35,6 +35,11 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
     // Lazily-opened raw output streams.
     private FileStream? _desktopVideo;
     private FileStream? _desktopAudio;
+    // RemoteFX Progressive desktop, decoded + composited server-side to raw BGRA frames (one per
+    // END_FRAME). Re-encoded to H.264 at mux time. Mutually exclusive with the AVC desktop.h264 path
+    // in practice (a host streams one or the other). Geometry is latched on the first frame.
+    private FileStream? _desktopRaw;
+    private int _desktopRawW, _desktopRawH;
     private FileStream? _cameraVideo;
     private FileStream? _micAudio;
 
@@ -138,6 +143,31 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
         {
             HasDesktop = true;
             WriteFrameTs(ref _desktopVideoTs, "desktop.ts.txt", ref _desktopVideoFirstMs, ref _desktopVideoLastTs, now);
+        }
+    }
+
+    public void OnDesktopRawFrame(int width, int height, ReadOnlySpan<byte> bgra, long timestampMs)
+    {
+        if (_disposed || width <= 0 || height <= 0) return;
+        int expect = width * height * 4;
+        if (bgra.Length < expect) return;
+        // Latch geometry on the first frame; if the desktop ever resizes mid-session we keep the first
+        // size (the encoder needs a constant frame size) and drop mismatched frames.
+        if (_desktopRaw == null) { _desktopRawW = width; _desktopRawH = height; }
+        else if (width != _desktopRawW || height != _desktopRawH) return;
+
+        long now = _clock.ElapsedMilliseconds;
+        NoteEpoch(now);
+        if (Append(ref _desktopRaw, "desktop.bgra", bgra.Slice(0, expect)))
+        {
+            HasDesktop = true;
+            VideoCodec ??= "progressive";
+            WriteFrameTs(ref _desktopVideoTs, "desktop.ts.txt", ref _desktopVideoFirstMs, ref _desktopVideoLastTs, now);
+            if (!_loggedFirstVideo)
+            {
+                _loggedFirstVideo = true;
+                _logger.LogInformation("SessionRecorder: first progressive desktop frame {W}x{H} ({Len}B)", width, height, expect);
+            }
         }
     }
 
@@ -329,7 +359,7 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
         {
             if (_disposed) return;
             _disposed = true;
-            foreach (var s in new Stream?[] { _desktopVideo, _desktopAudio, _cameraVideo, _micAudio })
+            foreach (var s in new Stream?[] { _desktopVideo, _desktopRaw, _desktopAudio, _cameraVideo, _micAudio })
             { try { s?.Flush(); s?.Dispose(); } catch { } }
             try { _desktopVideoTs?.Flush(); _desktopVideoTs?.Dispose(); } catch { }
             try { _cameraVideoTs?.Flush(); _cameraVideoTs?.Dispose(); } catch { }
@@ -342,6 +372,9 @@ public sealed class SessionRecorder : IRdpMediaSink, IDisposable
                 VideoCodec = VideoCodec,
                 UnsupportedVideoCodec = UnsupportedVideoCodec,
                 DesktopVideo = _desktopVideo != null ? "desktop.h264" : null,
+                DesktopRawVideo = _desktopRaw != null ? "desktop.bgra" : null,
+                DesktopRawWidth = _desktopRawW,
+                DesktopRawHeight = _desktopRawH,
                 DesktopVideoTs = _desktopVideoTs != null ? "desktop.ts.txt" : null,
                 DesktopAudio = _desktopAudio != null ? "desktop.pcm" : null,
                 CameraVideo = _cameraVideo != null ? (_cameraCodec == "h264" ? "camera.h264" : "camera.nv12") : null,
@@ -378,6 +411,10 @@ public sealed class RecordingManifest
     public string? VideoCodec { get; set; }
     public bool UnsupportedVideoCodec { get; set; }
     public string? DesktopVideo { get; set; }   // relative file name, or null if absent
+    /// <summary>Raw BGRA desktop frames (RemoteFX Progressive, decoded server-side) to be H.264-encoded at mux.</summary>
+    public string? DesktopRawVideo { get; set; }
+    public int DesktopRawWidth { get; set; }
+    public int DesktopRawHeight { get; set; }
     public string? DesktopVideoTs { get; set; } // mkvmerge v2 per-frame timestamp sidecar
     public string? DesktopAudio { get; set; }
     public string? CameraVideo { get; set; }

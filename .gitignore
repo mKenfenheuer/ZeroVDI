@@ -401,3 +401,4 @@ FodyWeavers.xsd
 
 app_db.sqlite
 app_db.sqlite*
+dump/**

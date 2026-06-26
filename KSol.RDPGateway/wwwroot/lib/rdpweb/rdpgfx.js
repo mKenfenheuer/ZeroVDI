@@ -99,6 +99,10 @@ function RdpGfx(cb) {
     this.confirmedVersion = 0;
     this.decoders = {};          // surfaceId -> H264SurfaceDecoder
     this.clear = (typeof ClearDecode !== "undefined") ? new ClearDecode() : null; // shared ClearCodec ctx
+    // RemoteFX Progressive (GNOME Remote Desktop streams this over WIRE_TO_SURFACE_2). Per-surface
+    // context (holds the persistent per-tile coefficient grids needed for RFX_TILE_DIFFERENCE).
+    this.progressive = (typeof RfxProgressive !== "undefined") ? RfxProgressive : null;
+    this.progCtx = {};           // surfaceId -> RfxProgressive.Context
     this.framesDecoded = 0;
     this._dirty = [];            // output rects touched in the current frame, flushed at END_FRAME
     this.outputWidth = 0;
@@ -112,6 +116,7 @@ RdpGfx.prototype.reset = function () {
     this.zgfx.reset();
     for (const id in this.decoders) this.decoders[id].close();
     this.surfaces = {}; this.outputMap = {}; this.decoders = {}; this.cache = {};
+    this.progCtx = {};
     this._dirty = []; this.confirmedVersion = 0; this.framesDecoded = 0;
     this._qoeT0 = null;
     if (this.clear) this.clear.reset();
@@ -284,6 +289,9 @@ RdpGfx.prototype._destroySurface = function (surfaceId) {
     if (this.decoders[surfaceId]) { this.decoders[surfaceId].close(); delete this.decoders[surfaceId]; }
     delete this.surfaces[surfaceId];
     delete this.outputMap[surfaceId];
+    // Drop the progressive per-tile cache too — a recreated surfaceId is a brand-new surface; keeping the
+    // old cache would mis-accumulate (and leak). The next frame must repaint from scratch.
+    delete this.progCtx[surfaceId];
 };
 
 RdpGfx.prototype._onDeleteSurface = function (r) {
@@ -457,11 +465,59 @@ RdpGfx.prototype._onWireToSurface2 = function (r) {
 
     if (codecId === RDPGFX_CODECID_CAPROGRESSIVE || codecId === RDPGFX_CODECID_CAPROGRESSIVE_V2) {
         if (!this.progressive) { this._log("rdpgfx: Progressive module not loaded"); return; }
-        this._decodeProgressive(surfaceId, surf, codecContextId, bitmapData);
+        this._decodeProgressive(surfaceId, surf, bitmapData);
     } else {
         this._log("rdpgfx: WIRE_TO_SURFACE_2 unsupported codecId 0x" + codecId.toString(16) +
             " ctx=" + codecContextId + " (" + bitmapData.length + " bytes) — skipped");
     }
+};
+
+// RemoteFX Progressive (CAPROGRESSIVE): decode the WIRE_TO_SURFACE_2 payload into 64x64 tiles and
+// putImageData each onto the surface at (xIdx*64, yIdx*64). GNOME Remote Desktop streams the whole
+// desktop this way. Each tile reconstruction (RLGR → dequant → inverse DWT → YCbCr→RGB) lives in
+// progressive.js; here we just place tiles and mark them dirty so they paint at END_FRAME flush.
+RdpGfx.prototype._decodeProgressive = function (surfaceId, surf, bitmapData) {
+    if ((this._progHexDbg = (this._progHexDbg || 0) + 1) <= 2) {
+        let hex = "";
+        for (let i = 0; i < Math.min(32, bitmapData.length); i++) hex += bitmapData[i].toString(16).padStart(2, "0") + " ";
+        this._log("rdpgfx: progressive head[" + bitmapData.length + "B]: " + hex);
+    }
+    let ctx = this.progCtx[surfaceId];
+    if (!ctx) { ctx = new this.progressive.Context(); this.progCtx[surfaceId] = ctx; }
+    const self = this;
+    const dirty = [];
+    // NOTE: this whole body is guarded — a single bad frame must NEVER throw out of the GFX dispatch
+    // loop (that would silently stop ALL further rendering and freeze the screen). On any error we log
+    // and bail on just this PDU.
+    try {
+        const res = this.progressive.decode(ctx, bitmapData, function (xIdx, yIdx, rgba) {
+            const x = xIdx * 64, y = yIdx * 64;
+            // Clip the 64x64 tile to the surface bounds (edge tiles may overhang). Guard against a
+            // corrupt/garbage tile index that would place the tile entirely outside the surface.
+            if (x < 0 || y < 0 || x >= surf.width || y >= surf.height) return;
+            const w = Math.min(64, surf.width - x);
+            const h = Math.min(64, surf.height - y);
+            if (w <= 0 || h <= 0) return;
+            if (w === 64 && h === 64) {
+                surf.ctx.putImageData(new ImageData(rgba.slice(0), 64, 64), x, y);
+            } else {
+                const sub = new Uint8ClampedArray(w * h * 4);
+                for (let row = 0; row < h; row++) {
+                    const src = row * 64 * 4;
+                    sub.set(rgba.subarray(src, src + w * 4), row * w * 4);
+                }
+                surf.ctx.putImageData(new ImageData(sub, w, h), x, y);
+            }
+            dirty.push({ left: x, top: y, right: x + w, bottom: y + h });
+        }, function (m) { self._log("rdpgfx: " + m); });
+
+        if (!res) { this._log("rdpgfx: progressive decode failed (" + bitmapData.length + " bytes)"); }
+        else if ((this._progDbg = (this._progDbg || 0) + 1) <= 6)
+            this._log("rdpgfx: progressive decoded " + res.tiles + " tile(s) (" + bitmapData.length + "B)");
+    } catch (e) {
+        this._log("rdpgfx: progressive EXCEPTION (" + bitmapData.length + "B): " + (e && e.stack ? e.stack : e));
+    }
+    if (dirty.length) { try { this._afterSurfaceUpdate(surfaceId, surf, dirty); } catch (e) { this._log("rdpgfx: progressive paint exception: " + e); } }
 };
 
 // AVC420 bitstream ([MS-RDPEGFX] 2.2.4.4 / 2.2.4.5): an RFX_AVC420_METABLOCK (region rects + quant

@@ -24,6 +24,7 @@ public class RdpWebSocketController : Controller
     private readonly ProxmoxBackendProvider _backends;
     private readonly CredentialProtector _credentials;
     private readonly RecordingPolicy _recordingPolicy;
+    private readonly RedirectionTokenCache _redirections;
     private readonly IConfiguration _config;
     private readonly ILogger<RdpWebSocketController> _logger;
 
@@ -34,6 +35,7 @@ public class RdpWebSocketController : Controller
         ProxmoxBackendProvider backends,
         CredentialProtector credentials,
         RecordingPolicy recordingPolicy,
+        RedirectionTokenCache redirections,
         IConfiguration config,
         ILogger<RdpWebSocketController> logger)
     {
@@ -43,6 +45,7 @@ public class RdpWebSocketController : Controller
         _backends = backends;
         _credentials = credentials;
         _recordingPolicy = recordingPolicy;
+        _redirections = redirections;
         _config = config;
         _logger = logger;
     }
@@ -145,7 +148,17 @@ public class RdpWebSocketController : Controller
         catch (Exception ex) { _logger.LogWarning(ex, "RDP console: recording setup failed; continuing unrecorded"); }
 
         var socket = await HttpContext.WebSockets.AcceptWebSocketAsync();
-        var session = new RdpRelaySession(socket, host, port, kerberos, _logger, presupplied, recorder);
+        // Server Redirection: consume any pending redirection (routing token + one-time session creds) left
+        // by a prior redirected connection for this (user, resource); pass a callback to stash a new one
+        // when THIS connection gets redirected.
+        var pending = _redirections.Consume(userId, id);
+        RdpRelaySession.VmCredentials? redirectCreds = null;
+        if (pending?.Username != null && pending.Password != null)
+            redirectCreds = new RdpRelaySession.VmCredentials(pending.Username, pending.Password, pending.Domain);
+        var session = new RdpRelaySession(socket, host, port, kerberos, _logger, presupplied, recorder,
+            pending?.Token, redirectCreds,
+            redir => _redirections.Store(userId, id,
+                new RedirectionTokenCache.Pending(redir.LoadBalanceInfo!, redir.Username, redir.Domain, redir.Password)));
 
         await _resolver.OnConnectedAsync(userId, id);
         try

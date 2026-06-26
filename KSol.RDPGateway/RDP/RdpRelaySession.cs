@@ -24,7 +24,15 @@ public sealed class RdpRelaySession
     private readonly KerberosAuth? _kerberos;
     private readonly VmCredentials? _presuppliedCreds;
     private readonly IRdpMediaSink? _mediaSink;
+    private readonly byte[]? _routingToken;
+    private readonly VmCredentials? _redirectCreds;
+    private readonly Action<RdpServerRedirection>? _onRedirect;
     private readonly ILogger _logger;
+    private bool _redirected;
+    // True once a token-bearing session that the HOST disconnected (GNOME "Remote Login" post-auth
+    // handover: DEACTIVATE_ALL + MCS Disconnect Ultimatum, NOT a redirect PDU) has been re-armed for a
+    // token-preserving reconnect, so RunAsync signals the browser to reconnect instead of erroring.
+    private bool _handoverContinue;
 
     // Optional live structural decode + recording of the decrypted RDP stream (shared RdpWire engine).
     // Enabled when RDPGW_DUMP_DIR is set (diagnostics) or a media sink is supplied (session recording).
@@ -32,7 +40,9 @@ public sealed class RdpRelaySession
     private RdpStreamRecorder? _recorder;
 
     public RdpRelaySession(WebSocket ws, string host, int port, KerberosAuth? kerberos, ILogger logger,
-        VmCredentials? presuppliedCreds = null, IRdpMediaSink? mediaSink = null)
+        VmCredentials? presuppliedCreds = null, IRdpMediaSink? mediaSink = null,
+        byte[]? routingToken = null, VmCredentials? redirectCreds = null,
+        Action<RdpServerRedirection>? onRedirect = null)
     {
         _ws = ws;
         _host = host;
@@ -40,6 +50,9 @@ public sealed class RdpRelaySession
         _kerberos = kerberos;
         _presuppliedCreds = presuppliedCreds;
         _mediaSink = mediaSink;
+        _routingToken = routingToken;
+        _redirectCreds = redirectCreds;
+        _onRedirect = onRedirect;
         _logger = logger;
     }
 
@@ -55,7 +68,16 @@ public sealed class RdpRelaySession
         // pre-supplies them and the browser sends NO credentials frame. Otherwise the first WS frame is
         // JSON VM credentials (over the already-HTTPS browser connection).
         VmCredentials creds;
-        if (_presuppliedCreds != null)
+        if (_redirectCreds != null)
+        {
+            // Reconnect after a Server Redirection: the broker handed back one-time session credentials
+            // (e.g. GNOME Remote Desktop "Remote Login"). Authenticate the redirected session with those,
+            // NOT the original SSO/login credentials — the redirected target only accepts the one-time pair.
+            creds = _redirectCreds;
+            // The browser may still send a credentials frame on reconnect (non-SSO); drain+ignore it.
+            if (_presuppliedCreds == null) { try { await ReadCredentialsAsync(ct); } catch { /* ignore */ } }
+        }
+        else if (_presuppliedCreds != null)
         {
             creds = _presuppliedCreds;
         }
@@ -80,10 +102,15 @@ public sealed class RdpRelaySession
         RdpHostConnection.Connected host;
         try
         {
-            host = await new RdpHostConnection(_host, _port, _kerberos, _logger).ConnectAsync(creds, ct: ct);
+            host = await new RdpHostConnection(_host, _port, _kerberos, _logger)
+                .ConnectAsync(creds, ct: ct, routingToken: _routingToken);
+            if (_routingToken != null)
+                _logger.LogInformation("RDP relay: reconnected with redirection routing token ({Len}B)", _routingToken.Length);
         }
         catch (RdpHostConnection.ConnectException ex)
         {
+            _logger.LogWarning("RDP relay: host connect failed (status '{Status}', routingToken={HasToken})",
+                ex.Status, _routingToken != null);
             await SendStatusAsync("error", ex.Status, ct);
             return;
         }
@@ -102,11 +129,53 @@ public sealed class RdpRelaySession
         // Whichever pump finishes first ends the session. If the host→ws pump ended, the target closed
         // or died; tell the browser explicitly before closing so it doesn't sit on a frozen screen.
         var finished = await Task.WhenAny(toWs, toRdp);
+
+        // Server Redirection: the host→ws pump broke because it detected a redirect. Send the browser the
+        // "redirect" control frame NOW, while the WebSocket is still Open — it is full-duplex, so sending
+        // alongside the still-pending ws→host receive is safe. We must do this BEFORE linked.Cancel(),
+        // because cancelling the ws→host ReceiveAsync ABORTS the WebSocket (then the frame can't be sent).
+        if (_redirected)
+        {
+            _logger.LogInformation("RDP relay: signalling browser to reconnect after redirection (ws state {State})", _ws.State);
+            if (_ws.State == WebSocketState.Open)
+            {
+                var json = JsonSerializer.Serialize(new { status = "redirect", message = (string?)null });
+                try
+                {
+                    await _ws.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, CancellationToken.None);
+                    _logger.LogInformation("RDP relay: redirect frame sent");
+                }
+                catch (Exception ex) { _logger.LogWarning(ex, "RDP relay: failed to send redirect frame"); }
+            }
+            else
+            {
+                _logger.LogWarning("RDP relay: cannot send redirect frame, ws not open ({State})", _ws.State);
+            }
+        }
+
+        // GNOME "Remote Login" post-auth handover: the host disconnects the token-bearing greeter session
+        // (DEACTIVATE_ALL + MCS Disconnect Ultimatum) WITHOUT sending a redirect PDU, expecting the client
+        // to reconnect with the SAME routing token to land on the handed-over (logged-in) session — this
+        // is what the Windows client does. So if THIS session used a routing token and the host ended it
+        // (not our own redirect), re-arm the same token + creds and signal the browser to reconnect.
+        if (!_redirected && finished == toWs && _routingToken != null && _onRedirect != null)
+        {
+            _handoverContinue = true;
+            _onRedirect(RdpServerRedirection.FromToken(_routingToken, _redirectCreds?.user, _redirectCreds?.domain, _redirectCreds?.password));
+            _logger.LogInformation("RDP relay: host ended token-bearing session -> re-arming handover reconnect (token {Len}B)", _routingToken.Length);
+            if (_ws.State == WebSocketState.Open)
+            {
+                var json = JsonSerializer.Serialize(new { status = "redirect", message = (string?)null });
+                try { await _ws.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, CancellationToken.None); }
+                catch (Exception ex) { _logger.LogWarning(ex, "RDP relay: failed to send handover reconnect frame"); }
+            }
+        }
+
         linked.Cancel();
         try { await Task.WhenAll(toWs, toRdp); } catch { /* shutdown races are expected */ }
         _recorder?.Dispose();
 
-        if (finished == toWs)
+        if (!_redirected && !_handoverContinue && finished == toWs)
         {
             _logger.LogWarning("RDP relay: target {Host}:{Port} ended the connection", _host, _port);
             await SendStatusAsync("error", "remote desktop disconnected", CancellationToken.None);
@@ -170,6 +239,16 @@ public sealed class RdpRelaySession
             });
         long total = 0, chunks = 0;
 
+        // Server-redirection scan: the redirection PDU (~3.5KB) can straddle two ssl.ReadAsync reads, so
+        // scanning each slice in isolation misses it. Accumulate decrypted bytes into a small rolling
+        // buffer and scan that. GNOME Remote Desktop "Remote Login" redirects TWICE: once up front
+        // (client → greeter) and again AFTER the user authenticates (greeter → user session). The second
+        // redirect arrives after the greeter has already streamed many MB of graphics, so we must keep
+        // watching for the whole session — but with a BOUNDED rolling tail (a redirect PDU is tiny and
+        // self-contained in one TPKT), so steady-state graphics never balloon memory.
+        var scanBuf = (_onRedirect != null) ? new MemoryStream() : null;
+        const int RedirectScanTail = 64 * 1024; // keep only the last 64 KB to catch a redirect mid-stream
+
         // READER: drain host SSL promptly into the pipe. This is what keeps the host streaming.
         var reader = Task.Run(async () =>
         {
@@ -186,6 +265,40 @@ public sealed class RdpRelaySession
                     var slice = buffer.AsMemory(0, n).ToArray();
                     if (dump != null) { await dump.WriteAsync(slice, ct); await dump.FlushAsync(ct); }
                     _recorder?.Feed(RdpDir.ServerToClient, slice);
+
+                    // Server Redirection: a session broker (GNOME Remote Desktop "Remote Login") sends a
+                    // redirection PDU then cancels. Detect it (across read boundaries via scanBuf), stash
+                    // the routing token, ask the browser to reconnect — and do NOT forward the redirect PDU
+                    // to the browser (it would choke on it).
+                    if (scanBuf != null && !_redirected)
+                    {
+                        scanBuf.Write(slice, 0, slice.Length);
+                        var redir = RdpServerRedirection.TryParse(scanBuf.GetBuffer().AsSpan(0, (int)scanBuf.Length));
+                        if (redir?.LoadBalanceInfo != null)
+                        {
+                            _redirected = true;
+                            _logger.LogInformation("RDP relay: server redirection -> reconnecting (token {Len}B, target {Target}, creds={HasCreds})",
+                                redir.LoadBalanceInfo.Length, redir.TargetHost ?? _host, redir.Username != null && redir.Password != null);
+                            _onRedirect!(redir);
+                            // Stop relaying; RunAsync sends the browser the "redirect" control frame once the
+                            // pumps have stopped (avoids concurrent WebSocket sends with the writer pump).
+                            break;
+                        }
+                        // Keep watching the WHOLE session (GNOME redirects again after login) but bound the
+                        // buffer: retain only the last RedirectScanTail bytes so steady-state graphics don't
+                        // balloon memory. A redirect PDU is small and self-contained, so the tail always
+                        // holds a complete one even if it straddled reads.
+                        if (scanBuf.Length > RedirectScanTail)
+                        {
+                            var buf = scanBuf.GetBuffer();
+                            int len = (int)scanBuf.Length;
+                            int keep = RedirectScanTail / 2;
+                            Buffer.BlockCopy(buf, len - keep, buf, 0, keep);
+                            scanBuf.SetLength(keep);
+                            scanBuf.Position = keep;
+                        }
+                    }
+
                     await pipe.Writer.WriteAsync(slice, ct);
                 }
             }

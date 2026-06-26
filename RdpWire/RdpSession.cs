@@ -69,8 +69,13 @@ public sealed class RdpSession
     // afterwards with a client-assigned (non-fixed) name, so once enumeration is seen we treat unknown
     // channels carrying the ECAM version(1)/msgId framing as camera-device payloads.
     private bool _cameraEnumerated;
+    // GFX progressive compositor: decodes RemoteFX Progressive (WIRE_TO_SURFACE_2) into a server-side
+    // surface framebuffer and emits a composited BGRA frame to the media sink at each END_FRAME. Created
+    // lazily on the first progressive tile (only when recording, i.e. a media sink is present).
+    private GfxProgressiveCompositor? _gfxComp;
 
     internal IRdpMediaSink? Media => _media;
+    internal GfxProgressiveCompositor GfxCompositor => _gfxComp ??= new GfxProgressiveCompositor();
     internal List<PcmFormat> SndFormats => _sndFormats;
     internal List<PcmFormat> AudinFormats => _audinFormats;
     internal int AudinOpenFormat { get => _audinOpenFormat; set => _audinOpenFormat = value; }

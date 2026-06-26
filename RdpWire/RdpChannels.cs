@@ -544,16 +544,16 @@ internal static class RdpChannels
                 if (c.Remaining >= 2) { int n = c.U16le(); p.Field("capsSetCount", n); var arr = new JsonArray(); for (int i = 0; i < n && c.Remaining >= 8; i++) { uint v = c.U32le(); uint len = c.U32le(); uint f = c.Remaining >= 4 ? c.U32le() : 0; if (len > 4) c.O += (int)(len - 4); arr.Add((JsonNode?)$"0x{v:X}/flags=0x{f:X}"); } p.Field("caps", arr); }
                 break;
             case 0x000e: // RESET_GRAPHICS
-                if (c.Remaining >= 8) p.Field("width", c.U32le()).Field("height", c.U32le());
+                if (c.Remaining >= 8) { uint rw = c.U32le(), rh = c.U32le(); p.Field("width", rw).Field("height", rh); if (s.Media != null) s.GfxCompositor.OnResetGraphics((int)rw, (int)rh); }
                 break;
             case 0x0009: // CREATE_SURFACE
-                if (c.Remaining >= 7) p.Field("surfaceId", c.U16le()).Field("width", c.U16le()).Field("height", c.U16le()).Field("pixelFormat", "0x" + c.U8().ToString("X2"));
+                if (c.Remaining >= 7) { int sid = c.U16le(), sw = c.U16le(), sh = c.U16le(); p.Field("surfaceId", sid).Field("width", sw).Field("height", sh).Field("pixelFormat", "0x" + c.U8().ToString("X2")); if (s.Media != null) s.GfxCompositor.OnCreateSurface(sid, sw, sh); }
                 break;
             case 0x000a: // DELETE_SURFACE
-                if (c.Remaining >= 2) p.Field("surfaceId", c.U16le());
+                if (c.Remaining >= 2) { int sid = c.U16le(); p.Field("surfaceId", sid); if (s.Media != null) s.GfxCompositor.OnDeleteSurface(sid); }
                 break;
             case 0x000f: // MAP_SURFACE_TO_OUTPUT
-                if (c.Remaining >= 12) { p.Field("surfaceId", c.U16le()); c.U16le(); p.Field("originX", c.U32le()).Field("originY", c.U32le()); }
+                if (c.Remaining >= 12) { int sid = c.U16le(); c.U16le(); uint ox = c.U32le(), oy = c.U32le(); p.Field("surfaceId", sid).Field("originX", ox).Field("originY", oy); if (s.Media != null) s.GfxCompositor.OnMapSurfaceToOutput(sid, (int)ox, (int)oy); }
                 break;
             case 0x0017: // MAP_SURFACE_TO_SCALED_OUTPUT
                 if (c.Remaining >= 20) { p.Field("surfaceId", c.U16le()); c.U16le(); p.Field("originX", c.U32le()).Field("originY", c.U32le()).Field("targetWidth", c.U32le()).Field("targetHeight", c.U32le()); }
@@ -568,6 +568,7 @@ internal static class RdpChannels
                 break;
             case 0x000c: // END_FRAME
                 if (c.Remaining >= 4) p.Field("frameId", c.U32le());
+                if (s.Media != null && s.GfxCompositor.HasProgressive) s.GfxCompositor.OnEndFrame(s.Media, s.GfxFrameTs != 0 ? s.GfxFrameTs : s.ElapsedMs);
                 break;
             case 0x000d: // FRAME_ACKNOWLEDGE
                 if (c.Remaining >= 12) p.Field("queueDepth", "0x" + c.U32le().ToString("X")).Field("frameId", c.U32le()).Field("totalFramesDecoded", c.U32le());
@@ -591,7 +592,21 @@ internal static class RdpChannels
                 }
                 break;
             case 0x0002: // WIRE_TO_SURFACE_2
-                if (c.Remaining >= 9) { p.Field("surfaceId", c.U16le()); int codecId = c.U16le(); p.Field("codecId", "0x" + codecId.ToString("X4") + " " + GfxCodec(codecId)); p.Field("codecContextId", c.U32le()).Field("pixelFormat", "0x" + c.U8().ToString("X2")); p.Field("bitstream", (body.Length - 9) + "B opaque"); }
+                if (c.Remaining >= 9)
+                {
+                    int surfaceId2 = c.U16le(); p.Field("surfaceId", surfaceId2);
+                    int codecId = c.U16le();
+                    p.Field("codecId", "0x" + codecId.ToString("X4") + " " + GfxCodec(codecId));
+                    p.Field("codecContextId", c.U32le()).Field("pixelFormat", "0x" + c.U8().ToString("X2"));
+                    var bitstream = c.Rest();
+                    // RemoteFX Progressive (0x0009) / V2 (0x000d): decode + composite server-side for recording.
+                    if (s.Media != null && (codecId == 0x0009 || codecId == 0x000d) && bitstream.Length > 0)
+                    {
+                        bool any = s.GfxCompositor.OnProgressive(surfaceId2, bitstream);
+                        p.Field("bitstream", bitstream.Length + "B progressive" + (any ? " (decoded)" : " (no tiles)"));
+                    }
+                    else p.Field("bitstream", bitstream.Length + "B opaque");
+                }
                 break;
             case 0x0004: // SOLIDFILL
                 if (c.Remaining >= 8) { p.Field("surfaceId", c.U16le()); p.Field("fillPixel", "0x" + c.U32le().ToString("X8")); p.Field("fillRectCount", c.U16le()); }

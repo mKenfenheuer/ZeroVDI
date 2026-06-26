@@ -26,6 +26,7 @@ public enum GfxVideoCodec
     Avc420 = 0x0b,
     Avc444 = 0x0e,
     Avc444v2 = 0x0f,
+    Progressive = 0x09, // RemoteFX Progressive, decoded server-side and re-encoded to H.264
 }
 
 /// <summary>
@@ -44,6 +45,14 @@ public interface IRdpMediaSink
     /// </summary>
     void OnDesktopVideo(GfxVideoCodec codec, int surfaceId, ReadOnlySpan<byte> bitstream,
         ReadOnlySpan<byte> auxBitstream, long frameId, long timestampMs);
+
+    /// <summary>
+    /// A fully-composited desktop frame in BGRA (top-down, stride = width*4), emitted once per GFX
+    /// END_FRAME when the desktop is streamed with a codec RdpWire decodes server-side (RemoteFX
+    /// Progressive). The recorder feeds these to an H.264 encoder. <paramref name="bgra"/> is reused
+    /// after the call returns — copy if retained. Default no-op for sinks that only remux H.264.
+    /// </summary>
+    void OnDesktopRawFrame(int width, int height, ReadOnlySpan<byte> bgra, long timestampMs) { }
 
     /// <summary>Remote desktop sound: a chunk of uncompressed PCM (rdpsnd, server→client).</summary>
     void OnRemoteAudio(PcmFormat format, ReadOnlySpan<byte> pcm, long timestampMs);
