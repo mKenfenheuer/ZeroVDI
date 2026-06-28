@@ -197,6 +197,41 @@ public class ProxmoxClient
         }
     }
 
+    public record RrdDataPoint(double Time, double? Cpu, double? Maxcpu, double? Mem, double? Maxmem,
+        double? Netin, double? Netout, double? Diskread, double? Diskwrite);
+
+    public async Task<IReadOnlyList<RrdDataPoint>> GetRrdDataAsync(
+        ProxmoxBackend backend, string node, int vmid, string timeframe = "hour", CancellationToken ct = default)
+    {
+        using var client = CreateClient(backend);
+        if (client == null) return Array.Empty<RrdDataPoint>();
+
+        try
+        {
+            using var doc = await GetJsonAsync(client, $"nodes/{node}/qemu/{vmid}/rrddata?timeframe={timeframe}", ct);
+            if (doc == null) return Array.Empty<RrdDataPoint>();
+
+            var list = new List<RrdDataPoint>();
+            foreach (var item in doc.RootElement.GetProperty("data").EnumerateArray())
+            {
+                double GetD(string prop) => item.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : 0;
+                double? GetN(string prop) => item.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : null;
+
+                list.Add(new RrdDataPoint(
+                    GetD("time"), GetN("cpu"), GetN("maxcpu"),
+                    GetN("mem"), GetN("maxmem"),
+                    GetN("netin"), GetN("netout"),
+                    GetN("diskread"), GetN("diskwrite")));
+            }
+            return list;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Proxmox[{Backend}]: failed to get RRD data for {Node}/{VmId}", backend.Name, node, vmid);
+            return Array.Empty<RrdDataPoint>();
+        }
+    }
+
     /// <summary>Reads the VM's notes/description field (used to carry per-resource config JSON).</summary>
     public async Task<string?> GetNotesAsync(ProxmoxBackend backend, string node, int vmid, CancellationToken ct = default)
     {

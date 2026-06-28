@@ -32,16 +32,21 @@ public class HomeController : Controller
         var userId = _userManager.GetUserId(User);
         if (userId == null)
         {
-            return View(new List<RDPResource>());
+            return View(new List<DashboardResourceViewModel>());
         }
 
-        // Get resources the user has access to
-        var resources = await _context.RDPResourceUserAuthorizations
-            .Where(r => r.UserId == userId)
-            .Select(r => r.RDPResource)
+        var auths = await _context.RDPResourceUserAuthorizations
+            .Include(a => a.RDPResource)
+            .Where(a => a.UserId == userId && a.RDPResource != null)
             .ToListAsync();
 
-        return View(resources ?? new List<RDPResource?>());
+        var items = auths.Select(a => new DashboardResourceViewModel
+        {
+            Resource = a.RDPResource!,
+            Auth = a,
+        }).ToList();
+
+        return View(items);
     }
 
     /// <summary>
@@ -110,4 +115,10 @@ public class HomeController : Controller
     {
         return View(new ErrorViewModel { RequestId = Activity.Current?.Id ?? HttpContext.TraceIdentifier });
     }
+}
+
+public class DashboardResourceViewModel
+{
+    public RDPResource Resource { get; set; } = null!;
+    public RDPResourceUserAuthorization Auth { get; set; } = null!;
 }

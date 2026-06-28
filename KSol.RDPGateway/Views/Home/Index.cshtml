@@ -1,4 +1,4 @@
-@model IEnumerable<KSol.RDPGateway.Models.RDPResource>
+@model IEnumerable<KSol.RDPGateway.Controllers.DashboardResourceViewModel>
 @using KSol.RDPGateway.Models
 @{
     ViewData["Title"] = "Dashboard";
@@ -33,10 +33,19 @@ else if (!Model.Any())
 else
 {
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        @foreach (var resource in Model)
+        @foreach (var item in Model)
         {
+            var resource = item.Resource;
+            var auth = item.Auth;
+            var defaults = auth.ConnectionDefaults ?? new ConnectionDefaults();
             var coldStart = resource.PowerState == ResourcePowerState.Stopped
                          || resource.PowerState == ResourcePowerState.Suspended;
+            var defaultsJson = System.Text.Json.JsonSerializer.Serialize(new {
+                audio = defaults.Audio, clipboard = defaults.Clipboard,
+                microphone = defaults.Microphone, camera = defaults.Camera,
+                gfxMode = defaults.GfxMode, performanceFlags = defaults.PerformanceFlags,
+                hasCreds = auth.HasStoredCredentials
+            });
             <div class="group bg-card text-card-foreground border border-border rounded-2xl p-5 flex flex-col shadow-sm hover:shadow-md transition-shadow">
                 <div class="flex items-start justify-between gap-3">
                     <div class="flex items-center gap-3 min-w-0">
@@ -53,13 +62,201 @@ else
                     <p class="text-sm text-muted-foreground mt-3 line-clamp-2">@resource.Description</p>
                 }
 
-                <div class="mt-5 pt-4 border-t border-border">
+                <div class="mt-5 pt-4 border-t border-border flex items-center gap-2">
                     <a asp-controller="Connect" asp-action="Index" asp-route-id="@resource.Id"
-                       class="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity" target="_blank">
+                       class="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity" target="_blank">
                         <i class="ri-play-circle-line text-base"></i> Connect
                     </a>
+                    <button type="button" class="w-10 h-10 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors"
+                            data-settings-open="@resource.Id" data-defaults='@Html.Raw(defaultsJson)' title="Connection settings">
+                        <i class="ri-settings-3-line text-lg"></i>
+                    </button>
                 </div>
             </div>
         }
     </div>
+}
+
+<!-- Settings modal -->
+<div id="settings-overlay" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50" style="display:none;">
+    <div class="w-full max-w-lg bg-card text-card-foreground border border-border rounded-2xl shadow-xl mx-4 max-h-[90vh] overflow-y-auto">
+        <div class="flex items-center justify-between p-5 border-b border-border">
+            <h2 class="text-lg font-semibold" id="settings-title">Connection settings</h2>
+            <button type="button" id="settings-close" class="w-8 h-8 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg">
+                <i class="ri-close-line text-xl"></i>
+            </button>
+        </div>
+        <div class="p-5 space-y-5">
+            <input type="hidden" id="settings-resource-id" />
+
+            <!-- GFX mode -->
+            <div>
+                <label class="form-label" for="s-gfx">Display mode</label>
+                <select class="form-select" id="s-gfx">
+                    <option value="off">Legacy bitmaps (most compatible)</option>
+                    <option value="clearcodec">GFX — ClearCodec</option>
+                    <option value="avc420">GFX — H.264 (AVC420)</option>
+                    <option value="avc444">GFX — H.264 (AVC444)</option>
+                </select>
+            </div>
+
+            <!-- Session options -->
+            <div class="grid grid-cols-2 gap-2">
+                <label class="flex items-center gap-2 text-sm cursor-pointer"><input class="form-check" type="checkbox" id="s-audio" /> Remote sound</label>
+                <label class="flex items-center gap-2 text-sm cursor-pointer"><input class="form-check" type="checkbox" id="s-clipboard" /> Clipboard sync</label>
+                <label class="flex items-center gap-2 text-sm cursor-pointer"><input class="form-check" type="checkbox" id="s-microphone" /> Microphone</label>
+                <label class="flex items-center gap-2 text-sm cursor-pointer"><input class="form-check" type="checkbox" id="s-camera" /> Camera</label>
+            </div>
+
+            <!-- Performance flags -->
+            <div>
+                <p class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Visual quality</p>
+                <div class="grid grid-cols-2 gap-2">
+                    <label class="flex items-center gap-2 text-sm cursor-pointer"><input class="form-check s-perf" type="checkbox" data-perf="ENABLE_FONT_SMOOTHING" /> Font smoothing</label>
+                    <label class="flex items-center gap-2 text-sm cursor-pointer"><input class="form-check s-perf" type="checkbox" data-perf="ENABLE_DESKTOP_COMPOSITION" /> Desktop composition</label>
+                    <label class="flex items-center gap-2 text-sm cursor-pointer"><input class="form-check s-perf" type="checkbox" data-perf="DISABLE_WALLPAPER" data-invert="1" /> Wallpaper</label>
+                    <label class="flex items-center gap-2 text-sm cursor-pointer"><input class="form-check s-perf" type="checkbox" data-perf="DISABLE_THEMING" data-invert="1" /> Themes</label>
+                    <label class="flex items-center gap-2 text-sm cursor-pointer"><input class="form-check s-perf" type="checkbox" data-perf="DISABLE_FULLWINDOWDRAG" data-invert="1" /> Window drag</label>
+                    <label class="flex items-center gap-2 text-sm cursor-pointer"><input class="form-check s-perf" type="checkbox" data-perf="DISABLE_MENUANIMATIONS" data-invert="1" /> Menu animations</label>
+                </div>
+            </div>
+
+            <!-- SSO credentials -->
+            <div class="border-t border-border pt-4">
+                <p class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Stored credentials (SSO)</p>
+                <div id="s-cred-status" class="text-sm text-muted-foreground mb-3"></div>
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <input class="form-input" id="s-username" placeholder="Username" autocomplete="off" />
+                    <input class="form-input" id="s-password" type="password" placeholder="Password" autocomplete="new-password" />
+                    <input class="form-input" id="s-domain" placeholder="Domain (optional)" autocomplete="off" />
+                </div>
+                <p class="form-hint mt-1">Leave blank to keep existing credentials unchanged.</p>
+            </div>
+        </div>
+        <div class="flex items-center justify-end gap-2 p-5 border-t border-border">
+            <button type="button" id="settings-cancel" class="btn-ghost">Cancel</button>
+            <button type="button" id="settings-save" class="btn-primary">Save settings</button>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+<script>
+(function () {
+    var PERF = {
+        ENABLE_FONT_SMOOTHING: 0x80,
+        ENABLE_DESKTOP_COMPOSITION: 0x100,
+        DISABLE_WALLPAPER: 0x01,
+        DISABLE_FULLWINDOWDRAG: 0x02,
+        DISABLE_MENUANIMATIONS: 0x04,
+        DISABLE_THEMING: 0x08,
+        DISABLE_CURSOR_SHADOW: 0x20,
+        DISABLE_CURSORSETTINGS: 0x40
+    };
+
+    var overlay = document.getElementById('settings-overlay');
+    var resourceIdEl = document.getElementById('settings-resource-id');
+    var titleEl = document.getElementById('settings-title');
+
+    function openSettings(btn) {
+        var id = btn.getAttribute('data-settings-open');
+        var d = JSON.parse(btn.getAttribute('data-defaults') || '{}');
+        resourceIdEl.value = id;
+        var card = btn.closest('.group');
+        titleEl.textContent = (card ? card.querySelector('h3').textContent : 'Connection') + ' — Settings';
+
+        document.getElementById('s-gfx').value = d.gfxMode || 'avc420';
+        document.getElementById('s-audio').checked = d.audio !== false;
+        document.getElementById('s-clipboard').checked = d.clipboard !== false;
+        document.getElementById('s-microphone').checked = d.microphone !== false;
+        document.getElementById('s-camera').checked = d.camera !== false;
+
+        var mask = d.performanceFlags | 0;
+        document.querySelectorAll('.s-perf').forEach(function (cb) {
+            var bit = PERF[cb.getAttribute('data-perf')] || 0;
+            var set = bit ? (mask & bit) !== 0 : false;
+            var invert = cb.getAttribute('data-invert') === '1';
+            cb.checked = invert ? !set : set;
+        });
+
+        document.getElementById('s-cred-status').textContent = d.hasCreds
+            ? 'Credentials stored — console auto-connects.'
+            : 'No credentials stored.';
+        document.getElementById('s-username').value = '';
+        document.getElementById('s-password').value = '';
+        document.getElementById('s-domain').value = '';
+
+        overlay.style.display = 'flex';
+        overlay.classList.remove('hidden');
+    }
+
+    function closeSettings() {
+        overlay.style.display = 'none';
+        overlay.classList.add('hidden');
+    }
+
+    function saveSettings() {
+        var id = resourceIdEl.value;
+        var perf = 0;
+        document.querySelectorAll('.s-perf').forEach(function (cb) {
+            var bit = PERF[cb.getAttribute('data-perf')] || 0;
+            var invert = cb.getAttribute('data-invert') === '1';
+            if (invert ? !cb.checked : cb.checked) perf |= bit;
+        });
+
+        var user = document.getElementById('s-username').value;
+        var pass = document.getElementById('s-password').value;
+        var domain = document.getElementById('s-domain').value;
+        var storeCreds = !!(user && pass);
+
+        var body = {
+            storeCredentials: storeCreds,
+            rememberSettings: true,
+            username: user, password: pass, domain: domain,
+            audio: document.getElementById('s-audio').checked,
+            clipboard: document.getElementById('s-clipboard').checked,
+            microphone: document.getElementById('s-microphone').checked,
+            camera: document.getElementById('s-camera').checked,
+            gfxMode: document.getElementById('s-gfx').value,
+            performanceFlags: perf
+        };
+
+        var btn = document.getElementById('settings-save');
+        btn.disabled = true;
+        btn.textContent = 'Saving…';
+
+        fetch('/connect/' + encodeURIComponent(id) + '/save', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        }).then(function (r) { return r.json(); }).then(function () {
+            closeSettings();
+            if (window.rdpgwToast) window.rdpgwToast('Settings saved.', 'success');
+            // Update the data-defaults on the button so reopening shows the new values
+            var openBtn = document.querySelector('[data-settings-open="' + id + '"]');
+            if (openBtn) {
+                var d = JSON.parse(openBtn.getAttribute('data-defaults') || '{}');
+                d.audio = body.audio; d.clipboard = body.clipboard;
+                d.microphone = body.microphone; d.camera = body.camera;
+                d.gfxMode = body.gfxMode; d.performanceFlags = body.performanceFlags;
+                if (storeCreds) d.hasCreds = true;
+                openBtn.setAttribute('data-defaults', JSON.stringify(d));
+            }
+        }).catch(function () {
+            if (window.rdpgwToast) window.rdpgwToast('Failed to save settings.', 'error');
+        }).finally(function () {
+            btn.disabled = false;
+            btn.textContent = 'Save settings';
+        });
+    }
+
+    document.querySelectorAll('[data-settings-open]').forEach(function (btn) {
+        btn.addEventListener('click', function () { openSettings(btn); });
+    });
+    document.getElementById('settings-close').addEventListener('click', closeSettings);
+    document.getElementById('settings-cancel').addEventListener('click', closeSettings);
+    document.getElementById('settings-save').addEventListener('click', saveSettings);
+    overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) closeSettings(); });
+})();
+</script>
 }

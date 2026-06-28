@@ -17,6 +17,8 @@ public class VdiResourceResolver
     private readonly ProxmoxClient _proxmox;
     private readonly ProxmoxBackendProvider _backends;
     private readonly SessionTracker _sessions;
+    private readonly IpmiClient _ipmi;
+    private readonly CredentialProtector _credentials;
     private readonly ILogger<VdiResourceResolver> _logger;
 
     public VdiResourceResolver(
@@ -24,12 +26,16 @@ public class VdiResourceResolver
         ProxmoxClient proxmox,
         ProxmoxBackendProvider backends,
         SessionTracker sessions,
+        IpmiClient ipmi,
+        CredentialProtector credentials,
         ILogger<VdiResourceResolver> logger)
     {
         _scopeFactory = scopeFactory;
         _proxmox = proxmox;
         _backends = backends;
         _sessions = sessions;
+        _ipmi = ipmi;
+        _credentials = credentials;
         _logger = logger;
     }
 
@@ -69,8 +75,8 @@ public class VdiResourceResolver
 
         var port = (ushort)(res.Port > 0 ? res.Port : requestedPort);
 
-        // Manual resources (or Proxmox resources missing their backend linkage) connect to the
-        // stored address directly — just probe RDP.
+        // Manual resources (or Proxmox resources missing their backend linkage): probe RDP,
+        // and if offline attempt WOL/IPMI wake then poll until reachable.
         if (res.Source != ResourceSource.Proxmox || res.ProxmoxBackendId == null
             || res.ProxmoxNode == null || res.ProxmoxVmId == null)
         {
@@ -78,10 +84,50 @@ public class VdiResourceResolver
                 return Fail("This resource has no address configured. Contact an administrator.");
 
             Report(new ReadinessProgress(ReadinessPhase.RdpProbe, "Checking remote desktop…"));
-            if (!await IsPortOpenAsync(res.IpAddress!, port))
-                return Fail($"The remote desktop service at {res.IpAddress}:{port} is not responding (RDP service unavailable).");
+            if (await IsPortOpenAsync(res.IpAddress!, port))
+            {
+                res.PowerState = ResourcePowerState.Running;
+                await db.SaveChangesAsync(ct);
+                return Ready(res.IpAddress!, port);
+            }
 
-            return Ready(res.IpAddress!, port);
+            // Attempt to wake the host if a wake method is configured.
+            if (res.WakeMethod != WakeMethod.None)
+            {
+                Report(new ReadinessProgress(ReadinessPhase.Starting, "Starting resource…"));
+                var wakeOk = false;
+                if (res.WakeMethod == WakeMethod.WakeOnLan && !string.IsNullOrEmpty(res.WolMacAddress))
+                {
+                    try { await WakeOnLan.SendMagicPacketAsync(res.WolMacAddress); wakeOk = true; }
+                    catch (Exception ex) { _logger.LogWarning(ex, "WOL failed for {Resource}", resource); }
+                }
+                else if (res.WakeMethod == WakeMethod.Ipmi && !string.IsNullOrEmpty(res.IpmiHost))
+                {
+                    var pass = _credentials.Unprotect(res.ProtectedIpmiPassword);
+                    wakeOk = await _ipmi.PowerOnAsync(res.IpmiHost, res.IpmiUser ?? "", pass ?? "");
+                }
+
+                if (wakeOk)
+                {
+                    res.PowerState = ResourcePowerState.Starting;
+                    await db.SaveChangesAsync(ct);
+
+                    var wakeDeadline = DateTime.UtcNow.AddSeconds(120);
+                    while (DateTime.UtcNow < wakeDeadline && !ct.IsCancellationRequested)
+                    {
+                        Report(new ReadinessProgress(ReadinessPhase.RdpProbe, "Waiting for remote desktop…"));
+                        await Task.Delay(3000, ct);
+                        if (await IsPortOpenAsync(res.IpAddress!, port))
+                        {
+                            res.PowerState = ResourcePowerState.Running;
+                            await db.SaveChangesAsync(ct);
+                            return Ready(res.IpAddress!, port);
+                        }
+                    }
+                }
+            }
+
+            return Fail($"The remote desktop service at {res.IpAddress}:{port} is not responding.");
         }
 
         var backend = await _backends.GetAsync(res.ProxmoxBackendId.Value);

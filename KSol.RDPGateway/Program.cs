@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Identity.UI.Services;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using KSol.RDPGateway.Data;
@@ -50,6 +51,10 @@ public class Program
         builder.Services.AddDataProtection()
             .PersistKeysToFileSystem(new DirectoryInfo(dpKeysDir));
         builder.Services.AddSingleton<RDP.CredentialProtector>();
+
+        // SMTP email sender for Identity (password reset, confirmation, 2FA codes).
+        builder.Services.Configure<RDP.SmtpSettings>(builder.Configuration.GetSection("Smtp"));
+        builder.Services.AddTransient<IEmailSender, RDP.SmtpEmailSender>();
         // Holds RDP Server Redirection routing tokens between a redirect and the browser's reconnect.
         builder.Services.AddSingleton<RDP.RedirectionTokenCache>();
         // Session-recording rules evaluation (per request: uses the scoped DbContext).
@@ -76,6 +81,12 @@ public class Program
         builder.Services.AddSingleton<RDP.ProxmoxSyncService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<RDP.ProxmoxSyncService>());
         builder.Services.AddHostedService<RDP.IdleReaperService>();
+
+        // Manual resource lifecycle: status polling, WOL, IPMI, SSH shutdown.
+        builder.Services.AddSingleton<RDP.IpmiClient>();
+        builder.Services.AddSingleton<RDP.SshCommandService>();
+        builder.Services.AddSingleton<RDP.ManualHostStatusService>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<RDP.ManualHostStatusService>());
 
         // Honor X-Forwarded-Proto / X-Forwarded-Host / X-Forwarded-For when running behind a
         // reverse proxy (e.g. Traefik) that terminates TLS. Without this, Request.Scheme/Host are

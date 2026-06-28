@@ -6,6 +6,7 @@
     ViewData["Title"] = r.Name;
     ViewData["Subtitle"] = "Edit resource";
     var isProxmox = r.Source == ResourceSource.Proxmox;
+    var isManual = r.Source == ResourceSource.Manual;
 
     var tabs = new (string Id, string Label, string Icon)[]
     {
@@ -74,6 +75,72 @@
                 <partial name="_RdpOptionsEditor" for="Resource.RdpOptions" />
             }
 
+            @if (isManual)
+            {
+                <div class="border-t border-border pt-4 space-y-4">
+                    <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide">Lifecycle</h2>
+
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                            <label class="form-label">OS type</label>
+                            <select name="OsType" class="form-select">
+                                <option value="0" selected="@(r.OsType == OsType.Windows)">Windows</option>
+                                <option value="1" selected="@(r.OsType == OsType.WindowsServer)">Windows Server</option>
+                                <option value="2" selected="@(r.OsType == OsType.Linux)">Linux</option>
+                                <option value="3" selected="@(r.OsType == OsType.MacOS)">macOS</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="form-label">Wake method</label>
+                            <select name="WakeMethod" id="wake-method" class="form-select">
+                                <option value="0" selected="@(r.WakeMethod == WakeMethod.None)">None</option>
+                                <option value="1" selected="@(r.WakeMethod == WakeMethod.WakeOnLan)">Wake-on-LAN</option>
+                                <option value="2" selected="@(r.WakeMethod == WakeMethod.Ipmi)">IPMI</option>
+                            </select>
+                        </div>
+                        <div id="wol-fields" class="@(r.WakeMethod != WakeMethod.WakeOnLan ? "hidden" : "")">
+                            <label class="form-label">MAC address</label>
+                            <input name="WolMacAddress" value="@r.WolMacAddress" class="form-input" placeholder="AA:BB:CC:DD:EE:FF" />
+                        </div>
+                    </div>
+
+                    <div id="ipmi-fields" class="grid grid-cols-1 md:grid-cols-3 gap-4 @(r.WakeMethod != WakeMethod.Ipmi ? "hidden" : "")">
+                        <div>
+                            <label class="form-label">IPMI host</label>
+                            <input name="IpmiHost" value="@r.IpmiHost" class="form-input" placeholder="10.0.0.100" />
+                        </div>
+                        <div>
+                            <label class="form-label">IPMI user</label>
+                            <input name="IpmiUser" value="@r.IpmiUser" class="form-input" />
+                        </div>
+                        <div>
+                            <label class="form-label">IPMI password</label>
+                            <input name="ipmiPassword" type="password" class="form-input" placeholder="@(string.IsNullOrEmpty(r.ProtectedIpmiPassword) ? "" : "••••••••")" autocomplete="new-password" />
+                            <p class="form-hint">Leave blank to keep existing.</p>
+                        </div>
+                    </div>
+
+                    <div class="border-t border-border pt-4">
+                        <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">Remote shutdown</h3>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div>
+                                <label class="form-label">SSH user</label>
+                                <input name="SshUser" value="@r.SshUser" class="form-input" placeholder="root" />
+                                <p class="form-hint">For Linux/macOS shutdown.</p>
+                            </div>
+                            <div>
+                                <label class="form-label">SSH private key</label>
+                                <textarea name="sshKey" class="form-input" rows="2" placeholder="@(string.IsNullOrEmpty(r.ProtectedSshKey) ? "Paste private key content" : "Key stored — leave blank to keep")"></textarea>
+                            </div>
+                            <div>
+                                <label class="form-label">Shutdown command</label>
+                                <input name="ShutdownCommand" value="@r.ShutdownCommand" class="form-input" placeholder="Auto-detected from OS type" />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            }
+
             <div class="flex items-center gap-2 pt-2 border-t border-border">
                 <button type="submit" class="btn-primary">Save changes</button>
             </div>
@@ -99,21 +166,34 @@
                     <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mt-6 mb-2">VM notes (config)</h3>
                     <pre class="text-xs bg-muted rounded-lg p-3 overflow-x-auto">@r.ConfigJson</pre>
                 }
+                @if (r.ProxmoxVmId != null)
+                {
+                    <div id="rrd-charts" class="mt-6 space-y-4">
+                        <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wide">Performance (last hour)</h3>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div class="bg-muted rounded-lg p-3"><span class="text-xs text-muted-foreground">CPU</span><canvas id="chart-cpu" height="80" class="w-full mt-1"></canvas></div>
+                            <div class="bg-muted rounded-lg p-3"><span class="text-xs text-muted-foreground">Memory</span><canvas id="chart-mem" height="80" class="w-full mt-1"></canvas></div>
+                            <div class="bg-muted rounded-lg p-3"><span class="text-xs text-muted-foreground">Network I/O</span><canvas id="chart-net" height="80" class="w-full mt-1"></canvas></div>
+                            <div class="bg-muted rounded-lg p-3"><span class="text-xs text-muted-foreground">Disk I/O</span><canvas id="chart-disk" height="80" class="w-full mt-1"></canvas></div>
+                        </div>
+                    </div>
+                }
             }
             else
             {
                 <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-3 text-sm">
                     <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Source</dt><dd>Manual</dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">OS type</dt><dd>@r.OsType</dd></div>
                     <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Address</dt><dd>@(string.IsNullOrEmpty(r.IpAddress) ? "—" : $"{r.IpAddress}:{r.Port}")</dd></div>
                     <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Current state</dt><dd><partial name="_PowerStateBadge" model="r.PowerState" /></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Wake method</dt><dd>@r.WakeMethod</dd></div>
                     <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Last activity</dt><dd>@(r.LastActivityUtc?.ToString("u") ?? "—")</dd></div>
                 </dl>
-                <p class="text-sm text-muted-foreground mt-4">This is a manually-defined resource with no Proxmox backend.</p>
             }
         </div>
     </section>
 
-    <!-- Users & access (Authorizations folded in) -->
+    <!-- Users & access -->
     <section data-panel="access" class="hidden space-y-4">
         <div class="card-surface p-6">
             <div class="flex items-center justify-between mb-4">
@@ -160,11 +240,25 @@
                                         <span class="badge bg-success/10 text-success"><i class="ri-key-2-line"></i> SSO</span>
                                     }
                                 </div>
-                                <i class="ri-arrow-down-s-line text-muted-foreground"></i>
+                                <div class="flex items-center gap-2">
+                                    <i class="ri-settings-3-line text-muted-foreground"></i>
+                                    <i class="ri-arrow-down-s-line text-muted-foreground"></i>
+                                </div>
                             </summary>
                             <div class="px-4 pb-4 pt-1 border-t border-border space-y-4">
-                                <!-- Stored credentials -->
+                                <!-- Connection defaults -->
                                 <div>
+                                    <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Connection defaults</h4>
+                                    <form asp-action="SetConnectionDefaults" asp-route-id="@r.Id" asp-route-authId="@a.Id" method="post">
+                                        @Html.AntiForgeryToken()
+                                        @{ await Html.RenderPartialAsync("~/Views/RDPResourceUserAuthorizations/_ConnectionDefaultsEditor.cshtml", a.ConnectionDefaults ?? new ConnectionDefaults()); }
+                                        <div class="mt-3">
+                                            <button type="submit" class="btn-primary btn-sm">Save defaults</button>
+                                        </div>
+                                    </form>
+                                </div>
+                                <!-- Stored credentials -->
+                                <div class="pt-3 border-t border-border">
                                     <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Stored credentials (SSO)</h4>
                                     @if (a.HasStoredCredentials)
                                     {
@@ -202,12 +296,18 @@
         </div>
     </section>
 
-    <!-- Connection defaults -->
+    <!-- Connection defaults (resource-wide) -->
     <section data-panel="defaults" class="hidden">
         <div class="card-surface p-6">
-            <h2 class="font-medium mb-1">Connection defaults</h2>
-            <p class="text-sm text-muted-foreground mb-4">Per-user connection defaults are configured under each assigned user in the “Users &amp; access” tab.</p>
-            <p class="text-sm text-muted-foreground">Resource-wide RDP options live in the “General” tab’s RDP options section.</p>
+            <h2 class="font-medium mb-1">Resource-wide connection defaults</h2>
+            <p class="text-sm text-muted-foreground mb-4">These defaults are inherited by newly granted users. Per-user overrides are configured in the "Users &amp; access" tab.</p>
+            <form asp-action="SetResourceDefaults" asp-route-id="@r.Id" method="post">
+                @Html.AntiForgeryToken()
+                @{ await Html.RenderPartialAsync("~/Views/RDPResourceUserAuthorizations/_ConnectionDefaultsEditor.cshtml", r.DefaultConnectionDefaults ?? new ConnectionDefaults()); }
+                <div class="flex items-center gap-2 pt-4 border-t border-border mt-4">
+                    <button type="submit" class="btn-primary">Save defaults</button>
+                </div>
+            </form>
         </div>
     </section>
 
@@ -249,6 +349,7 @@
     <partial name="_ValidationScripts" />
     <script>
         (function () {
+            // Tab logic
             var root = document.querySelector('[x-tabs]');
             if (!root) return;
             var btns = root.querySelectorAll('.tab-btn');
@@ -262,10 +363,108 @@
                 });
                 panels.forEach(function (p) { p.classList.toggle('hidden', p.dataset.panel !== id); });
                 history.replaceState(null, '', '#' + id);
+                if (id === 'backend' && !rrdLoaded) loadRrd();
             }
             btns.forEach(function (b) { b.addEventListener('click', function () { activate(b.dataset.tab); }); });
             var initial = (location.hash || '').replace('#', '') || 'general';
             activate(btns.length && [].some.call(btns, function (b) { return b.dataset.tab === initial; }) ? initial : 'general');
+
+            // Wake method toggle
+            var wakeSelect = document.getElementById('wake-method');
+            if (wakeSelect) {
+                wakeSelect.addEventListener('change', function () {
+                    var v = this.value;
+                    var wolFields = document.getElementById('wol-fields');
+                    var ipmiFields = document.getElementById('ipmi-fields');
+                    if (wolFields) wolFields.classList.toggle('hidden', v !== '1');
+                    if (ipmiFields) ipmiFields.classList.toggle('hidden', v !== '2');
+                });
+            }
+
+            // RRD sparkline charts
+            var rrdLoaded = false;
+            function drawSparkline(canvasId, values, color, fillColor) {
+                var canvas = document.getElementById(canvasId);
+                if (!canvas || !values || values.length < 2) return;
+                var ctx = canvas.getContext('2d');
+                var w = canvas.offsetWidth; var h = canvas.offsetHeight;
+                canvas.width = w * (window.devicePixelRatio || 1);
+                canvas.height = h * (window.devicePixelRatio || 1);
+                ctx.scale(window.devicePixelRatio || 1, window.devicePixelRatio || 1);
+
+                var max = Math.max.apply(null, values.filter(function(v){return v!=null;})) || 1;
+                var step = w / (values.length - 1);
+
+                ctx.beginPath();
+                ctx.moveTo(0, h);
+                for (var i = 0; i < values.length; i++) {
+                    var v = values[i] == null ? 0 : values[i];
+                    var y = h - (v / max) * (h - 4);
+                    if (i === 0) ctx.lineTo(0, y); else ctx.lineTo(i * step, y);
+                }
+                ctx.lineTo(w, h);
+                ctx.closePath();
+                ctx.fillStyle = fillColor || 'rgba(59,130,246,0.15)';
+                ctx.fill();
+
+                ctx.beginPath();
+                for (var i = 0; i < values.length; i++) {
+                    var v = values[i] == null ? 0 : values[i];
+                    var y = h - (v / max) * (h - 4);
+                    if (i === 0) ctx.moveTo(0, y); else ctx.lineTo(i * step, y);
+                }
+                ctx.strokeStyle = color || '#3b82f6';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+            }
+
+            function drawDualSparkline(canvasId, v1, v2, c1, c2) {
+                var canvas = document.getElementById(canvasId);
+                if (!canvas) return;
+                var all = (v1||[]).concat(v2||[]).filter(function(v){return v!=null;});
+                var max = Math.max.apply(null, all) || 1;
+                var ctx = canvas.getContext('2d');
+                var w = canvas.offsetWidth; var h = canvas.offsetHeight;
+                canvas.width = w * (window.devicePixelRatio || 1);
+                canvas.height = h * (window.devicePixelRatio || 1);
+                ctx.scale(window.devicePixelRatio || 1, window.devicePixelRatio || 1);
+                var step = w / (Math.max((v1||[]).length, (v2||[]).length) - 1 || 1);
+
+                [v1,v2].forEach(function(vals,idx) {
+                    if (!vals) return;
+                    ctx.beginPath();
+                    for (var i = 0; i < vals.length; i++) {
+                        var v = vals[i] == null ? 0 : vals[i];
+                        var y = h - (v / max) * (h - 4);
+                        if (i === 0) ctx.moveTo(0, y); else ctx.lineTo(i * step, y);
+                    }
+                    ctx.strokeStyle = idx === 0 ? (c1||'#3b82f6') : (c2||'#f97316');
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                });
+            }
+
+            function loadRrd() {
+                rrdLoaded = true;
+                var id = '@r.Id';
+                fetch('/admin/resources/' + encodeURIComponent(id) + '/rrddata')
+                    .then(function(r){return r.json();})
+                    .then(function(data) {
+                        if (!data || !data.length) return;
+                        var cpuPct = data.map(function(d){return d.cpu!=null && d.maxcpu ? (d.cpu/d.maxcpu)*100 : null;});
+                        var memPct = data.map(function(d){return d.mem!=null && d.maxmem ? (d.mem/d.maxmem)*100 : null;});
+                        var netin = data.map(function(d){return d.netin;});
+                        var netout = data.map(function(d){return d.netout;});
+                        var diskr = data.map(function(d){return d.diskread;});
+                        var diskw = data.map(function(d){return d.diskwrite;});
+
+                        drawSparkline('chart-cpu', cpuPct, '#3b82f6', 'rgba(59,130,246,0.15)');
+                        drawSparkline('chart-mem', memPct, '#8b5cf6', 'rgba(139,92,246,0.15)');
+                        drawDualSparkline('chart-net', netin, netout, '#10b981', '#f97316');
+                        drawDualSparkline('chart-disk', diskr, diskw, '#06b6d4', '#f43f5e');
+                    })
+                    .catch(function(){});
+            }
         })();
     </script>
 }

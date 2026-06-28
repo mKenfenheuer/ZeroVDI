@@ -12,6 +12,23 @@ public enum ResourceSource
     Proxmox = 1,
 }
 
+/// <summary>Operating system type of the resource's backing machine.</summary>
+public enum OsType
+{
+    Windows = 0,
+    WindowsServer = 1,
+    Linux = 2,
+    MacOS = 3,
+}
+
+/// <summary>How to power on a manual resource that is offline.</summary>
+public enum WakeMethod
+{
+    None = 0,
+    WakeOnLan = 1,
+    Ipmi = 2,
+}
+
 /// <summary>Last known power state of a resource's backing machine.</summary>
 public enum ResourcePowerState
 {
@@ -78,6 +95,30 @@ public class RDPResource
     /// <see cref="RdpOptions"/> were parsed from). Kept for diagnostics and round-tripping.
     /// </summary>
     public string? ConfigJson { get; set; }
+
+    /// <summary>Resource-wide connection defaults inherited by newly granted users.</summary>
+    public ConnectionDefaults? DefaultConnectionDefaults { get; set; }
+
+    // --- Manual resource lifecycle (only meaningful when Source == Manual) ---
+
+    public OsType OsType { get; set; } = OsType.Windows;
+    public WakeMethod WakeMethod { get; set; } = WakeMethod.None;
+
+    /// <summary>MAC address for Wake-on-LAN (AA:BB:CC:DD:EE:FF).</summary>
+    public string? WolMacAddress { get; set; }
+
+    /// <summary>IPMI BMC address for remote power control.</summary>
+    public string? IpmiHost { get; set; }
+    public string? IpmiUser { get; set; }
+    /// <summary>Encrypted via CredentialProtector.</summary>
+    public string? ProtectedIpmiPassword { get; set; }
+
+    /// <summary>SSH user for remote shutdown (Linux/macOS).</summary>
+    public string? SshUser { get; set; }
+    /// <summary>Encrypted SSH private key content.</summary>
+    public string? ProtectedSshKey { get; set; }
+    /// <summary>Custom shutdown command (defaults based on OsType if null).</summary>
+    public string? ShutdownCommand { get; set; }
 
     List<RDPResourceUserAuthorization>? UserAuthorizations { get; set; }
 }

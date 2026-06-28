@@ -74,11 +74,15 @@ namespace KSol.RDPGateway.Controllers
         // are created by the sync service, not here. Id is server-generated (GUID).
         [HttpPost("create")]
         [ValidateAntiForgeryToken]
-        public async Task<IActionResult> Create([Bind("Name,Description,IpAddress,Port,RdpOptions")] RDPResource rDPResource)
+        public async Task<IActionResult> Create([Bind("Name,Description,IpAddress,Port,RdpOptions,OsType,WakeMethod,WolMacAddress,IpmiHost,IpmiUser,SshUser,ShutdownCommand")] RDPResource rDPResource, string? ipmiPassword, string? sshKey)
         {
             if (ModelState.IsValid)
             {
                 rDPResource.Source = ResourceSource.Manual;
+                if (!string.IsNullOrEmpty(ipmiPassword))
+                    rDPResource.ProtectedIpmiPassword = _credentials.Protect(ipmiPassword);
+                if (!string.IsNullOrEmpty(sshKey))
+                    rDPResource.ProtectedSshKey = _credentials.Protect(sshKey);
                 _context.Add(rDPResource);
                 await _context.SaveChangesAsync();
                 return RedirectToAction(nameof(Index));
@@ -146,7 +150,7 @@ namespace KSol.RDPGateway.Controllers
         // applied; for Manual resources the address, port and RDP options are editable too.
         [HttpPost("edit/{id}")]
         [ValidateAntiForgeryToken]
-        public async Task<IActionResult> Edit(string id, [Bind("Id,Name,Description,IpAddress,Port,RdpOptions")] RDPResource input)
+        public async Task<IActionResult> Edit(string id, [Bind("Id,Name,Description,IpAddress,Port,RdpOptions,OsType,WakeMethod,WolMacAddress,IpmiHost,IpmiUser,SshUser,ShutdownCommand")] RDPResource input, string? ipmiPassword, string? sshKey)
         {
             if (id != input.Id)
             {
@@ -168,6 +172,17 @@ namespace KSol.RDPGateway.Controllers
                     existing.IpAddress = input.IpAddress;
                     existing.Port = input.Port;
                     existing.RdpOptions = input.RdpOptions ?? existing.RdpOptions;
+                    existing.OsType = input.OsType;
+                    existing.WakeMethod = input.WakeMethod;
+                    existing.WolMacAddress = input.WolMacAddress;
+                    existing.IpmiHost = input.IpmiHost;
+                    existing.IpmiUser = input.IpmiUser;
+                    if (!string.IsNullOrEmpty(ipmiPassword))
+                        existing.ProtectedIpmiPassword = _credentials.Protect(ipmiPassword);
+                    existing.SshUser = input.SshUser;
+                    if (!string.IsNullOrEmpty(sshKey))
+                        existing.ProtectedSshKey = _credentials.Protect(sshKey);
+                    existing.ShutdownCommand = input.ShutdownCommand;
                 }
                 await _context.SaveChangesAsync();
                 TempData["Status"] = "Resource saved.";
@@ -196,11 +211,24 @@ namespace KSol.RDPGateway.Controllers
                 .AnyAsync(a => a.RDPResourceId == id && a.UserId == userId);
             if (!exists)
             {
-                _context.RDPResourceUserAuthorizations.Add(new RDPResourceUserAuthorization
+                var auth = new RDPResourceUserAuthorization
                 {
                     RDPResourceId = id,
                     UserId = userId,
-                });
+                };
+                if (resource.DefaultConnectionDefaults != null)
+                {
+                    auth.ConnectionDefaults = new ConnectionDefaults
+                    {
+                        Audio = resource.DefaultConnectionDefaults.Audio,
+                        Clipboard = resource.DefaultConnectionDefaults.Clipboard,
+                        Microphone = resource.DefaultConnectionDefaults.Microphone,
+                        Camera = resource.DefaultConnectionDefaults.Camera,
+                        GfxMode = resource.DefaultConnectionDefaults.GfxMode,
+                        PerformanceFlags = resource.DefaultConnectionDefaults.PerformanceFlags,
+                    };
+                }
+                _context.RDPResourceUserAuthorizations.Add(auth);
                 await _context.SaveChangesAsync();
                 TempData["Status"] = "Access granted.";
             }
@@ -262,6 +290,52 @@ namespace KSol.RDPGateway.Controllers
             await _context.SaveChangesAsync();
             TempData["Status"] = "Stored credentials cleared.";
             return RedirectToAction(nameof(Edit), new { id });
+        }
+
+        // POST: /admin/resources/edit/{id}/defaults — set resource-wide connection defaults.
+        [HttpPost("edit/{id}/defaults")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> SetResourceDefaults(string id, ConnectionDefaults connectionDefaults)
+        {
+            var resource = await _context.RDPResources.FirstOrDefaultAsync(r => r.Id == id);
+            if (resource == null) return NotFound();
+
+            resource.DefaultConnectionDefaults = connectionDefaults;
+            await _context.SaveChangesAsync();
+            TempData["Status"] = "Connection defaults saved.";
+            return RedirectToAction(nameof(Edit), new { id });
+        }
+
+        // POST: /admin/resources/{id}/defaults/{authId} — set per-user connection defaults.
+        [HttpPost("{id}/defaults/{authId}")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> SetConnectionDefaults(string id, string authId, ConnectionDefaults connectionDefaults)
+        {
+            var auth = await _context.RDPResourceUserAuthorizations
+                .FirstOrDefaultAsync(a => a.Id == authId && a.RDPResourceId == id);
+            if (auth == null) return NotFound();
+
+            auth.ConnectionDefaults = connectionDefaults;
+            await _context.SaveChangesAsync();
+            TempData["Status"] = "User connection defaults saved.";
+            return RedirectToAction(nameof(Edit), new { id });
+        }
+
+        // GET: /admin/resources/{id}/rrddata — Proxmox RRD time-series data (JSON).
+        [HttpGet("{id}/rrddata")]
+        public async Task<IActionResult> RrdData(string id, string timeframe = "hour")
+        {
+            var res = await _context.RDPResources.FirstOrDefaultAsync(r => r.Id == id);
+            if (res == null) return NotFound();
+            if (res.Source != ResourceSource.Proxmox || res.ProxmoxBackendId == null
+                || res.ProxmoxNode == null || res.ProxmoxVmId == null)
+                return Json(Array.Empty<object>());
+
+            var backend = await _backends.GetAsync(res.ProxmoxBackendId.Value);
+            if (backend == null || !backend.IsConfigured) return Json(Array.Empty<object>());
+
+            var data = await _proxmox.GetRrdDataAsync(backend, res.ProxmoxNode, res.ProxmoxVmId.Value, timeframe);
+            return Json(data);
         }
 
         // GET: /admin/resources/delete/5

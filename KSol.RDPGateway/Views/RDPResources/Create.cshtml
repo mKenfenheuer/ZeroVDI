@@ -1,4 +1,5 @@
 @model KSol.RDPGateway.Models.RDPResource
+@using KSol.RDPGateway.Models
 
 @{
     ViewData["Title"] = "New resource";
@@ -46,10 +47,75 @@
 
     <partial name="_RdpOptionsEditor" for="RdpOptions" />
 
+    <div>
+        <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">Lifecycle</h2>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+                <label class="form-label">OS type</label>
+                <select name="OsType" class="form-select">
+                    <option value="0">Windows</option>
+                    <option value="1">Windows Server</option>
+                    <option value="2">Linux</option>
+                    <option value="3">macOS</option>
+                </select>
+            </div>
+            <div>
+                <label class="form-label">Wake method</label>
+                <select name="WakeMethod" id="wake-method" class="form-select">
+                    <option value="0">None</option>
+                    <option value="1">Wake-on-LAN</option>
+                    <option value="2">IPMI</option>
+                </select>
+            </div>
+            <div id="wol-fields" class="hidden">
+                <label class="form-label">MAC address</label>
+                <input name="WolMacAddress" class="form-input" placeholder="AA:BB:CC:DD:EE:FF" />
+            </div>
+        </div>
+        <div id="ipmi-fields" class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4 hidden">
+            <div>
+                <label class="form-label">IPMI host</label>
+                <input name="IpmiHost" class="form-input" placeholder="10.0.0.100" />
+            </div>
+            <div>
+                <label class="form-label">IPMI user</label>
+                <input name="IpmiUser" class="form-input" />
+            </div>
+            <div>
+                <label class="form-label">IPMI password</label>
+                <input name="ipmiPassword" type="password" class="form-input" autocomplete="new-password" />
+            </div>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+            <div>
+                <label class="form-label">SSH user</label>
+                <input name="SshUser" class="form-input" placeholder="root" />
+                <p class="form-hint">For Linux/macOS shutdown.</p>
+            </div>
+            <div>
+                <label class="form-label">SSH private key</label>
+                <textarea name="sshKey" class="form-input" rows="2" placeholder="Paste private key content"></textarea>
+            </div>
+            <div>
+                <label class="form-label">Shutdown command</label>
+                <input name="ShutdownCommand" class="form-input" placeholder="Auto-detected from OS type" />
+            </div>
+        </div>
+    </div>
+
     <div class="flex items-center gap-2 pt-2 border-t border-border">
         <button type="submit" class="btn-primary">Create resource</button>
         <a asp-action="Index" class="btn-ghost">Cancel</a>
     </div>
 </form>
 
-@section Scripts { <partial name="_ValidationScripts" /> }
+@section Scripts {
+    <partial name="_ValidationScripts" />
+    <script>
+        document.getElementById('wake-method').addEventListener('change', function () {
+            var v = this.value;
+            document.getElementById('wol-fields').classList.toggle('hidden', v !== '1');
+            document.getElementById('ipmi-fields').classList.toggle('hidden', v !== '2');
+        });
+    </script>
+}

@@ -71,3 +71,50 @@
         </div>
     </div>
 </div>
+
+<!-- Backends status -->
+<div class="card-surface p-6 mt-6">
+    <div class="flex items-center justify-between mb-4">
+        <h2 class="font-medium">Backends</h2>
+        <a asp-controller="ProxmoxBackends" asp-action="Index" class="text-sm text-primary hover:underline">Manage</a>
+    </div>
+    <div id="backend-status">
+        <p class="text-sm text-muted-foreground"><i class="ri-loader-4-line animate-spin inline-block mr-1"></i> Loading backend status…</p>
+    </div>
+</div>
+
+@section Scripts {
+<script>
+(function () {
+    fetch('/admin/api/backends/status')
+        .then(function (r) { return r.json(); })
+        .then(function (backends) {
+            var el = document.getElementById('backend-status');
+            if (!backends || !backends.length) {
+                el.innerHTML = '<p class="text-sm text-muted-foreground">No backends configured.</p>';
+                return;
+            }
+            var html = '<div class="space-y-3">';
+            backends.forEach(function (b) {
+                var badge = b.isOnline
+                    ? '<span class="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-success/10 text-success"><i class="ri-checkbox-circle-fill"></i> Online</span>'
+                    : '<span class="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-destructive/10 text-destructive"><i class="ri-close-circle-fill"></i> Offline</span>';
+                var detail = b.isOnline
+                    ? '<span class="text-xs text-muted-foreground">' + b.totalVms + ' VMs, ' + b.runningVms + ' running</span>'
+                    : '<span class="text-xs text-destructive">' + (b.error || 'Unreachable') + '</span>';
+                html += '<div class="flex items-center justify-between py-2 border-b border-border last:border-0">'
+                    + '<div class="flex items-center gap-3 min-w-0">'
+                    + '<div class="w-9 h-9 rounded-lg bg-muted flex items-center justify-center flex-shrink-0"><i class="ri-server-line text-muted-foreground"></i></div>'
+                    + '<div class="min-w-0"><div class="font-medium text-sm truncate">' + b.name + '</div>'
+                    + '<div class="text-xs text-muted-foreground truncate">' + (b.hostUrl || '—') + '</div></div></div>'
+                    + '<div class="flex flex-col items-end gap-1">' + badge + detail + '</div></div>';
+            });
+            html += '</div>';
+            el.innerHTML = html;
+        })
+        .catch(function () {
+            document.getElementById('backend-status').innerHTML = '<p class="text-sm text-destructive">Failed to load backend status.</p>';
+        });
+})();
+</script>
+}

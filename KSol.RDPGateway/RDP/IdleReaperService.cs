@@ -11,11 +11,14 @@ namespace KSol.RDPGateway.RDP;
 public class IdleReaperService : BackgroundService
 {
     private static readonly TimeSpan ScanInterval = TimeSpan.FromMinutes(5);
+    private static readonly int ManualIdleTimeoutHours = 24;
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ProxmoxClient _proxmox;
     private readonly ProxmoxBackendProvider _backends;
     private readonly SessionTracker _sessions;
+    private readonly SshCommandService _ssh;
+    private readonly CredentialProtector _credentials;
     private readonly ILogger<IdleReaperService> _logger;
 
     public IdleReaperService(
@@ -23,12 +26,16 @@ public class IdleReaperService : BackgroundService
         ProxmoxClient proxmox,
         ProxmoxBackendProvider backends,
         SessionTracker sessions,
+        SshCommandService ssh,
+        CredentialProtector credentials,
         ILogger<IdleReaperService> logger)
     {
         _scopeFactory = scopeFactory;
         _proxmox = proxmox;
         _backends = backends;
         _sessions = sessions;
+        _ssh = ssh;
+        _credentials = credentials;
         _logger = logger;
     }
 
@@ -52,12 +59,18 @@ public class IdleReaperService : BackgroundService
 
     private async Task ScanOnceAsync(CancellationToken ct)
     {
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        await ScanProxmoxAsync(db, ct);
+        await ScanManualAsync(db, ct);
+    }
+
+    private async Task ScanProxmoxAsync(ApplicationDbContext db, CancellationToken ct)
+    {
         var backends = await _backends.GetAllAsync(ct);
         if (backends.Count == 0) return;
         var byId = backends.ToDictionary(b => b.Id);
-
-        using var scope = _scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
 
         var candidates = await db.RDPResources
             .Where(r => r.Source == ResourceSource.Proxmox
@@ -70,15 +83,10 @@ public class IdleReaperService : BackgroundService
             if (!byId.TryGetValue(res.ProxmoxBackendId!.Value, out var backend) || !backend.IsConfigured)
                 continue;
 
-            // Never pause a resource with a live tunnel.
             if (_sessions.HasActiveSessions(res.Id)) continue;
-            // Require a known last-activity older than the cutoff (null = never used since startup).
             var cutoff = DateTime.UtcNow.AddHours(-Math.Max(1, backend.IdleTimeoutHours));
             if (res.LastActivityUtc == null || res.LastActivityUtc > cutoff) continue;
 
-            // Never touch an excluded VM. Exclusion normally deletes the row, but a VM marked
-            // excluded out-of-band (in its notes) may still have a row until the next discover —
-            // check the live marker and, if set, leave the VM running and drop the stale row.
             var notes = await _proxmox.GetNotesAsync(backend, res.ProxmoxNode!, res.ProxmoxVmId!.Value, ct);
             if (ProxmoxNotes.ReadExcluded(notes))
             {
@@ -101,6 +109,59 @@ public class IdleReaperService : BackgroundService
                 res.PowerState = backend.PauseAction == PauseAction.Stop
                     ? ResourcePowerState.Stopped
                     : ResourcePowerState.Suspended;
+                await db.SaveChangesAsync(ct);
+            }
+        }
+    }
+
+    private async Task ScanManualAsync(ApplicationDbContext db, CancellationToken ct)
+    {
+        var candidates = await db.RDPResources
+            .Where(r => r.Source == ResourceSource.Manual
+                        && r.PowerState == ResourcePowerState.Running
+                        && !string.IsNullOrEmpty(r.IpAddress))
+            .ToListAsync(ct);
+
+        var cutoff = DateTime.UtcNow.AddHours(-ManualIdleTimeoutHours);
+
+        foreach (var res in candidates)
+        {
+            if (_sessions.HasActiveSessions(res.Id)) continue;
+            if (res.LastActivityUtc == null || res.LastActivityUtc > cutoff) continue;
+            if (string.IsNullOrEmpty(res.SshUser) && (res.OsType == OsType.Linux || res.OsType == OsType.MacOS))
+                continue;
+
+            _logger.LogInformation("Idle reaper: shutting down manual resource {Name} ({Os})", res.Name, res.OsType);
+
+            bool ok = false;
+            if (res.OsType == OsType.Linux || res.OsType == OsType.MacOS)
+            {
+                var key = _credentials.Unprotect(res.ProtectedSshKey);
+                if (!string.IsNullOrEmpty(key) && !string.IsNullOrEmpty(res.SshUser))
+                {
+                    var cmd = res.ShutdownCommand ?? "shutdown -h now";
+                    var (success, _) = await _ssh.ExecuteAsync(res.IpAddress!, res.SshUser, key, cmd);
+                    ok = success;
+                }
+            }
+            else
+            {
+                var cmd = res.ShutdownCommand ?? $"shutdown /s /m \\\\{res.IpAddress} /t 0";
+                try
+                {
+                    using var proc = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c {cmd}")
+                    {
+                        RedirectStandardOutput = true, RedirectStandardError = true,
+                        UseShellExecute = false, CreateNoWindow = true,
+                    });
+                    if (proc != null) { await proc.WaitForExitAsync(ct); ok = proc.ExitCode == 0; }
+                }
+                catch (Exception ex) { _logger.LogWarning(ex, "Windows shutdown failed for {Name}", res.Name); }
+            }
+
+            if (ok)
+            {
+                res.PowerState = ResourcePowerState.Stopped;
                 await db.SaveChangesAsync(ct);
             }
         }
