@@ -161,7 +161,7 @@ public class ProxmoxClient
                         && addr.TryGetProperty("ip-address", out var ip))
                     {
                         var s = ip.GetString();
-                        if (!string.IsNullOrEmpty(s) && !s.StartsWith("127.")) return s;
+                        if (!string.IsNullOrEmpty(s) && !s.StartsWith("127.") && !s.StartsWith("169.")) return s;
                     }
                 }
             }
@@ -172,6 +172,28 @@ public class ProxmoxClient
             // The agent endpoint 500s while the VM is still booting; that's expected, log at debug.
             _logger.LogDebug(ex, "Proxmox[{Backend}]: guest agent IP not available yet for {Node}/{VmId}", backend.Name, node, vmid);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Reads the first non-loopback IPv4 address the QEMU guest agent reports, or null if the agent
+    /// is not yet responding (VM still booting) or no address is available.
+    /// </summary>
+    public async Task<bool?> GetGuestAgentStatusAsync(ProxmoxBackend backend, string node, int vmid, CancellationToken ct = default)
+    {
+        using var client = CreateClient(backend);
+        if (client == null) return null;
+        try
+        {
+            using var doc = await GetJsonAsync(client, $"nodes/{node}/qemu/{vmid}/agent/get-host-name", ct);
+            if (doc == null)
+                return null;
+            else
+                return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 

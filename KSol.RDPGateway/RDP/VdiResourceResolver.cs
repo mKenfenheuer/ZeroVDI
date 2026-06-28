@@ -120,10 +120,36 @@ public class VdiResourceResolver
             }
         }
 
+        // Wait for the guest agent to report an hostname
+        var deadline = DateTime.UtcNow.AddSeconds(Math.Max(60, backend.StartTimeoutSeconds));
+        Report(new ReadinessProgress(ReadinessPhase.GuestAgent, "Waiting for guest agent…"));
+        bool? running = null;
+        while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+        {
+            running = await _proxmox.GetGuestAgentStatusAsync(backend, node, vmid, ct);
+            if (running == null)
+            {
+                Report(new ReadinessProgress(ReadinessPhase.GuestAgent, "Waiting for guest agent…"));
+                await Task.Delay(2000, ct);
+                continue;
+            }
+
+            if (running == true)
+            {
+                Report(new ReadinessProgress(ReadinessPhase.WaitingIp, "Waiting for IP address…"));
+                break;
+            }
+
+            await Task.Delay(2000, ct);
+            running = null;
+        }
+
+
+
         // Wait for the guest agent to report an IP, then for the RDP port to accept connections,
         // bounded by the backend's configured start timeout.
-        var deadline = DateTime.UtcNow.AddSeconds(Math.Max(15, backend.StartTimeoutSeconds));
-        Report(new ReadinessProgress(ReadinessPhase.GuestAgent, "Waiting for guest agent…"));
+        deadline = DateTime.UtcNow.AddSeconds(Math.Max(60, backend.StartTimeoutSeconds));
+        Report(new ReadinessProgress(ReadinessPhase.WaitingIp, "Waiting for IP address…"));
         string? ip = null;
         var probedRdp = false;
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
