@@ -1,63 +1,50 @@
 @model KSol.RDPGateway.Models.ApplicationUser
 
 @{
-    ViewData["Title"] = "User Details";
+    ViewData["Title"] = "User details";
     var userRoles = (IEnumerable<string>)ViewBag.UserRoles ?? new List<string>();
 }
 
-<div class="container mt-4">
-    <div class="row">
-        <div class="col-md-8">
-            <h1>User Details</h1>
-            <hr />
-
-            <div class="mb-3">
-                <label class="form-label"><strong>Username:</strong></label>
-                <p>@Model.UserName</p>
-            </div>
-
-            <div class="mb-3">
-                <label class="form-label"><strong>Email:</strong></label>
-                <p>@Model.Email</p>
-            </div>
-
-            <div class="mb-3">
-                <label class="form-label"><strong>Email Confirmed:</strong></label>
-                <p>
-                    @if (Model.EmailConfirmed)
-                    {
-                        <span class="badge bg-success">Yes</span>
-                    }
-                    else
-                    {
-                        <span class="badge bg-warning">No</span>
-                    }
-                </p>
-            </div>
-
-            <div class="mb-3">
-                <label class="form-label"><strong>Roles:</strong></label>
-                <p>
-                    @if (userRoles.Any())
-                    {
-                        @foreach (var role in userRoles)
-                        {
-                            <span class="badge bg-info">@role</span>
-                        }
-                    }
-                    else
-                    {
-                        <span class="text-muted">No roles assigned</span>
-                    }
-                </p>
-            </div>
-
-            <div class="mb-3">
-                <a asp-action="Edit" asp-route-id="@Model.Id" class="btn btn-warning">Edit</a>
-                <a asp-action="AssignRoles" asp-route-id="@Model.Id" class="btn btn-secondary">Assign Roles</a>
-                <a asp-action="Delete" asp-route-id="@Model.Id" class="btn btn-danger">Delete</a>
-                <a asp-action="Index" class="btn btn-secondary">Back</a>
-            </div>
-        </div>
+@section PageActions {
+    <div class="flex items-center gap-2">
+        <a asp-action="Edit" asp-route-id="@Model.Id" class="btn-secondary">Edit</a>
+        <a asp-action="AssignRoles" asp-route-id="@Model.Id" class="btn-secondary">Roles</a>
+        <a asp-action="Index" class="btn-ghost">Back</a>
     </div>
+}
+
+<div class="card-surface p-6 max-w-2xl">
+    <dl class="space-y-4 text-sm">
+        <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Username</dt><dd class="font-medium">@Model.UserName</dd></div>
+        <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Email</dt><dd>@Model.Email</dd></div>
+        <div class="flex justify-between gap-4">
+            <dt class="text-muted-foreground">Email confirmed</dt>
+            <dd>
+                @if (Model.EmailConfirmed)
+                {
+                    <span class="badge bg-success/10 text-success">Yes</span>
+                }
+                else
+                {
+                    <span class="badge bg-warning/10 text-warning">No</span>
+                }
+            </dd>
+        </div>
+        <div class="flex justify-between gap-4">
+            <dt class="text-muted-foreground">Roles</dt>
+            <dd class="flex flex-wrap gap-1 justify-end">
+                @if (userRoles.Any())
+                {
+                    foreach (var role in userRoles)
+                    {
+                        <span class="badge-primary">@role</span>
+                    }
+                }
+                else
+                {
+                    <span class="text-muted-foreground">None</span>
+                }
+            </dd>
+        </div>
+    </dl>
 </div>

@@ -1,30 +1,20 @@
-﻿@page
+@page
 @model LoginWithRecoveryCodeModel
 @{
-    ViewData["Title"] = "Recovery code verification";
-    Layout = "/Views/Shared/_LayoutLogin.cshtml";
+    ViewData["Title"] = "Recovery code";
 }
-
-<h1>@ViewData["Title"]</h1>
-<hr />
-<p>
-    You have requested to log in with a recovery code. This login will not be remembered until you provide
-    an authenticator app code at log in or disable 2FA and log in again.
+<h2 class="text-xl font-semibold text-center mb-1">@ViewData["Title"]</h2>
+<p class="text-sm text-muted-foreground text-center mb-6">
+    Logging in with a recovery code won't be remembered until you sign in with an authenticator code or disable 2FA.
 </p>
-<div class="row">
-    <div class="col-md-4">
-        <form method="post">
-            <div asp-validation-summary="ModelOnly" class="text-danger" role="alert"></div>
-            <div class="form-floating mb-3">
-                <input asp-for="Input.RecoveryCode" class="form-control" autocomplete="off" placeholder="RecoveryCode" />
-                <label asp-for="Input.RecoveryCode" class="form-label"></label>
-                <span asp-validation-for="Input.RecoveryCode" class="text-danger"></span>
-            </div>
-            <button type="submit" class="w-100 btn btn-lg btn-primary">Log in</button>
-        </form>
+<form method="post" class="space-y-4">
+    <div asp-validation-summary="ModelOnly" role="alert"></div>
+    <div>
+        <label asp-for="Input.RecoveryCode" class="form-label">Recovery code</label>
+        <input asp-for="Input.RecoveryCode" class="form-input" autocomplete="off" placeholder="xxxxx-xxxxx" />
+        <span asp-validation-for="Input.RecoveryCode" class="form-error"></span>
     </div>
-</div>
+    <button type="submit" class="btn-primary w-full">Sign in</button>
+</form>
 
-@section Scripts {
-    <partial name="_ValidationScriptsPartial" />
-}
+@section Scripts { <partial name="_ValidationScripts" /> }

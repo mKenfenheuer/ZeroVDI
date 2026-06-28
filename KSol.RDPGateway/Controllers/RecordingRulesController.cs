@@ -13,6 +13,7 @@ namespace KSol.RDPGateway.Controllers;
 /// <see cref="RDP.RecordingPolicy"/> at session start; the first scope-match decides record/skip.
 /// </summary>
 [Authorize(Roles = "Admin")]
+[Route("admin/recording-rules")]
 public class RecordingRulesController : Controller
 {
     private readonly ApplicationDbContext _context;
@@ -24,16 +25,18 @@ public class RecordingRulesController : Controller
         _roleManager = roleManager;
     }
 
+    [HttpGet("")]
     public async Task<IActionResult> Index()
         => View(await _context.RecordingRules.OrderBy(r => r.Order).ToListAsync());
 
+    [HttpGet("create")]
     public IActionResult Create()
     {
         PopulateSelectLists();
         return View(new RecordingRule());
     }
 
-    [HttpPost]
+    [HttpPost("create")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Create(
         [Bind("Order,Scope,Action,Enabled,NotifyUser,UserId,RDPResourceId,RoleName,Description")] RecordingRule rule)
@@ -48,6 +51,7 @@ public class RecordingRulesController : Controller
         return View(rule);
     }
 
+    [HttpGet("edit/{id:int}")]
     public async Task<IActionResult> Edit(int id)
     {
         var rule = await _context.RecordingRules.FindAsync(id);
@@ -56,7 +60,7 @@ public class RecordingRulesController : Controller
         return View(rule);
     }
 
-    [HttpPost]
+    [HttpPost("edit/{id:int}")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Edit(int id,
         [Bind("Id,Order,Scope,Action,Enabled,NotifyUser,UserId,RDPResourceId,RoleName,Description")] RecordingRule rule)
@@ -72,6 +76,7 @@ public class RecordingRulesController : Controller
         return View(rule);
     }
 
+    [HttpGet("delete/{id:int}")]
     public async Task<IActionResult> Delete(int id)
     {
         var rule = await _context.RecordingRules.FindAsync(id);
@@ -79,7 +84,7 @@ public class RecordingRulesController : Controller
         return View(rule);
     }
 
-    [HttpPost, ActionName("Delete")]
+    [HttpPost("delete/{id:int}"), ActionName("Delete")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> DeleteConfirmed(int id)
     {

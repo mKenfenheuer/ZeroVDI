@@ -3,11 +3,14 @@
     Layout = null;
     var resourceId = ViewData["ResourceId"] as string;
     var resourceName = ViewData["ResourceName"] as string;
-    var defaultUser = ViewData["DefaultUser"] as string;
     var autoConnect = ViewData["AutoConnect"] is true;
-    var storedUser = ViewData["StoredUser"] as string ?? defaultUser ?? "";
-    var storedPassword = ViewData["StoredPassword"] as string ?? "";
-    var storedDomain = ViewData["StoredDomain"] as string ?? "";
+    // SSO auto-connect never receives the real stored credentials (the gateway injects them
+    // server-side). The browser uses harmless placeholders purely so the form submits and the inner
+    // handshake frames are well-formed; client.js suppresses the credentials WS frame when AutoConnect
+    // is set, and the gateway's MITM replaces any inner Client Info creds with the stored ones.
+    var storedUser = autoConnect ? "sso" : "";
+    var storedPassword = autoConnect ? "sso" : "";
+    var storedDomain = "";
     var defaults = ViewData["Defaults"] as ConnectionDefaults;
     var recordingNotice = ViewData["RecordingNotice"] is true;
 }
@@ -70,6 +73,23 @@
         .form-control { background: #1e1e1e; color: #eee; border-color: #555; }
         .form-control:focus { background: #1e1e1e; color: #eee; }
         #login-error { color: #f88; font-size: .85rem; min-height: 1.2em; }
+        /* Auto-connect / SSO sessions never show the login form: it's hidden outright so the page goes
+           straight to connecting. */
+        #login-overlay.hidden { display: none !important; }
+
+        /* Reconnect popup: a small centered card shown when an auto-connect (SSO) session drops, instead
+           of bringing back the full login form. One button re-establishes the session. */
+        #reconnect-overlay {
+            position: fixed; inset: 0; z-index: 32; display: none; align-items: center; justify-content: center;
+            background: rgba(0,0,0,.85);
+        }
+        #reconnect-overlay.show { display: flex; }
+        #reconnect-card {
+            width: 320px; max-width: 90vw; background: #2a2a2a; border: 1px solid #444;
+            border-radius: 8px; padding: 1.25rem; text-align: center;
+        }
+        #reconnect-card h5 { margin-bottom: .75rem; }
+        #reconnect-msg { color: #bbb; font-size: .85rem; min-height: 1.2em; margin-bottom: 1rem; }
         .btn-session-control {
             appearance: none;
             background: transparent;
@@ -192,7 +212,19 @@
         </div>
     </div>
 
-    <div id="login-overlay">
+    @* Reconnect popup — shown when an auto-connect (SSO) session drops. The full login form is hidden
+       for SSO sessions, so instead of re-rendering it on disconnect we offer a single Reconnect button. *@
+    <div id="reconnect-overlay">
+        <div id="reconnect-card">
+            <h5>Session disconnected</h5>
+            <div id="reconnect-msg"></div>
+            <div class="d-grid">
+                <button class="btn btn-primary btn-sm" type="button" id="btn-reconnect">Reconnect</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="login-overlay" class="@(autoConnect ? "hidden" : "")">
         <div id="login-card">
             <h5>Connect to @resourceName</h5>
             <form id="login-form" autocomplete="off">
@@ -281,12 +313,22 @@
                     </div>
                 </details>
 
+                <div class="form-check form-check-sm mt-2">
+                    <input class="form-check-input" type="checkbox" id="opt-store-creds" />
+                    <label class="form-check-label" for="opt-store-creds" style="font-size:.82rem;">Store credentials for next time</label>
+                </div>
+                <div class="form-check form-check-sm">
+                    <input class="form-check-input" type="checkbox" id="opt-remember-settings" />
+                    <label class="form-check-label" for="opt-remember-settings" style="font-size:.82rem;">Remember these settings</label>
+                </div>
+
                 <div id="login-error"></div>
                 <div class="d-grid mt-2">
                     <button class="btn btn-primary btn-sm" type="submit" id="btn-connect">Connect</button>
                 </div>
                 <p class="text-muted mt-2 mb-0" style="font-size:.72rem;">
-                    Credentials are sent over this HTTPS connection to authenticate the desktop (NLA) and are not stored.
+                    Credentials authenticate the desktop (NLA) over this HTTPS connection. When “Store credentials”
+                    is checked they are saved encrypted to your account for one-click reconnect.
                 </p>
             </form>
         </div>
@@ -331,12 +373,16 @@
         // gateway also has the credentials for NLA, so client.js must NOT send a credentials frame.
         window.RDP_AUTOCONNECT = @(autoConnect ? "true" : "false");
         window.RDP_DEFAULT_PERF = @(defaults?.PerformanceFlags ?? 0);
+        window.RDP_RESOURCE_ID = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(resourceId));
     </script>
     <script>
         (function () {
             var wsUrl = "/ws/rdp/@resourceId";
             var loginOverlay = document.getElementById("login-overlay");
             var loginError = document.getElementById("login-error");
+            var reconnectOverlay = document.getElementById("reconnect-overlay");
+            var reconnectMsg = document.getElementById("reconnect-msg");
+            var btnReconnect = document.getElementById("btn-reconnect");
             var btnConnect = document.getElementById("btn-connect");
             var btnDisconnect = document.getElementById("btn-disconnect");
             var btnFullscreen = document.getElementById("btn-fullscreen");
@@ -384,8 +430,10 @@
             var canvas = document.getElementById("canvas");
             var client = new Client(wsUrl, "canvas");
 
-            // Return the console to its pre-connect state: blank the screen and show the login form.
-            function resetConsole() {
+            // Return the console to its pre-connect state: blank the screen and bring back a way to
+            // reconnect. For an SSO/auto-connect session the login form stays hidden — we show the small
+            // centered Reconnect popup instead. For a manual session we re-show the login form.
+            function resetConsole(message) {
                 var ctx = canvas.getContext("2d");
                 if (ctx) { ctx.fillStyle = "#000"; ctx.fillRect(0, 0, canvas.width, canvas.height); }
                 btnDisconnect.disabled = true;
@@ -395,8 +443,14 @@
                 floatbar.classList.add("hidden");
                 hideRecording();
                 clipOverlay.classList.remove("show"); // hide the clipboard popup when the session ends
-                loginError.textContent = "";
-                loginOverlay.style.display = "flex";
+                if (window.RDP_AUTOCONNECT) {
+                    reconnectMsg.textContent = message || "";
+                    reconnectOverlay.classList.add("show");
+                } else {
+                    loginError.textContent = message || "";
+                    loginOverlay.classList.remove("hidden");
+                    loginOverlay.style.display = "flex";
+                }
             }
 
             client.setStatusCallback(function (status, message) {
@@ -405,27 +459,33 @@
                         break;
                     case "ready":
                         loginOverlay.style.display = "none";
+                        reconnectOverlay.classList.remove("show");
                         btnDisconnect.disabled = false;
                         showBar();          // reveal the floating bar on connect, then auto-hide
                         scheduleAutoHide();
                         showRecording();    // red frame + recording banner (no-op when not notifying)
                         break;
                     case "error":
-                        loginError.textContent = message || "Connection failed";
-                        loginOverlay.style.display = "flex";
-                        btnConnect.disabled = false;
-                        btnConnect.textContent = "Connect";
-                        btnDisconnect.disabled = true;
-                        floatbar.classList.add("hidden");
-                        hideRecording();
+                        // For SSO/auto-connect, resetConsole() shows the Reconnect popup (with the error
+                        // as its message); for a manual session it re-shows the login form.
+                        if (window.RDP_AUTOCONNECT) {
+                            resetConsole(message || "Connection failed");
+                        } else {
+                            loginError.textContent = message || "Connection failed";
+                            loginOverlay.classList.remove("hidden");
+                            loginOverlay.style.display = "flex";
+                            btnConnect.disabled = false;
+                            btnConnect.textContent = "Connect";
+                            btnDisconnect.disabled = true;
+                            floatbar.classList.add("hidden");
+                            hideRecording();
+                        }
                         break;
                     case "closed":
-                        // Session ended (user disconnect or server drop): reset the screen to black
-                        // and bring back the login form so the console is ready for a fresh connect.
-                        // `message`, when present, is the host's disconnect reason (logoff, admin
-                        // disconnect, timeout) — show it so the user knows why the session ended.
-                        resetConsole();
-                        if (message) loginError.textContent = message;
+                        // Session ended (user disconnect or server drop): reset the screen to black and
+                        // offer a way to reconnect. `message`, when present, is the host's disconnect
+                        // reason (logoff, admin disconnect, timeout) — show it so the user knows why.
+                        resetConsole(message);
                         break;
                 }
             });
@@ -496,6 +556,28 @@
                 }
                 window.RDP_GFX_MODE = gfxMode;
 
+                // Optionally persist credentials / settings to this user's authorization (best-effort,
+                // fire-and-forget so it never blocks the connect). The server stores credentials
+                // encrypted; settings become this resource's connect defaults for the user.
+                var storeCreds = document.getElementById("opt-store-creds");
+                var rememberSettings = document.getElementById("opt-remember-settings");
+                if ((storeCreds && storeCreds.checked) || (rememberSettings && rememberSettings.checked)) {
+                    var body = {
+                        storeCredentials: !!(storeCreds && storeCreds.checked),
+                        rememberSettings: !!(rememberSettings && rememberSettings.checked),
+                        username: user, password: pass, domain: domain,
+                        audio: document.getElementById("opt-audio").checked,
+                        clipboard: document.getElementById("opt-clipboard").checked,
+                        microphone: micOn, camera: camOn,
+                        gfxMode: gfxMode, performanceFlags: perf
+                    };
+                    fetch("/connect/" + encodeURIComponent(window.RDP_RESOURCE_ID) + "/save", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(body)
+                    }).catch(function () { /* non-fatal */ });
+                }
+
                 // Pick a desktop resolution that fills the visible area in *device* pixels (crisp on
                 // HiDPI), bake it into the handshake by sizing the canvas before connecting.
                 var size = client.chooseDesktopSize(screenWrap);
@@ -504,6 +586,14 @@
             });
 
             btnDisconnect.addEventListener("click", function () { client.disconnect(); });
+            // Reconnect popup button (SSO sessions): re-submit the hidden login form, which still holds
+            // the SSO field values + options, to re-establish the session.
+            btnReconnect.addEventListener("click", function () {
+                reconnectOverlay.classList.remove("show");
+                reconnectMsg.textContent = "";
+                var form = document.getElementById("login-form");
+                if (form.requestSubmit) form.requestSubmit(); else form.dispatchEvent(new Event("submit", { cancelable: true }));
+            });
             btnFullscreen.addEventListener("click", function () {
                 if (!document.fullscreenElement) {
                     (screenWrap.requestFullscreen ? screenWrap.requestFullscreen() : Promise.reject()).catch(function () {});

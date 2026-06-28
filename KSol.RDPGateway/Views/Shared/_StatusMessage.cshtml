@@ -1,10 +1,5 @@
-@{
-    var status = TempData["Status"] as string;
-}
-@if (!string.IsNullOrEmpty(status))
-{
-    <div class="alert alert-success alert-dismissible fade show" role="alert">
-        @status
-        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-    </div>
-}
+@*
+    Status/error messages from TempData["Status"] / TempData["Error"] are now surfaced as toast
+    notifications by the layout's _Toasts partial (peeking TempData so this partial can stay a no-op).
+    Kept as an empty partial so existing <partial name="_StatusMessage" /> references remain valid.
+*@

@@ -29,9 +29,5 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
         // (same rationale as RdpOptions above). Stored credentials are plain encrypted-string columns.
         builder.Entity<RDPResourceUserAuthorization>()
             .OwnsOne(a => a.ConnectionDefaults, b => b.ToJson());
-
-        // Register the OpenIddict applications/authorizations/scopes/tokens entity sets so the
-        // self-hosted OAuth/OIDC server persists its state in the same database.
-        builder.UseOpenIddict();
     }
 }

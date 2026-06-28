@@ -1,28 +1,22 @@
 @model KSol.RDPGateway.Models.ProxmoxBackend
 
 @{
-    ViewData["Title"] = "Edit Proxmox backend";
+    ViewData["Title"] = Model.Name;
+    ViewData["Subtitle"] = "Edit backend";
 }
 
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <h1 class="h3 mb-0">@Model.Name</h1>
-    <a asp-action="Index" class="btn btn-outline-secondary btn-sm">Back to list</a>
-</div>
+@section PageActions {
+    <a asp-action="Index" class="btn-secondary w-fit"><i class="ri-arrow-left-line"></i> Back to list</a>
+}
 
-<div class="card shadow-sm">
-    <div class="card-body">
-        <form asp-action="Edit">
-            <div asp-validation-summary="ModelOnly" class="text-danger"></div>
-            <input type="hidden" asp-for="Id" />
-            <partial name="_BackendFields" model="Model" />
-            <div class="d-flex gap-2">
-                <button type="submit" class="btn btn-primary">Save</button>
-                <a asp-action="Index" class="btn btn-link">Cancel</a>
-            </div>
-        </form>
+<form asp-action="Edit" class="card-surface p-6 max-w-3xl space-y-8">
+    <div asp-validation-summary="ModelOnly"></div>
+    <input type="hidden" asp-for="Id" />
+    <partial name="_BackendFields" model="Model" />
+    <div class="flex items-center gap-2 pt-2 border-t border-border">
+        <button type="submit" class="btn-primary">Save changes</button>
+        <a asp-action="Index" class="btn-ghost">Cancel</a>
     </div>
-</div>
+</form>
 
-@section Scripts {
-    @{await Html.RenderPartialAsync("_ValidationScriptsPartial");}
-}
+@section Scripts { <partial name="_ValidationScripts" /> }

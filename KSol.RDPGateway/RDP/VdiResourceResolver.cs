@@ -33,26 +33,55 @@ public class VdiResourceResolver
         _logger = logger;
     }
 
+    /// <summary>
+    /// Resolves a resource to a reachable host/port, starting a Proxmox VM on demand. Thin wrapper over
+    /// <see cref="RunReadinessAsync"/> used by the WebSocket relay (which has no progress UI of its own).
+    /// </summary>
     public async Task<(string Host, ushort Port)?> ResolveAsync(string userId, string resource, ushort requestedPort)
     {
+        var final = await RunReadinessAsync(userId, resource, requestedPort, progress: null, CancellationToken.None);
+        return final is { Phase: ReadinessPhase.Ready, Host: { } host } ? (host, final.Port) : null;
+    }
+
+    /// <summary>
+    /// Runs the full connect-readiness sequence, reporting each phase through <paramref name="progress"/>
+    /// (for the browser preflight). Returns the terminal <see cref="ReadinessProgress"/> (Ready or Error).
+    /// The actual power-on/poll logic is identical to what the relay needs, so both paths share it.
+    /// </summary>
+    public async Task<ReadinessProgress> RunReadinessAsync(
+        string userId, string resource, ushort requestedPort,
+        IProgress<ReadinessProgress>? progress, CancellationToken ct)
+    {
+        void Report(ReadinessProgress p) => progress?.Report(p);
+
+        var checking = new ReadinessProgress(ReadinessPhase.Checking, "Checking resource…");
+        Report(checking);
+
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
 
-        var res = await db.RDPResources.FirstOrDefaultAsync(r => r.Id == resource);
+        var res = await db.RDPResources.FirstOrDefaultAsync(r => r.Id == resource, ct);
         if (res == null)
         {
             _logger.LogWarning("Resolve: unknown resource {Resource}", resource);
-            return null; // fall back to connecting to the literal id (will fail) — safe default.
+            return Fail("This resource no longer exists.");
         }
 
         var port = (ushort)(res.Port > 0 ? res.Port : requestedPort);
 
         // Manual resources (or Proxmox resources missing their backend linkage) connect to the
-        // stored address directly.
+        // stored address directly — just probe RDP.
         if (res.Source != ResourceSource.Proxmox || res.ProxmoxBackendId == null
             || res.ProxmoxNode == null || res.ProxmoxVmId == null)
         {
-            return string.IsNullOrEmpty(res.IpAddress) ? null : (res.IpAddress!, port);
+            if (string.IsNullOrEmpty(res.IpAddress))
+                return Fail("This resource has no address configured. Contact an administrator.");
+
+            Report(new ReadinessProgress(ReadinessPhase.RdpProbe, "Checking remote desktop…"));
+            if (!await IsPortOpenAsync(res.IpAddress!, port))
+                return Fail($"The remote desktop service at {res.IpAddress}:{port} is not responding (RDP service unavailable).");
+
+            return Ready(res.IpAddress!, port);
         }
 
         var backend = await _backends.GetAsync(res.ProxmoxBackendId.Value);
@@ -60,7 +89,7 @@ public class VdiResourceResolver
         {
             _logger.LogWarning("Resolve: backend {Backend} for resource {Resource} is unavailable",
                 res.ProxmoxBackendId, resource);
-            return string.IsNullOrEmpty(res.IpAddress) ? null : (res.IpAddress!, port);
+            return Fail("The backend for this resource is unavailable (backend unreachable). Contact an administrator.");
         }
 
         var vmid = res.ProxmoxVmId!.Value;
@@ -68,32 +97,51 @@ public class VdiResourceResolver
         // Resolve the VM's CURRENT node from the live cluster inventory: it may have live-migrated
         // since the stored node was last refreshed. Fall back to the stored node if the lookup fails.
         var node = res.ProxmoxNode!;
-        var vms = await _proxmox.ListVmsAsync(backend);
+        var vms = await _proxmox.ListVmsAsync(backend, ct);
         var current = vms.FirstOrDefault(v => v.VmId == vmid);
         if (current != null && !string.IsNullOrEmpty(current.Node))
         {
             node = current.Node;
-            if (res.ProxmoxNode != node)
+            if (res.ProxmoxNode != node) res.ProxmoxNode = node; // self-heal after a migration
+        }
+
+        // Power the VM on (start or resume).
+        var status = await _proxmox.GetStatusAsync(backend, node, vmid, ct);
+        var wasOff = !string.Equals(status, "running", StringComparison.OrdinalIgnoreCase);
+        if (wasOff)
+        {
+            Report(new ReadinessProgress(ReadinessPhase.Starting,
+                "Starting resource… This may take a few minutes."));
+            await SetPowerStateAsync(db, res, ResourcePowerState.Starting);
+            if (!await _proxmox.EnsureRunningAsync(backend, node, vmid, ct))
             {
-                res.ProxmoxNode = node; // self-heal the stored node after a migration
+                await SetPowerStateAsync(db, res, ResourcePowerState.Unknown);
+                return Fail("Failed to start the VM. Contact an administrator if this persists.");
             }
         }
 
-        // Power the VM on (start or resume) and wait until the guest agent reports an IP and the RDP
-        // port accepts a TCP connection, bounded by the backend's configured start timeout.
-        await SetPowerStateAsync(db, res, ResourcePowerState.Starting);
-        await _proxmox.EnsureRunningAsync(backend, node, vmid);
-
+        // Wait for the guest agent to report an IP, then for the RDP port to accept connections,
+        // bounded by the backend's configured start timeout.
         var deadline = DateTime.UtcNow.AddSeconds(Math.Max(15, backend.StartTimeoutSeconds));
+        Report(new ReadinessProgress(ReadinessPhase.GuestAgent, "Waiting for guest agent…"));
         string? ip = null;
-        while (DateTime.UtcNow < deadline)
+        var probedRdp = false;
+        while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
         {
-            ip = await _proxmox.GetGuestIpAsync(backend, node, vmid);
-            if (ip != null && await IsPortOpenAsync(ip, port))
+            ip = await _proxmox.GetGuestIpAsync(backend, node, vmid, ct);
+            if (ip == null)
             {
-                break;
+                Report(new ReadinessProgress(ReadinessPhase.WaitingIp, "Waiting for IP address…"));
+                await Task.Delay(2000, ct);
+                continue;
             }
-            await Task.Delay(2000);
+
+            Report(new ReadinessProgress(ReadinessPhase.RdpProbe, "Waiting for remote desktop…"));
+            probedRdp = true;
+            if (await IsPortOpenAsync(ip, port))
+                break;
+
+            await Task.Delay(2000, ct);
             ip = null;
         }
 
@@ -101,14 +149,22 @@ public class VdiResourceResolver
         {
             _logger.LogWarning("Resolve: VM {Node}/{VmId} not reachable within timeout", node, vmid);
             await SetPowerStateAsync(db, res, ResourcePowerState.Unknown);
-            return null;
+            return Fail(probedRdp
+                ? "Timed out waiting for the remote desktop service (RDP service unavailable)."
+                : "Timed out waiting for the VM to report an IP address (no IP address reported).");
         }
 
+        Report(new ReadinessProgress(ReadinessPhase.Finalizing, "Finalizing connection…"));
         res.IpAddress = ip;
         res.PowerState = ResourcePowerState.Running;
-        await db.SaveChangesAsync();
+        await db.SaveChangesAsync(ct);
         _logger.LogInformation("Resolve: {Resource} -> {Ip}:{Port}", resource, ip, port);
-        return (ip, port);
+        return Ready(ip, port);
+
+        ReadinessProgress Ready(string host, ushort p) =>
+            new(ReadinessPhase.Ready, "Connecting…", host, p);
+        ReadinessProgress Fail(string message) =>
+            new(ReadinessPhase.Error, message, Error: message);
     }
 
     public async Task OnConnectedAsync(string userId, string resource)

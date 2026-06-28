@@ -16,16 +16,28 @@
     <PackageReference Include="Microsoft.AspNetCore.Diagnostics.EntityFrameworkCore" Version="9.0.0" />
     <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="9.0.0" />
     <PackageReference Include="Microsoft.AspNetCore.Identity.UI" Version="9.0.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Razor.RuntimeCompilation" Version="9.0.17" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.0.0" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="9.0.0" />
     <PackageReference Include="Microsoft.VisualStudio.Web.CodeGeneration.Design" Version="9.0.0" />
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="9.0.0" />
-    <PackageReference Include="OpenIddict.AspNetCore" Version="6.0.0" />
-    <PackageReference Include="OpenIddict.EntityFrameworkCore" Version="6.0.0" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\RdpWire\KSol.RDP.Wire.csproj" />
   </ItemGroup>
+
+  <!-- node_modules and the Tailwind input sources are not part of the web content payload. -->
+  <ItemGroup>
+    <Content Remove="node_modules\**" />
+    <None Remove="node_modules\**" />
+    <Content Remove="Styles\**" />
+  </ItemGroup>
+
+  <!-- Rebuild the Tailwind CSS bundle on build when Node is available. The compiled output
+       (wwwroot/css/app.css) is committed, so deploys without Node still work — this target is
+       skipped gracefully when node_modules is missing (CI/publish) or SkipTailwindBuild=true. -->
+  <Target Name="BuildTailwindCss" BeforeTargets="BeforeBuild" Condition="'$(SkipTailwindBuild)' != 'true' and Exists('node_modules')">
+    <Exec Command="npm run build:css" ContinueOnError="true" />
+  </Target>
 
 </Project>

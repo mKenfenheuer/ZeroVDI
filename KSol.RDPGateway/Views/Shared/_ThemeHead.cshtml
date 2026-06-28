@@ -1,0 +1,19 @@
+@*
+    Common <head> assets for the redesigned UI: fonts, icons, the compiled Tailwind bundle, and an
+    inline script that applies the persisted theme/mode BEFORE first paint (avoids a flash of the
+    default theme). Include this in every non-console layout's <head>.
+*@
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/remixicon@4.5.0/fonts/remixicon.css" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="~/css/app.css" asp-append-version="true" />
+<script>
+    (function () {
+        try {
+            var theme = localStorage.getItem('rdpgw-theme') || 'blue';
+            var mode = localStorage.getItem('rdpgw-mode') || 'light';
+            document.documentElement.setAttribute('data-theme', theme);
+            if (mode === 'dark') document.documentElement.classList.add('dark');
+        } catch (e) { /* localStorage unavailable — fall back to defaults */ }
+    })();
+</script>

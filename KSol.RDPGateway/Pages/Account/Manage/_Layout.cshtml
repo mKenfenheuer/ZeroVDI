@@ -1,25 +1,20 @@
-﻿@{
-    if (ViewData.TryGetValue("ParentLayout", out var parentLayout) && parentLayout != null)
-    {
-        Layout = "/Views/Shared/_LayoutIdentity.cshtml";
-    }
-    else
-    {
-        Layout = "/Areas/Identity/Pages/_Layout.cshtml";
-    }
+@{
+    Layout = "/Views/Shared/_UserLayout.cshtml";
 }
+<div class="mb-6">
+    <h1 class="text-2xl font-semibold">Account settings</h1>
+    <p class="text-muted-foreground mt-1">Manage your profile, security and personal data.</p>
+</div>
 
-<h3>Manage Account</h3>
-<hr/>
-<div>
-    <div class="row">
-        <div class="col-md-3">
+<div class="grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-6">
+    <aside>
+        <nav class="flex flex-col gap-1 lg:sticky lg:top-20">
             <partial name="_ManageNav" />
-        </div>
-        <div class="col-md-9">
-            @RenderBody()
-        </div>
-    </div>
+        </nav>
+    </aside>
+    <section class="ps-6 min-w-0">
+        @RenderBody()
+    </section>
 </div>
 
 @section Scripts {

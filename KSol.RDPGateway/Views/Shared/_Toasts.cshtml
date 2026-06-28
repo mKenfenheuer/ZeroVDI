@@ -1,0 +1,38 @@
+@*
+    Toast notification host. Server-side messages set in TempData["Status"] / TempData["Error"] are
+    rendered as initial toasts; client code can call window.rdpgwToast(message, type) to add more.
+    type: "success" | "error" | "info" (default info).
+*@
+<div id="toast-host" class="fixed bottom-4 right-4 z-[100] flex flex-col gap-2 w-80 max-w-[calc(100vw-2rem)]"></div>
+<script>
+    (function () {
+        var icons = { success: 'ri-checkbox-circle-line', error: 'ri-error-warning-line', info: 'ri-information-line' };
+        var accents = { success: 'text-success', error: 'text-destructive', info: 'text-info' };
+        window.rdpgwToast = function (message, type) {
+            type = type || 'info';
+            var host = document.getElementById('toast-host');
+            if (!host) return;
+            var el = document.createElement('div');
+            el.className = 'flex items-start gap-3 p-3.5 rounded-xl bg-popover text-popover-foreground border border-border shadow-lg translate-x-2 opacity-0 transition-all duration-300';
+            el.innerHTML = '<i class="' + (icons[type] || icons.info) + ' text-lg ' + (accents[type] || accents.info) + '"></i>' +
+                '<p class="text-sm flex-1">' + message + '</p>' +
+                '<button class="text-muted-foreground hover:text-foreground" aria-label="Dismiss"><i class="ri-close-line"></i></button>';
+            el.querySelector('button').addEventListener('click', function () { dismiss(el); });
+            host.appendChild(el);
+            requestAnimationFrame(function () { el.classList.remove('translate-x-2', 'opacity-0'); });
+            setTimeout(function () { dismiss(el); }, 5000);
+        };
+        function dismiss(el) {
+            el.classList.add('translate-x-2', 'opacity-0');
+            setTimeout(function () { el.remove(); }, 300);
+        }
+    })();
+</script>
+@if (TempData["Status"] is string status && !string.IsNullOrEmpty(status))
+{
+    <script>window.rdpgwToast(@Html.Raw(System.Text.Json.JsonSerializer.Serialize(status)), 'success');</script>
+}
+@if (TempData["Error"] is string error && !string.IsNullOrEmpty(error))
+{
+    <script>window.rdpgwToast(@Html.Raw(System.Text.Json.JsonSerializer.Serialize(error)), 'error');</script>
+}

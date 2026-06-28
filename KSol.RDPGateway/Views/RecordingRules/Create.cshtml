@@ -3,23 +3,16 @@
     ViewData["Title"] = "Add recording rule";
 }
 
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <h1 class="h3 mb-0">Add recording rule</h1>
-    <a asp-action="Index" class="btn btn-outline-secondary btn-sm">Back to list</a>
-</div>
-
-<div class="card shadow-sm">
-    <div class="card-body">
-        <form asp-action="Create">
-            <partial name="_Fields" model="Model" />
-            <div class="d-flex gap-2 mt-3">
-                <button type="submit" class="btn btn-primary">Create</button>
-                <a asp-action="Index" class="btn btn-link">Cancel</a>
-            </div>
-        </form>
-    </div>
-</div>
-
-@section Scripts {
-    @{await Html.RenderPartialAsync("_ValidationScriptsPartial");}
+@section PageActions {
+    <a asp-action="Index" class="btn-secondary w-fit"><i class="ri-arrow-left-line"></i> Back to list</a>
 }
+
+<form asp-action="Create" class="card-surface p-6 max-w-3xl">
+    <partial name="_Fields" model="Model" />
+    <div class="flex items-center gap-2 mt-6 pt-4 border-t border-border">
+        <button type="submit" class="btn-primary">Create rule</button>
+        <a asp-action="Index" class="btn-ghost">Cancel</a>
+    </div>
+</form>
+
+@section Scripts { <partial name="_ValidationScripts" /> }

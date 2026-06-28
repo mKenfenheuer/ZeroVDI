@@ -5,33 +5,29 @@
     ViewData["Title"] = "Delete resource";
 }
 
-<h1 class="h3 mb-3">Delete resource</h1>
-
-<div class="card shadow-sm">
-    <div class="card-body">
-        <p class="lead">Are you sure you want to delete <strong>@Model.Name</strong>?</p>
-
-        @if (Model.Source == ResourceSource.Proxmox)
-        {
-            <div class="alert alert-warning">
-                This is a Proxmox-managed resource. Deleting it only removes the gateway entry and its
-                user authorizations — the VM itself is not affected. It will be re-discovered on the
-                next sync (with a new identity) unless you remove the <code>ksol-rdpgw-id</code> from
-                the VM notes.
-            </div>
-        }
-
-        <dl class="row">
-            <dt class="col-sm-2">Source</dt>
-            <dd class="col-sm-10">@Model.Source</dd>
-            <dt class="col-sm-2">Address</dt>
-            <dd class="col-sm-10">@(string.IsNullOrEmpty(Model.IpAddress) ? "—" : $"{Model.IpAddress}:{Model.Port}")</dd>
-        </dl>
-
-        <form asp-action="Delete">
-            <input type="hidden" asp-for="Id" />
-            <button type="submit" class="btn btn-danger">Delete</button>
-            <a asp-action="Index" class="btn btn-link">Cancel</a>
-        </form>
+<div class="card-surface p-6 max-w-2xl">
+    <div class="w-12 h-12 rounded-full bg-destructive/10 text-destructive flex items-center justify-center mb-4">
+        <i class="ri-delete-bin-line text-2xl"></i>
     </div>
+    <h1 class="text-xl font-semibold">Delete “@Model.Name”?</h1>
+    <p class="text-muted-foreground mt-1">This action cannot be undone.</p>
+
+    @if (Model.Source == ResourceSource.Proxmox)
+    {
+        <div class="alert-warning my-4">
+            <i class="ri-alert-line text-warning text-lg"></i>
+            <p class="text-sm flex-1">This is a Proxmox-managed resource. Deleting it only removes the gateway entry and its user authorizations — the VM itself is not affected. It will be re-discovered on the next sync (with a new identity) unless you remove the <code>ksol-rdpgw-id</code> from the VM notes.</p>
+        </div>
+    }
+
+    <dl class="space-y-2 text-sm my-4">
+        <div class="flex gap-4"><dt class="text-muted-foreground w-24">Source</dt><dd>@Model.Source</dd></div>
+        <div class="flex gap-4"><dt class="text-muted-foreground w-24">Address</dt><dd>@(string.IsNullOrEmpty(Model.IpAddress) ? "—" : $"{Model.IpAddress}:{Model.Port}")</dd></div>
+    </dl>
+
+    <form asp-action="Delete" class="flex items-center gap-2">
+        <input type="hidden" asp-for="Id" />
+        <button type="submit" class="btn-destructive">Delete resource</button>
+        <a asp-action="Index" class="btn-ghost">Cancel</a>
+    </form>
 </div>

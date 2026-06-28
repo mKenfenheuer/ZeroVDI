@@ -12,28 +12,28 @@
     string Src(string track) => Url.Action("GetFile", new { id = Model.Id, track })!;
 }
 
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <div>
-        <h1 class="h3 mb-0">Replay</h1>
-        <p class="text-muted mb-0">
-            @(Model.RDPResource?.Name ?? Model.RDPResourceId) — @(Model.User?.UserName ?? Model.UserId)
-            — @Model.StartedUtc.ToString("yyyy-MM-dd HH:mm:ss") UTC
-        </p>
-    </div>
-    <a asp-action="Index" class="btn btn-outline-secondary btn-sm">Back to list</a>
+@section PageActions {
+    <a asp-action="Index" class="btn-secondary w-fit"><i class="ri-arrow-left-line"></i> Back to list</a>
+}
+
+<div class="mb-4">
+    <p class="text-sm text-muted-foreground">
+        @(Model.RDPResource?.Name ?? Model.RDPResourceId) — @(Model.User?.UserName ?? Model.UserId)
+        — @Model.StartedUtc.ToString("yyyy-MM-dd HH:mm:ss") UTC
+    </p>
 </div>
 
 @if (Model.Status == RecordingStatus.UnsupportedCodec)
 {
-    <div class="alert alert-warning">
-        The desktop graphics codec for this session wasn't H.264, so the desktop video could not be
-        recorded without re-rendering. Audio (and camera/mic, if any) were still recorded.
+    <div class="alert-warning mb-4">
+        <i class="ri-alert-line text-warning text-lg"></i>
+        <p class="text-sm flex-1">The desktop graphics codec for this session wasn't H.264, so the desktop video could not be recorded without re-rendering. Audio (and camera/mic, if any) were still recorded.</p>
     </div>
 }
 
 @if (!hasDesktop && !hasCamera && !hasAudio && !hasMic)
 {
-    <p class="text-muted">No recording available.</p>
+    <p class="text-muted-foreground">No recording available.</p>
 }
 else
 {

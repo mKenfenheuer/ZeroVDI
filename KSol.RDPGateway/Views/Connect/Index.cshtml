@@ -1,0 +1,134 @@
+@{
+    ViewData["Title"] = "Connecting";
+    Layout = "_UserLayout";
+    var resourceId = ViewData["ResourceId"] as string;
+    var resourceName = ViewData["ResourceName"] as string;
+    var consoleUrl = Url.Action("Console", "Home", new { id = resourceId });
+}
+
+<div class="max-w-lg mx-auto">
+    <div class="card-surface p-8">
+        <div class="flex items-center gap-3 mb-6">
+            <div class="w-11 h-11 rounded-xl bg-primary/10 text-primary flex items-center justify-center">
+                <i class="ri-computer-line text-2xl"></i>
+            </div>
+            <div class="min-w-0">
+                <h1 class="text-lg font-semibold truncate">@resourceName</h1>
+                <p id="connect-message" class="text-sm text-muted-foreground">Checking resource…</p>
+            </div>
+        </div>
+
+        <!-- Progress -->
+        <div id="connect-progress-wrap" class="mb-6">
+            <div class="flex items-center gap-2 mb-2 text-sm font-medium text-foreground">
+                <span id="connect-step-label">Checking resource…</span>
+            </div>
+            <div class="h-2 rounded-full bg-muted border border-border overflow-hidden">
+                <div id="connect-progress-bar" class="h-full rounded-full bg-primary transition-all duration-500 ease-out" style="width: 0%"></div>
+            </div>
+            <p id="connect-step-counter" class="mt-1.5 text-xs text-muted-foreground"></p>
+        </div>
+
+        <!-- Error panel -->
+        <div id="connect-error" class="alert-error mb-4 hidden">
+            <i class="ri-error-warning-line text-destructive text-lg"></i>
+            <div class="text-sm flex-1">
+                <p id="connect-error-text" class="font-medium"></p>
+                <p class="text-muted-foreground mt-0.5">If this keeps happening, contact an administrator.</p>
+            </div>
+        </div>
+
+        <div class="flex items-center gap-2">
+            <a id="connect-retry" href="#" class="btn-primary hidden"><i class="ri-refresh-line"></i> Try again</a>
+            <a asp-controller="Home" asp-action="Index" class="btn-ghost">Cancel</a>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+<script>
+(function () {
+    var id = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(resourceId));
+    var consoleUrl = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(consoleUrl));
+    var token = document.querySelector('input[name="__RequestVerificationToken"]');
+    var msgEl = document.getElementById('connect-message');
+    var errEl = document.getElementById('connect-error');
+    var errText = document.getElementById('connect-error-text');
+    var retry = document.getElementById('connect-retry');
+    var bar = document.getElementById('connect-progress-bar');
+    var stepLabel = document.getElementById('connect-step-label');
+    var stepCounter = document.getElementById('connect-step-counter');
+    var labels = {
+        checking: 'Checking resource…',
+        starting: 'Starting resource…',
+        guestagent: 'Waiting for guest agent…',
+        waitingip: 'Waiting for IP address…',
+        rdpprobe: 'Waiting for remote desktop…',
+        finalizing: 'Finalizing connection…',
+        ready: 'Ready'
+    };
+    var order = ['checking', 'starting', 'guestagent', 'waitingip', 'rdpprobe', 'finalizing', 'ready'];
+    var stepCount = order.length - 1; // 'ready' is completion, not a step
+    var polling = false;
+
+    function render(phase) {
+        var idx = order.indexOf(phase);
+        if (idx < 0) return;
+        var done = idx; // number of completed steps
+        var pct = Math.round((done / stepCount) * 100);
+        bar.style.width = pct + '%';
+        if (idx === order.length - 1) {
+            stepLabel.textContent = labels.ready;
+            stepCounter.textContent = '';
+        } else {
+            stepLabel.textContent = labels[phase] || phase;
+            stepCounter.textContent = 'Step ' + (idx + 1) + ' of ' + stepCount;
+        }
+    }
+
+    function fail(message) {
+        errText.textContent = message || 'The connection could not be prepared.';
+        errEl.classList.remove('hidden');
+        retry.classList.remove('hidden');
+        bar.className = 'h-full rounded-full bg-destructive transition-all duration-500 ease-out';
+    }
+
+    function apply(dto) {
+        if (!dto) return;
+        if (dto.message) msgEl.textContent = dto.message;
+        if (dto.failed) { fail(dto.error || dto.message); return true; }
+        render(dto.phase);
+        if (dto.done) {
+            msgEl.textContent = 'Connecting…';
+            window.location.href = consoleUrl;
+            return true;
+        }
+        return false;
+    }
+
+    function poll() {
+        fetch('/connect/' + encodeURIComponent(id) + '/status', { headers: { 'Accept': 'application/json' } })
+            .then(function (r) { return r.json(); })
+            .then(function (dto) { if (!apply(dto)) setTimeout(poll, 1000); })
+            .catch(function () { setTimeout(poll, 2000); });
+    }
+
+    function begin() {
+        errEl.classList.add('hidden');
+        retry.classList.add('hidden');
+        bar.className = 'h-full rounded-full bg-primary transition-all duration-500 ease-out';
+        render('checking');
+        var headers = { 'Accept': 'application/json' };
+        if (token) headers['RequestVerificationToken'] = token.value;
+        fetch('/connect/' + encodeURIComponent(id) + '/begin', { method: 'POST', headers: headers })
+            .then(function (r) { return r.json(); })
+            .then(function (dto) { if (!apply(dto)) poll(); })
+            .catch(function () { fail('Could not reach the gateway.'); });
+    }
+
+    retry.addEventListener('click', function (e) { e.preventDefault(); begin(); });
+    begin();
+})();
+</script>
+<form style="display:none">@Html.AntiForgeryToken()</form>
+}

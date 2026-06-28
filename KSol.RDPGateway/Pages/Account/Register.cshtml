@@ -1,9 +1,12 @@
-﻿@page
+@page
 @model RegisterModel
 @{
-    ViewData["Title"] = "Go to Login";
+    ViewData["Title"] = "Register";
 }
 
-<li class="nav-item">
-    <a class="nav-link text-dark" asp-area="Identity" asp-page="/Account/Login">Login</a>
-</li>
+<h2 class="text-xl font-semibold text-center mb-1">Registration closed</h2>
+<p class="text-sm text-muted-foreground text-center mb-6">Self-registration is disabled. Contact an administrator for an account.</p>
+<a asp-page="/Account/Login"
+   class="w-full inline-flex items-center justify-center px-4 py-2.5 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity">
+    Back to sign in
+</a>

@@ -1,41 +1,30 @@
 @model KSol.RDPGateway.Models.ApplicationUser
 
 @{
-    ViewData["Title"] = "Edit User";
+    ViewData["Title"] = "Edit user";
 }
 
-<div class="container mt-4">
-    <div class="row">
-        <div class="col-md-8">
-            <h1>Edit User</h1>
-            <hr />
+@section PageActions {
+    <a asp-action="Index" class="btn-secondary w-fit"><i class="ri-arrow-left-line"></i> Back to list</a>
+}
 
-            <form asp-action="Edit" method="post">
-                <div asp-validation-summary="ModelOnly" class="text-danger"></div>
-
-                <input type="hidden" asp-for="Id" />
-
-                <div class="mb-3">
-                    <label asp-for="UserName" class="form-label">Username</label>
-                    <input asp-for="UserName" class="form-control" />
-                    <span asp-validation-for="UserName" class="text-danger"></span>
-                </div>
-
-                <div class="mb-3">
-                    <label asp-for="Email" class="form-label">Email</label>
-                    <input asp-for="Email" class="form-control" type="email" />
-                    <span asp-validation-for="Email" class="text-danger"></span>
-                </div>
-
-                <div class="mb-3">
-                    <button type="submit" class="btn btn-primary">Save</button>
-                    <a asp-action="Index" class="btn btn-secondary">Back</a>
-                </div>
-            </form>
-        </div>
+<form asp-action="Edit" method="post" class="card-surface p-6 max-w-lg space-y-4">
+    <div asp-validation-summary="ModelOnly"></div>
+    <input type="hidden" asp-for="Id" />
+    <div>
+        <label asp-for="UserName" class="form-label">Username</label>
+        <input asp-for="UserName" class="form-input" />
+        <span asp-validation-for="UserName" class="form-error"></span>
     </div>
-</div>
+    <div>
+        <label asp-for="Email" class="form-label">Email</label>
+        <input asp-for="Email" class="form-input" type="email" />
+        <span asp-validation-for="Email" class="form-error"></span>
+    </div>
+    <div class="flex items-center gap-2 pt-2 border-t border-border">
+        <button type="submit" class="btn-primary">Save changes</button>
+        <a asp-action="Index" class="btn-ghost">Cancel</a>
+    </div>
+</form>
 
-@section Scripts {
-    @{await Html.RenderPartialAsync("_ValidationScriptsPartial");}
-}
+@section Scripts { <partial name="_ValidationScripts" /> }

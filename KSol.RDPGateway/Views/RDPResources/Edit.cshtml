@@ -1,75 +1,271 @@
-@model KSol.RDPGateway.Models.RDPResource
+@model KSol.RDPGateway.Controllers.ResourceEditViewModel
 @using KSol.RDPGateway.Models
 
 @{
-    ViewData["Title"] = "Edit resource";
-    var isProxmox = Model.Source == ResourceSource.Proxmox;
+    var r = Model.Resource;
+    ViewData["Title"] = r.Name;
+    ViewData["Subtitle"] = "Edit resource";
+    var isProxmox = r.Source == ResourceSource.Proxmox;
+
+    var tabs = new (string Id, string Label, string Icon)[]
+    {
+        ("general", "General", "ri-settings-3-line"),
+        ("backend", "Backend & VM", "ri-server-line"),
+        ("access", "Users & access", "ri-shield-user-line"),
+        ("defaults", "Connection", "ri-slideshow-line"),
+        ("audit", "Audit", "ri-film-line"),
+    };
 }
 
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <div>
-        <h1 class="h3 mb-1">@Model.Name</h1>
-        <span class="badge @(isProxmox ? "bg-info text-dark" : "bg-secondary")">@Model.Source</span>
-        <partial name="_PowerStateBadge" model="Model.PowerState" />
-    </div>
-    <a asp-action="Index" class="btn btn-outline-secondary btn-sm">Back to list</a>
-</div>
-
-@if (isProxmox)
-{
-    <div class="alert alert-info">
-        This resource is managed by a Proxmox backend. Its address and RDP options are synced from the
-        VM (notes) and shown read-only here. You can still adjust its display name and description.
+@section PageActions {
+    <div class="flex items-center gap-2">
+        <span class="@(isProxmox ? "badge-primary" : "badge-muted")">@r.Source</span>
+        <partial name="_PowerStateBadge" model="r.PowerState" />
+        <a asp-action="Index" class="btn-secondary"><i class="ri-arrow-left-line"></i> Back</a>
     </div>
 }
 
-<div class="card shadow-sm">
-    <div class="card-body">
-        <form asp-action="Edit">
-            <div asp-validation-summary="ModelOnly" class="text-danger"></div>
-            <input type="hidden" asp-for="Id" />
+<div class="max-w-4xl" x-tabs>
+    <!-- Tab bar -->
+    <div class="flex flex-wrap gap-1 border-b border-border mb-6" role="tablist">
+        @foreach (var (id, label, icon) in tabs)
+        {
+            <button type="button" data-tab="@id" role="tab"
+                    class="tab-btn flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-muted-foreground hover:text-foreground transition-colors -mb-px">
+                <i class="@icon"></i> @label
+            </button>
+        }
+    </div>
 
-            <h2 class="h6 text-uppercase text-muted mb-3">General</h2>
-            <div class="row g-3 mb-4">
-                <div class="col-md-6">
-                    <label asp-for="Name" class="form-label"></label>
-                    <input asp-for="Name" class="form-control" />
+    <!-- General -->
+    <section data-panel="general" class="space-y-6">
+        <form asp-action="Edit" asp-route-id="@r.Id" class="card-surface p-6 space-y-6">
+            <div asp-validation-summary="ModelOnly"></div>
+            <input type="hidden" asp-for="Resource.Id" name="Id" />
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label asp-for="Resource.Name" class="form-label">Name</label>
+                    <input asp-for="Resource.Name" name="Name" class="form-input" />
                 </div>
-                <div class="col-md-6">
-                    <label asp-for="Description" class="form-label"></label>
-                    <input asp-for="Description" class="form-control" />
+                <div>
+                    <label asp-for="Resource.Description" class="form-label">Description</label>
+                    <input asp-for="Resource.Description" name="Description" class="form-input" />
                 </div>
             </div>
 
-            <h2 class="h6 text-uppercase text-muted mb-3">Connection</h2>
-            <div class="row g-3 mb-4">
-                <div class="col-md-8">
-                    <label asp-for="IpAddress" class="form-label">IP address / host</label>
-                    <input asp-for="IpAddress" class="form-control" readonly="@isProxmox" />
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div class="md:col-span-2">
+                    <label asp-for="Resource.IpAddress" class="form-label">IP address / host</label>
+                    <input asp-for="Resource.IpAddress" name="IpAddress" class="form-input @(isProxmox ? "opacity-60" : "")" readonly="@isProxmox" />
                 </div>
-                <div class="col-md-4">
-                    <label asp-for="Port" class="form-label">RDP port</label>
-                    <input asp-for="Port" class="form-control" type="number" readonly="@isProxmox" />
+                <div>
+                    <label asp-for="Resource.Port" class="form-label">RDP port</label>
+                    <input asp-for="Resource.Port" name="Port" type="number" class="form-input @(isProxmox ? "opacity-60" : "")" readonly="@isProxmox" />
                 </div>
             </div>
 
             @if (isProxmox)
             {
-                <p class="text-muted small">RDP options are defined in the VM notes and are not editable here.</p>
+                <p class="text-sm text-muted-foreground">Address and RDP options are synced from the VM notes and not editable here.</p>
             }
             else
             {
-                <partial name="_RdpOptionsEditor" for="RdpOptions" />
+                <partial name="_RdpOptionsEditor" for="Resource.RdpOptions" />
             }
 
-            <div class="d-flex gap-2">
-                <button type="submit" class="btn btn-primary">Save</button>
-                <a asp-action="Index" class="btn btn-link">Cancel</a>
+            <div class="flex items-center gap-2 pt-2 border-t border-border">
+                <button type="submit" class="btn-primary">Save changes</button>
             </div>
         </form>
-    </div>
+    </section>
+
+    <!-- Backend & VM -->
+    <section data-panel="backend" class="hidden">
+        <div class="card-surface p-6">
+            <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-4">Backend & VM information</h2>
+            @if (isProxmox)
+            {
+                <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-3 text-sm">
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Backend</dt><dd>@(Model.Backend?.Name ?? "—")</dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Node</dt><dd>@(r.ProxmoxNode ?? "—")</dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">VMID</dt><dd>@(r.ProxmoxVmId?.ToString() ?? "—")</dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Current state</dt><dd><partial name="_PowerStateBadge" model="r.PowerState" /></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Address</dt><dd>@(string.IsNullOrEmpty(r.IpAddress) ? "—" : $"{r.IpAddress}:{r.Port}")</dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Last activity</dt><dd>@(r.LastActivityUtc?.ToString("u") ?? "—")</dd></div>
+                </dl>
+                @if (!string.IsNullOrEmpty(r.ConfigJson))
+                {
+                    <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mt-6 mb-2">VM notes (config)</h3>
+                    <pre class="text-xs bg-muted rounded-lg p-3 overflow-x-auto">@r.ConfigJson</pre>
+                }
+            }
+            else
+            {
+                <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-3 text-sm">
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Source</dt><dd>Manual</dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Address</dt><dd>@(string.IsNullOrEmpty(r.IpAddress) ? "—" : $"{r.IpAddress}:{r.Port}")</dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Current state</dt><dd><partial name="_PowerStateBadge" model="r.PowerState" /></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Last activity</dt><dd>@(r.LastActivityUtc?.ToString("u") ?? "—")</dd></div>
+                </dl>
+                <p class="text-sm text-muted-foreground mt-4">This is a manually-defined resource with no Proxmox backend.</p>
+            }
+        </div>
+    </section>
+
+    <!-- Users & access (Authorizations folded in) -->
+    <section data-panel="access" class="hidden space-y-4">
+        <div class="card-surface p-6">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="font-medium">Assigned users</h2>
+                <span class="text-sm text-muted-foreground">@Model.Authorizations.Count assigned</span>
+            </div>
+
+            @if (Model.AvailableUsers.Any())
+            {
+                <form asp-action="Grant" asp-route-id="@r.Id" method="post" class="flex items-end gap-2 mb-5">
+                    @Html.AntiForgeryToken()
+                    <div class="flex-1">
+                        <label class="form-label" for="grant-user">Grant access to</label>
+                        <select name="userId" id="grant-user" class="form-select">
+                            <option value="">Select a user…</option>
+                            @foreach (var u in Model.AvailableUsers)
+                            {
+                                <option value="@u.Id">@u.UserName</option>
+                            }
+                        </select>
+                    </div>
+                    <button type="submit" class="btn-primary"><i class="ri-add-line"></i> Grant</button>
+                </form>
+            }
+
+            @if (!Model.Authorizations.Any())
+            {
+                <p class="text-sm text-muted-foreground">No users assigned yet.</p>
+            }
+            else
+            {
+                <div class="space-y-3">
+                    @foreach (var a in Model.Authorizations)
+                    {
+                        <details class="border border-border rounded-xl">
+                            <summary class="flex items-center justify-between gap-3 px-4 py-3 cursor-pointer select-none">
+                                <div class="flex items-center gap-3 min-w-0">
+                                    <div class="w-8 h-8 rounded-full bg-primary text-primary-foreground text-xs font-semibold flex items-center justify-center">
+                                        @((a.User?.UserName ?? "?").Substring(0, 1).ToUpper())
+                                    </div>
+                                    <span class="font-medium truncate">@a.User?.UserName</span>
+                                    @if (a.HasStoredCredentials)
+                                    {
+                                        <span class="badge bg-success/10 text-success"><i class="ri-key-2-line"></i> SSO</span>
+                                    }
+                                </div>
+                                <i class="ri-arrow-down-s-line text-muted-foreground"></i>
+                            </summary>
+                            <div class="px-4 pb-4 pt-1 border-t border-border space-y-4">
+                                <!-- Stored credentials -->
+                                <div>
+                                    <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Stored credentials (SSO)</h4>
+                                    @if (a.HasStoredCredentials)
+                                    {
+                                        <div class="flex items-center gap-3 mb-3">
+                                            <span class="text-sm text-success">Credentials stored — console auto-connects.</span>
+                                            <form asp-action="ClearCredentials" asp-route-id="@r.Id" asp-route-authId="@a.Id" method="post">
+                                                @Html.AntiForgeryToken()
+                                                <button type="submit" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Clear</button>
+                                            </form>
+                                        </div>
+                                    }
+                                    <form asp-action="SetCredentials" asp-route-id="@r.Id" asp-route-authId="@a.Id" method="post" class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                        @Html.AntiForgeryToken()
+                                        <input class="form-input" name="username" placeholder="Username" autocomplete="off" />
+                                        <input class="form-input" name="password" type="password" placeholder="Password" autocomplete="new-password" />
+                                        <input class="form-input" name="domain" placeholder="Domain (optional)" autocomplete="off" />
+                                        <div class="md:col-span-3">
+                                            <button type="submit" class="btn-primary btn-sm">@(a.HasStoredCredentials ? "Replace credentials" : "Store credentials")</button>
+                                        </div>
+                                    </form>
+                                </div>
+                                <!-- Revoke -->
+                                <div class="pt-3 border-t border-border">
+                                    <form asp-action="Revoke" asp-route-id="@r.Id" asp-route-authId="@a.Id" method="post"
+                                          onsubmit="return confirm('Revoke this user\'s access?');">
+                                        @Html.AntiForgeryToken()
+                                        <button type="submit" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10"><i class="ri-shield-cross-line"></i> Revoke access</button>
+                                    </form>
+                                </div>
+                            </div>
+                        </details>
+                    }
+                </div>
+            }
+        </div>
+    </section>
+
+    <!-- Connection defaults -->
+    <section data-panel="defaults" class="hidden">
+        <div class="card-surface p-6">
+            <h2 class="font-medium mb-1">Connection defaults</h2>
+            <p class="text-sm text-muted-foreground mb-4">Per-user connection defaults are configured under each assigned user in the “Users &amp; access” tab.</p>
+            <p class="text-sm text-muted-foreground">Resource-wide RDP options live in the “General” tab’s RDP options section.</p>
+        </div>
+    </section>
+
+    <!-- Audit -->
+    <section data-panel="audit" class="hidden">
+        <div class="card-surface p-6">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="font-medium">Recent recordings</h2>
+                <a asp-controller="Recordings" asp-action="Index" class="text-sm text-primary hover:underline">All recordings</a>
+            </div>
+            @if (!Model.Recordings.Any())
+            {
+                <p class="text-sm text-muted-foreground">No recordings for this resource.</p>
+            }
+            else
+            {
+                <table class="table-surface">
+                    <thead>
+                        <tr><th>Started (UTC)</th><th>User</th><th>Duration</th><th>Status</th></tr>
+                    </thead>
+                    <tbody>
+                    @foreach (var rec in Model.Recordings)
+                    {
+                        <tr>
+                            <td>@rec.StartedUtc.ToString("yyyy-MM-dd HH:mm:ss")</td>
+                            <td>@(rec.User?.UserName ?? rec.UserId)</td>
+                            <td>@(rec.EndedUtc is { } e ? (e - rec.StartedUtc).ToString(@"hh\:mm\:ss") : "—")</td>
+                            <td>@rec.Status</td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            }
+        </div>
+    </section>
 </div>
 
 @section Scripts {
-    @{await Html.RenderPartialAsync("_ValidationScriptsPartial");}
+    <partial name="_ValidationScripts" />
+    <script>
+        (function () {
+            var root = document.querySelector('[x-tabs]');
+            if (!root) return;
+            var btns = root.querySelectorAll('.tab-btn');
+            var panels = root.querySelectorAll('[data-panel]');
+            function activate(id) {
+                btns.forEach(function (b) {
+                    var on = b.dataset.tab === id;
+                    b.classList.toggle('border-primary', on);
+                    b.classList.toggle('text-foreground', on);
+                    b.classList.toggle('text-muted-foreground', !on);
+                });
+                panels.forEach(function (p) { p.classList.toggle('hidden', p.dataset.panel !== id); });
+                history.replaceState(null, '', '#' + id);
+            }
+            btns.forEach(function (b) { b.addEventListener('click', function () { activate(b.dataset.tab); }); });
+            var initial = (location.hash || '').replace('#', '') || 'general';
+            activate(btns.length && [].some.call(btns, function (b) { return b.dataset.tab === initial; }) ? initial : 'general');
+        })();
+    </script>
 }

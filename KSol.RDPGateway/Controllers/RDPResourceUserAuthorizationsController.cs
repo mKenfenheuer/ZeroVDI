@@ -12,6 +12,7 @@ using KSol.RDPGateway.Models;
 namespace KSol.RDPGateway.Controllers
 {
     [Authorize(Roles = "Admin")]
+    [Route("admin/authorizations")]
     public class RDPResourceUserAuthorizationsController : Controller
     {
         private readonly ApplicationDbContext _context;
@@ -23,14 +24,16 @@ namespace KSol.RDPGateway.Controllers
             _credentials = credentials;
         }
 
-        // GET: RDPResourceUserAuthorizations
+        // GET: /admin/authorizations
+        [HttpGet("")]
         public async Task<IActionResult> Index()
         {
             var applicationDbContext = _context.RDPResourceUserAuthorizations.Include(r => r.RDPResource).Include(r => r.User);
             return View(await applicationDbContext.ToListAsync());
         }
 
-        // GET: RDPResourceUserAuthorizations/Details/5
+        // GET: /admin/authorizations/details/5
+        [HttpGet("details/{id}")]
         public async Task<IActionResult> Details(string id)
         {
             if (id == null)
@@ -50,7 +53,8 @@ namespace KSol.RDPGateway.Controllers
             return View(rDPResourceUserAuthorization);
         }
 
-        // GET: RDPResourceUserAuthorizations/Create
+        // GET: /admin/authorizations/create
+        [HttpGet("create")]
         public IActionResult Create()
         {
             ViewData["RDPResourceId"] = new SelectList(_context.RDPResources, "Id", "Name");
@@ -58,10 +62,10 @@ namespace KSol.RDPGateway.Controllers
             return View();
         }
 
-        // POST: RDPResourceUserAuthorizations/Create
+        // POST: /admin/authorizations/create
         // To protect from overposting attacks, enable the specific properties you want to bind to.
         // For more details, see http://go.microsoft.com/fwlink/?LinkId=317598.
-        [HttpPost]
+        [HttpPost("create")]
         [ValidateAntiForgeryToken]
         public async Task<IActionResult> Create([Bind("UserId,RDPResourceId")] RDPResourceUserAuthorization rDPResourceUserAuthorization)
         {
@@ -76,7 +80,8 @@ namespace KSol.RDPGateway.Controllers
             return View(rDPResourceUserAuthorization);
         }
 
-        // GET: RDPResourceUserAuthorizations/Edit/5
+        // GET: /admin/authorizations/edit/5
+        [HttpGet("edit/{id}")]
         public async Task<IActionResult> Edit(string id)
         {
             if (id == null)
@@ -100,7 +105,7 @@ namespace KSol.RDPGateway.Controllers
         // SetCredentials/ClearCredentials so a form submit can't clear or overpost them. We load the
         // tracked entity and mutate the allowed fields rather than Update() a fresh graph (which would
         // null the stored creds).
-        [HttpPost]
+        [HttpPost("edit/{id}")]
         [ValidateAntiForgeryToken]
         public async Task<IActionResult> Edit(string id, [Bind("Id,UserId,RDPResourceId,ConnectionDefaults")] RDPResourceUserAuthorization rDPResourceUserAuthorization)
         {
@@ -132,7 +137,7 @@ namespace KSol.RDPGateway.Controllers
         // Stores (encrypted) VM credentials for one (user, resource) authorization, enabling SSO
         // auto-connect from the in-browser console. The plaintext password is never persisted or
         // echoed back — only the DataProtection envelopes are stored.
-        [HttpPost]
+        [HttpPost("setcredentials/{id}")]
         [ValidateAntiForgeryToken]
         public async Task<IActionResult> SetCredentials(string id, string username, string password, string? domain)
         {
@@ -154,7 +159,7 @@ namespace KSol.RDPGateway.Controllers
         }
 
         // POST: RDPResourceUserAuthorizations/ClearCredentials/5
-        [HttpPost]
+        [HttpPost("clearcredentials/{id}")]
         [ValidateAntiForgeryToken]
         public async Task<IActionResult> ClearCredentials(string id)
         {
@@ -169,7 +174,8 @@ namespace KSol.RDPGateway.Controllers
             return RedirectToAction(nameof(Edit), new { id });
         }
 
-        // GET: RDPResourceUserAuthorizations/Delete/5
+        // GET: /admin/authorizations/delete/5
+        [HttpGet("delete/{id}")]
         public async Task<IActionResult> Delete(string id)
         {
             if (id == null)
@@ -189,8 +195,8 @@ namespace KSol.RDPGateway.Controllers
             return View(rDPResourceUserAuthorization);
         }
 
-        // POST: RDPResourceUserAuthorizations/Delete/5
-        [HttpPost, ActionName("Delete")]
+        // POST: /admin/authorizations/delete/5
+        [HttpPost("delete/{id}"), ActionName("Delete")]
         [ValidateAntiForgeryToken]
         public async Task<IActionResult> DeleteConfirmed(string id)
         {

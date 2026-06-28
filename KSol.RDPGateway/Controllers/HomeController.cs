@@ -25,35 +25,6 @@ public class HomeController : Controller
         _recordingPolicy = recordingPolicy;
     }
 
-    /// <summary>
-    /// TEMPORARY DEBUG: accept a raw binary body and dump it to /tmp/rdpgw-dump/&lt;name&gt; so a decoded
-    /// H.264 keyframe captured in the browser can be decoded offline with ffmpeg. Remove after debugging.
-    /// </summary>
-    [HttpPost("/debug/dump/{name}")]
-    public async Task<IActionResult> DebugDump(string name)
-    {
-        var safe = System.Text.RegularExpressions.Regex.Replace(name, "[^a-zA-Z0-9._-]", "_");
-        var dir = "/tmp/rdpgw-dump";
-        Directory.CreateDirectory(dir);
-        using var ms = new MemoryStream();
-        await Request.Body.CopyToAsync(ms);
-        var bytes = ms.ToArray();
-        var path = Path.Combine(dir, safe);
-        // ?append=1 concatenates (used to capture a whole GFX H.264 stream across many frames);
-        // otherwise overwrite (single keyframe dump).
-        if (Request.Query.ContainsKey("append"))
-        {
-            using var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
-            await fs.WriteAsync(bytes);
-        }
-        else
-        {
-            await System.IO.File.WriteAllBytesAsync(path, bytes);
-        }
-        return Ok(new { written = bytes.Length, path });
-    }
-
-
     public async Task<IActionResult> Index()
     {
         var userId = _userManager.GetUserId(User);
@@ -73,7 +44,7 @@ public class HomeController : Controller
 
     /// <summary>
     /// In-browser RDP console page for an authorized resource. Renders the HTML5 client that connects
-    /// to the WebSocket relay (<c>/ws/rdp/{id}</c>). Authorization mirrors <see cref="DownloadRdpFile"/>.
+    /// to the WebSocket relay (<c>/ws/rdp/{id}</c>).
     /// </summary>
     [Microsoft.AspNetCore.Authorization.Authorize]
     public async Task<IActionResult> Console(string id)
@@ -95,7 +66,6 @@ public class HomeController : Controller
 
         ViewData["ResourceId"] = id;
         ViewData["ResourceName"] = authorization.RDPResource.Name ?? id;
-        ViewData["DefaultUser"] = _userManager.GetUserName(User);
 
         // Recording disclosure: if the rules engine would record this session AND the matched rule asks
         // to notify, the console shows a "this session is recorded" banner. Mirrors the decision made in
@@ -103,23 +73,25 @@ public class HomeController : Controller
         var roles = await _userManager.GetRolesAsync(authorization.User ?? (await _userManager.FindByIdAsync(userId))!);
         ViewData["RecordingNotice"] = (await _recordingPolicy.EvaluateAsync(userId, id, roles)).Notify;
 
-        // SSO: when VM credentials are stored for this (user, resource), release them to this user's
-        // own browser (over the authenticated HTTPS session) so the console auto-connects without the
-        // login overlay. The browser needs the password for the inner RDP auto-logon (Client Info PDU);
-        // the gateway also uses the stored creds for NLA. Same trust boundary as a manual login — the
-        // win is storage + one-click connect.
+        // SSO: when VM credentials are stored for this (user, resource), the console auto-connects
+        // without the login overlay. NO stored credential (username, password or domain) is EVER sent
+        // to the browser. The gateway injects the real credentials entirely server-side for both the
+        // client-facing NLA and the host logon (see RdpWebSocketController.presuppliedCreds and
+        // MitmRdpStream._hostCreds; the client's delegated creds are terminated at the gateway and
+        // discarded). The browser uses harmless placeholders so its handshake frames are well-formed;
+        // those placeholders never reach the host.
         if (authorization.HasStoredCredentials)
         {
-            var user = _credentials.Unprotect(authorization.ProtectedUsername);
-            var password = _credentials.Unprotect(authorization.ProtectedPassword);
-            if (!string.IsNullOrEmpty(user) && password != null)
+            // Confirm the stored credentials are decryptable (keyring intact) before offering
+            // auto-connect, surfacing only a boolean - never the plaintext. If not usable, fall through
+            // to the manual login overlay.
+            var usable = !string.IsNullOrEmpty(_credentials.Unprotect(authorization.ProtectedUsername))
+                      && !string.IsNullOrEmpty(_credentials.Unprotect(authorization.ProtectedPassword));
+            if (usable)
             {
-                var defaults = authorization.ConnectionDefaults ?? new ConnectionDefaults();
                 ViewData["AutoConnect"] = true;
-                ViewData["StoredUser"] = user;
-                ViewData["StoredPassword"] = password;
-                ViewData["StoredDomain"] = _credentials.Unprotect(authorization.ProtectedDomain) ?? string.Empty;
-                ViewData["Defaults"] = defaults;
+                ViewData["Defaults"] = authorization.ConnectionDefaults ?? new ConnectionDefaults();
+                // StoredUser/StoredPassword/StoredDomain intentionally NOT set.
             }
         }
 

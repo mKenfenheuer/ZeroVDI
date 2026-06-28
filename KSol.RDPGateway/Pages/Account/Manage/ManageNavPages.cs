@@ -117,7 +117,10 @@ namespace  KSol.RDPGateway.Areas.Identity.Pages.Account.Manage
         {
             var activePage = viewContext.ViewData["ActivePage"] as string
                 ?? System.IO.Path.GetFileNameWithoutExtension(viewContext.ActionDescriptor.DisplayName);
-            return string.Equals(activePage, page, StringComparison.OrdinalIgnoreCase) ? "active" : null;
+            var isActive = string.Equals(activePage, page, StringComparison.OrdinalIgnoreCase);
+            return isActive
+                ? "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium bg-muted text-foreground"
+                : "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors";
         }
     }
 }

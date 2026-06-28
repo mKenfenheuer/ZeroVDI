@@ -12,6 +12,7 @@ namespace KSol.RDPGateway.Controllers;
 /// action per backend.
 /// </summary>
 [Authorize(Roles = "Admin")]
+[Route("admin/backends")]
 public class ProxmoxBackendsController : Controller
 {
     private readonly ApplicationDbContext _context;
@@ -23,17 +24,19 @@ public class ProxmoxBackendsController : Controller
         _sync = sync;
     }
 
-    // GET: ProxmoxBackends
+    // GET: /admin/backends
+    [HttpGet("")]
     public async Task<IActionResult> Index()
     {
         return View(await _context.ProxmoxBackends.ToListAsync());
     }
 
-    // GET: ProxmoxBackends/Create
+    // GET: /admin/backends/create
+    [HttpGet("create")]
     public IActionResult Create() => View(new ProxmoxBackend());
 
-    // POST: ProxmoxBackends/Create
-    [HttpPost]
+    // POST: /admin/backends/create
+    [HttpPost("create")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Create(
         [Bind("Name,Host,ApiTokenId,ApiTokenSecret,VerifyTls,DefaultRdpPort,IdleTimeoutHours,PauseAction,StartTimeoutSeconds")] ProxmoxBackend backend)
@@ -44,7 +47,8 @@ public class ProxmoxBackendsController : Controller
         return RedirectToAction(nameof(Index));
     }
 
-    // GET: ProxmoxBackends/Edit/5
+    // GET: /admin/backends/edit/5
+    [HttpGet("edit/{id:int}")]
     public async Task<IActionResult> Edit(int id)
     {
         var backend = await _context.ProxmoxBackends.FindAsync(id);
@@ -52,8 +56,8 @@ public class ProxmoxBackendsController : Controller
         return View(backend);
     }
 
-    // POST: ProxmoxBackends/Edit/5
-    [HttpPost]
+    // POST: /admin/backends/edit/5
+    [HttpPost("edit/{id:int}")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Edit(int id,
         [Bind("Id,Name,Host,ApiTokenId,ApiTokenSecret,VerifyTls,DefaultRdpPort,IdleTimeoutHours,PauseAction,StartTimeoutSeconds")] ProxmoxBackend input)
@@ -83,7 +87,8 @@ public class ProxmoxBackendsController : Controller
         return RedirectToAction(nameof(Index));
     }
 
-    // GET: ProxmoxBackends/Delete/5
+    // GET: /admin/backends/delete/5
+    [HttpGet("delete/{id:int}")]
     public async Task<IActionResult> Delete(int id)
     {
         var backend = await _context.ProxmoxBackends.FirstOrDefaultAsync(b => b.Id == id);
@@ -91,8 +96,8 @@ public class ProxmoxBackendsController : Controller
         return View(backend);
     }
 
-    // POST: ProxmoxBackends/Delete/5
-    [HttpPost, ActionName("Delete")]
+    // POST: /admin/backends/delete/5
+    [HttpPost("delete/{id:int}"), ActionName("Delete")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> DeleteConfirmed(int id)
     {
@@ -105,8 +110,8 @@ public class ProxmoxBackendsController : Controller
         return RedirectToAction(nameof(Index));
     }
 
-    // POST: ProxmoxBackends/Discover/5 — discover/refresh resources from this backend now.
-    [HttpPost]
+    // POST: /admin/backends/discover/5 — discover/refresh resources from this backend now.
+    [HttpPost("discover/{id:int}")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Discover(int id)
     {

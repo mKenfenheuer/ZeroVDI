@@ -10,6 +10,7 @@ using Microsoft.EntityFrameworkCore;
 namespace KSol.RDPGateway.Controllers
 {
     [Authorize(Roles = "Admin")]
+    [Route("admin/users")]
     public class UsersController : Controller
     {
         private readonly UserManager<ApplicationUser> _userManager;
@@ -21,14 +22,16 @@ namespace KSol.RDPGateway.Controllers
             _roleManager = roleManager;
         }
 
-        // GET: Users
+        // GET: /admin/users
+        [HttpGet("")]
         public async Task<IActionResult> Index()
         {
             var users = await _userManager.Users.ToListAsync();
             return View(users);
         }
 
-        // GET: Users/Details/5
+        // GET: /admin/users/details/5
+        [HttpGet("details/{id}")]
         public async Task<IActionResult> Details(string id)
         {
             if (id == null)
@@ -47,14 +50,15 @@ namespace KSol.RDPGateway.Controllers
             return View(user);
         }
 
-        // GET: Users/Create
+        // GET: /admin/users/create
+        [HttpGet("create")]
         public IActionResult Create()
         {
             return View();
         }
 
-        // POST: Users/Create
-        [HttpPost]
+        // POST: /admin/users/create
+        [HttpPost("create")]
         [ValidateAntiForgeryToken]
         public async Task<IActionResult> Create([Bind("UserName,Email")] ApplicationUser user, string password)
         {
@@ -83,7 +87,8 @@ namespace KSol.RDPGateway.Controllers
             return View(user);
         }
 
-        // GET: Users/Edit/5
+        // GET: /admin/users/edit/5
+        [HttpGet("edit/{id}")]
         public async Task<IActionResult> Edit(string id)
         {
             if (id == null)
@@ -99,8 +104,8 @@ namespace KSol.RDPGateway.Controllers
             return View(user);
         }
 
-        // POST: Users/Edit/5
-        [HttpPost]
+        // POST: /admin/users/edit/5
+        [HttpPost("edit/{id}")]
         [ValidateAntiForgeryToken]
         public async Task<IActionResult> Edit(string id, [Bind("Id,UserName,Email")] ApplicationUser user)
         {
@@ -142,7 +147,8 @@ namespace KSol.RDPGateway.Controllers
             return View(user);
         }
 
-        // GET: Users/Delete/5
+        // GET: /admin/users/delete/5
+        [HttpGet("delete/{id}")]
         public async Task<IActionResult> Delete(string id)
         {
             if (id == null)
@@ -161,8 +167,8 @@ namespace KSol.RDPGateway.Controllers
             return View(user);
         }
 
-        // POST: Users/Delete/5
-        [HttpPost, ActionName("Delete")]
+        // POST: /admin/users/delete/5
+        [HttpPost("delete/{id}"), ActionName("Delete")]
         [ValidateAntiForgeryToken]
         public async Task<IActionResult> DeleteConfirmed(string id)
         {
@@ -182,7 +188,8 @@ namespace KSol.RDPGateway.Controllers
             return RedirectToAction(nameof(Index));
         }
 
-        // GET: Users/AssignRoles/5
+        // GET: /admin/users/assignroles/5
+        [HttpGet("assignroles/{id}")]
         public async Task<IActionResult> AssignRoles(string id)
         {
             if (id == null)
@@ -198,14 +205,14 @@ namespace KSol.RDPGateway.Controllers
 
             var roles = await _roleManager.Roles.ToListAsync();
             var userRoles = await _userManager.GetRolesAsync(user);
-            
+
             ViewBag.AllRoles = roles;
             ViewBag.UserRoles = userRoles;
             return View(user);
         }
 
-        // POST: Users/AssignRoles/5
-        [HttpPost]
+        // POST: /admin/users/assignroles/5
+        [HttpPost("assignroles/{id}")]
         [ValidateAntiForgeryToken]
         public async Task<IActionResult> AssignRoles(string id, [FromForm] string[] selectedRoles)
         {

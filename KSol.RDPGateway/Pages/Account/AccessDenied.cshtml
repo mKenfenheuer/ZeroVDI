@@ -1,10 +1,13 @@
-﻿@page
+@page
 @model AccessDeniedModel
 @{
     ViewData["Title"] = "Access denied";
 }
-
-<header>
-    <h1 class="text-danger">@ViewData["Title"]</h1>
-    <p class="text-danger">You do not have access to this resource.</p>
-</header>
+<div class="text-center">
+    <div class="w-12 h-12 rounded-full bg-destructive/10 text-destructive flex items-center justify-center mx-auto mb-4">
+        <i class="ri-shield-cross-line text-2xl"></i>
+    </div>
+    <h2 class="text-xl font-semibold mb-1">@ViewData["Title"]</h2>
+    <p class="text-sm text-muted-foreground mb-6">You do not have access to this resource.</p>
+    <a asp-controller="Home" asp-action="Index" class="btn-secondary w-full">Back to dashboard</a>
+</div>

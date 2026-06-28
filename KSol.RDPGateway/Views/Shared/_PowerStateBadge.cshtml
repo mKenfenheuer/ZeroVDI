@@ -1,12 +1,14 @@
 @model KSol.RDPGateway.Models.ResourcePowerState
 @{
-    var (cls, text) = Model switch
+    var (dot, text, cls) = Model switch
     {
-        KSol.RDPGateway.Models.ResourcePowerState.Running => ("bg-success", "Running"),
-        KSol.RDPGateway.Models.ResourcePowerState.Stopped => ("bg-secondary", "Stopped"),
-        KSol.RDPGateway.Models.ResourcePowerState.Suspended => ("bg-warning text-dark", "Suspended"),
-        KSol.RDPGateway.Models.ResourcePowerState.Starting => ("bg-info text-dark", "Starting…"),
-        _ => ("bg-light text-dark border", "Unknown"),
+        KSol.RDPGateway.Models.ResourcePowerState.Running   => ("bg-success", "Running", "bg-success/10 text-success"),
+        KSol.RDPGateway.Models.ResourcePowerState.Stopped   => ("bg-muted-foreground", "Stopped", "bg-muted text-muted-foreground"),
+        KSol.RDPGateway.Models.ResourcePowerState.Suspended => ("bg-warning", "Suspended", "bg-warning/10 text-warning"),
+        KSol.RDPGateway.Models.ResourcePowerState.Starting  => ("bg-info animate-pulse", "Starting…", "bg-info/10 text-info"),
+        _ => ("bg-muted-foreground", "Unknown", "bg-muted text-muted-foreground"),
     };
 }
-<span class="badge @cls">@text</span>
+<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium @cls">
+    <span class="w-1.5 h-1.5 rounded-full @dot"></span>@text
+</span>

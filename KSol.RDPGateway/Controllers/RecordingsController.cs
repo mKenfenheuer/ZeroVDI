@@ -11,34 +11,36 @@ namespace KSol.RDPGateway.Controllers;
 /// Lists recorded sessions and serves their MP4s for in-browser replay. Recording files live outside
 /// wwwroot (under the configured recordings dir) and are reachable only through the authorized
 /// <see cref="File"/> action, which streams with HTTP range support so the &lt;video&gt; element can seek.
+///
+/// Session recordings are sensitive and are NEVER accessible to ordinary users: the whole controller
+/// is restricted to the Admin and Auditor roles. Anyone with access may view every recording (there is
+/// no per-user scoping — an Auditor reviews all sessions by design).
 /// </summary>
-[Authorize]
+[Authorize(Roles = "Admin,Auditor")]
+[Route("admin/recordings")]
 public class RecordingsController : Controller
 {
     private readonly ApplicationDbContext _context;
-    private readonly UserManager<ApplicationUser> _userManager;
 
-    public RecordingsController(ApplicationDbContext context, UserManager<ApplicationUser> userManager)
+    public RecordingsController(ApplicationDbContext context)
     {
         _context = context;
-        _userManager = userManager;
     }
 
+    [HttpGet("")]
     public async Task<IActionResult> Index()
     {
-        var userId = _userManager.GetUserId(User);
-        var isAdmin = User.IsInRole("Admin");
-
-        var query = _context.Recordings
+        // Admin/Auditor see every recording — recordings are an audit surface, not a per-user feature.
+        var recordings = await _context.Recordings
             .Include(r => r.User)
             .Include(r => r.RDPResource)
             .OrderByDescending(r => r.StartedUtc)
-            .AsQueryable();
-        if (!isAdmin) query = query.Where(r => r.UserId == userId);
+            .ToListAsync();
 
-        return View(await query.ToListAsync());
+        return View(recordings);
     }
 
+    [HttpGet("play/{id}")]
     public async Task<IActionResult> Play(string id)
     {
         var rec = await LoadAuthorizedAsync(id);
@@ -46,8 +48,9 @@ public class RecordingsController : Controller
         return View(rec);
     }
 
-    // GET /Recordings/File/{id}?track=desktop|camera|audio|mic — streams one per-track file with range
-    // support so the web player's <video>/<audio> elements can seek independently. Defaults to desktop.
+    // GET /admin/recordings/file/{id}?track=desktop|camera|audio|mic — streams one per-track file with
+    // range support so the web player's <video>/<audio> elements can seek independently. Defaults to desktop.
+    [HttpGet("file/{id}")]
     public async Task<IActionResult> GetFile(string id, string track = "desktop")
     {
         var rec = await LoadAuthorizedAsync(id);
@@ -66,8 +69,8 @@ public class RecordingsController : Controller
         return File(stream, contentType, enableRangeProcessing: true);
     }
 
-    // POST /Recordings/Delete/{id} — removes the DB row and the recording's files/base directory.
-    [HttpPost]
+    // POST /admin/recordings/delete/{id} — removes the DB row and the recording's files/base directory.
+    [HttpPost("delete/{id}")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Delete(string id)
     {
@@ -100,15 +103,12 @@ public class RecordingsController : Controller
         return RedirectToAction(nameof(Index));
     }
 
-    /// <summary>Loads a recording the caller may view (Admin: any; otherwise only their own).</summary>
+    /// <summary>Loads a recording. The controller is Admin/Auditor-only, so any of them may view any recording.</summary>
     private async Task<Recording?> LoadAuthorizedAsync(string id)
     {
-        var rec = await _context.Recordings
+        return await _context.Recordings
             .Include(r => r.User)
             .Include(r => r.RDPResource)
             .FirstOrDefaultAsync(r => r.Id == id);
-        if (rec == null) return null;
-        if (User.IsInRole("Admin")) return rec;
-        return rec.UserId == _userManager.GetUserId(User) ? rec : null;
     }
 }

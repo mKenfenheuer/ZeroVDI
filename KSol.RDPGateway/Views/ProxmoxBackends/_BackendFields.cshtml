@@ -1,51 +1,55 @@
 @model KSol.RDPGateway.Models.ProxmoxBackend
 
-<h2 class="h6 text-uppercase text-muted mb-3">Connection</h2>
-<div class="row g-3 mb-4">
-    <div class="col-md-6">
-        <label asp-for="Name" class="form-label"></label>
-        <input asp-for="Name" class="form-control" placeholder="Lab cluster" />
-        <span asp-validation-for="Name" class="text-danger"></span>
-    </div>
-    <div class="col-md-6">
-        <label asp-for="Host" class="form-label"></label>
-        <input asp-for="Host" class="form-control" placeholder="https://pve.example.com:8006" />
-        <span asp-validation-for="Host" class="text-danger"></span>
-    </div>
-    <div class="col-md-6">
-        <label asp-for="ApiTokenId" class="form-label"></label>
-        <input asp-for="ApiTokenId" class="form-control" placeholder="user@pve!gateway" />
-        <span asp-validation-for="ApiTokenId" class="text-danger"></span>
-    </div>
-    <div class="col-md-6">
-        <label asp-for="ApiTokenSecret" class="form-label"></label>
-        <input asp-for="ApiTokenSecret" class="form-control" type="password" autocomplete="new-password"
-               placeholder="@(string.IsNullOrEmpty(Model.ApiTokenSecret) ? "" : "•••••••• (leave blank to keep)")" />
-        <span asp-validation-for="ApiTokenSecret" class="text-danger"></span>
-    </div>
-    <div class="col-12 form-check ms-2">
-        <input asp-for="VerifyTls" class="form-check-input" />
-        <label asp-for="VerifyTls" class="form-check-label"></label>
+<div>
+    <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">Connection</h2>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+            <label asp-for="Name" class="form-label"></label>
+            <input asp-for="Name" class="form-input" placeholder="Lab cluster" />
+            <span asp-validation-for="Name" class="form-error"></span>
+        </div>
+        <div>
+            <label asp-for="Host" class="form-label"></label>
+            <input asp-for="Host" class="form-input" placeholder="https://pve.example.com:8006" />
+            <span asp-validation-for="Host" class="form-error"></span>
+        </div>
+        <div>
+            <label asp-for="ApiTokenId" class="form-label"></label>
+            <input asp-for="ApiTokenId" class="form-input" placeholder="user@pve!gateway" />
+            <span asp-validation-for="ApiTokenId" class="form-error"></span>
+        </div>
+        <div>
+            <label asp-for="ApiTokenSecret" class="form-label"></label>
+            <input asp-for="ApiTokenSecret" class="form-input" type="password" autocomplete="new-password"
+                   placeholder="@(string.IsNullOrEmpty(Model.ApiTokenSecret) ? "" : "•••••••• (leave blank to keep)")" />
+            <span asp-validation-for="ApiTokenSecret" class="form-error"></span>
+        </div>
+        <label class="md:col-span-2 flex items-center gap-2 text-sm cursor-pointer">
+            <input asp-for="VerifyTls" class="form-check" />
+            <span>@Html.DisplayNameFor(m => m.VerifyTls)</span>
+        </label>
     </div>
 </div>
 
-<h2 class="h6 text-uppercase text-muted mb-3">VDI lifecycle policy</h2>
-<div class="row g-3 mb-4">
-    <div class="col-md-3">
-        <label asp-for="DefaultRdpPort" class="form-label"></label>
-        <input asp-for="DefaultRdpPort" class="form-control" type="number" />
-    </div>
-    <div class="col-md-3">
-        <label asp-for="IdleTimeoutHours" class="form-label"></label>
-        <input asp-for="IdleTimeoutHours" class="form-control" type="number" />
-    </div>
-    <div class="col-md-3">
-        <label asp-for="PauseAction" class="form-label"></label>
-        <select asp-for="PauseAction" class="form-select"
-                asp-items="Html.GetEnumSelectList<KSol.RDPGateway.Models.PauseAction>()"></select>
-    </div>
-    <div class="col-md-3">
-        <label asp-for="StartTimeoutSeconds" class="form-label"></label>
-        <input asp-for="StartTimeoutSeconds" class="form-control" type="number" />
+<div>
+    <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">VDI lifecycle policy</h2>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div>
+            <label asp-for="DefaultRdpPort" class="form-label"></label>
+            <input asp-for="DefaultRdpPort" class="form-input" type="number" />
+        </div>
+        <div>
+            <label asp-for="IdleTimeoutHours" class="form-label"></label>
+            <input asp-for="IdleTimeoutHours" class="form-input" type="number" />
+        </div>
+        <div>
+            <label asp-for="PauseAction" class="form-label"></label>
+            <select asp-for="PauseAction" class="form-select"
+                    asp-items="Html.GetEnumSelectList<KSol.RDPGateway.Models.PauseAction>()"></select>
+        </div>
+        <div>
+            <label asp-for="StartTimeoutSeconds" class="form-label"></label>
+            <input asp-for="StartTimeoutSeconds" class="form-input" type="number" />
+        </div>
     </div>
 </div>

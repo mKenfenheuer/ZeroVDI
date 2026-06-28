@@ -2,37 +2,31 @@
 
 @{
     ViewData["Title"] = "Grant access";
+    ViewData["Subtitle"] = "Let a user connect to a resource.";
 }
 
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <h1 class="h3 mb-0">Grant access</h1>
-    <a asp-action="Index" class="btn btn-outline-secondary btn-sm">Back to list</a>
-</div>
+@section PageActions {
+    <a asp-action="Index" class="btn-secondary w-fit"><i class="ri-arrow-left-line"></i> Back to list</a>
+}
 
-<div class="card shadow-sm">
-    <div class="card-body">
-        <form asp-action="Create">
-            <div asp-validation-summary="ModelOnly" class="text-danger"></div>
-            <div class="row g-3 mb-3">
-                <div class="col-md-6">
-                    <label asp-for="UserId" class="form-label">User</label>
-                    <select asp-for="UserId" class="form-select" asp-items="ViewBag.UserId"></select>
-                    <span asp-validation-for="UserId" class="text-danger"></span>
-                </div>
-                <div class="col-md-6">
-                    <label asp-for="RDPResourceId" class="form-label">Resource</label>
-                    <select asp-for="RDPResourceId" class="form-select" asp-items="ViewBag.RDPResourceId"></select>
-                    <span asp-validation-for="RDPResourceId" class="text-danger"></span>
-                </div>
-            </div>
-            <div class="d-flex gap-2">
-                <button type="submit" class="btn btn-primary">Grant access</button>
-                <a asp-action="Index" class="btn btn-link">Cancel</a>
-            </div>
-        </form>
+<form asp-action="Create" class="card-surface p-6 max-w-2xl space-y-6">
+    <div asp-validation-summary="ModelOnly"></div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+            <label asp-for="UserId" class="form-label">User</label>
+            <select asp-for="UserId" class="form-select" asp-items="ViewBag.UserId"></select>
+            <span asp-validation-for="UserId" class="form-error"></span>
+        </div>
+        <div>
+            <label asp-for="RDPResourceId" class="form-label">Resource</label>
+            <select asp-for="RDPResourceId" class="form-select" asp-items="ViewBag.RDPResourceId"></select>
+            <span asp-validation-for="RDPResourceId" class="form-error"></span>
+        </div>
     </div>
-</div>
+    <div class="flex items-center gap-2 pt-2 border-t border-border">
+        <button type="submit" class="btn-primary">Grant access</button>
+        <a asp-action="Index" class="btn-ghost">Cancel</a>
+    </div>
+</form>
 
-@section Scripts {
-    @{await Html.RenderPartialAsync("_ValidationScriptsPartial");}
-}
+@section Scripts { <partial name="_ValidationScripts" /> }

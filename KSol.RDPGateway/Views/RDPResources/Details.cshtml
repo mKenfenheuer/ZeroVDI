@@ -2,64 +2,46 @@
 @using KSol.RDPGateway.Models
 
 @{
-    ViewData["Title"] = "Resource details";
+    ViewData["Title"] = Model.Name;
+    ViewData["Subtitle"] = "Resource details";
     var isProxmox = Model.Source == ResourceSource.Proxmox;
 }
 
-<div class="d-flex justify-content-between align-items-center mb-3">
-    <div>
-        <h1 class="h3 mb-1">@Model.Name</h1>
-        <span class="badge @(isProxmox ? "bg-info text-dark" : "bg-secondary")">@Model.Source</span>
+@section PageActions {
+    <div class="flex items-center gap-2">
+        <span class="@(isProxmox ? "badge-primary" : "badge-muted")">@Model.Source</span>
         <partial name="_PowerStateBadge" model="Model.PowerState" />
+        <a asp-action="Edit" asp-route-id="@Model.Id" class="btn-secondary">Edit</a>
+        <a asp-action="Index" class="btn-ghost">Back</a>
     </div>
-    <div class="d-flex gap-2">
-        <a asp-action="Edit" asp-route-id="@Model.Id" class="btn btn-outline-primary btn-sm">Edit</a>
-        <a asp-action="Index" class="btn btn-outline-secondary btn-sm">Back to list</a>
-    </div>
-</div>
+}
 
-<div class="row g-3">
-    <div class="col-md-6">
-        <div class="card shadow-sm h-100">
-            <div class="card-body">
-                <h2 class="h6 text-uppercase text-muted mb-3">General</h2>
-                <dl class="row mb-0">
-                    <dt class="col-sm-4">Identifier</dt>
-                    <dd class="col-sm-8"><code>@Model.Id</code></dd>
-                    <dt class="col-sm-4">Description</dt>
-                    <dd class="col-sm-8">@(string.IsNullOrEmpty(Model.Description) ? "—" : Model.Description)</dd>
-                    <dt class="col-sm-4">Last activity</dt>
-                    <dd class="col-sm-8">@(Model.LastActivityUtc?.ToString("u") ?? "—")</dd>
-                </dl>
-            </div>
-        </div>
+<div class="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-4xl">
+    <div class="card-surface p-6">
+        <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-4">General</h2>
+        <dl class="space-y-3 text-sm">
+            <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Identifier</dt><dd><code class="text-xs">@Model.Id</code></dd></div>
+            <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Description</dt><dd class="text-right">@(string.IsNullOrEmpty(Model.Description) ? "—" : Model.Description)</dd></div>
+            <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Last activity</dt><dd>@(Model.LastActivityUtc?.ToString("u") ?? "—")</dd></div>
+        </dl>
     </div>
-    <div class="col-md-6">
-        <div class="card shadow-sm h-100">
-            <div class="card-body">
-                <h2 class="h6 text-uppercase text-muted mb-3">Connection</h2>
-                <dl class="row mb-0">
-                    <dt class="col-sm-4">Address</dt>
-                    <dd class="col-sm-8">@(string.IsNullOrEmpty(Model.IpAddress) ? "—" : $"{Model.IpAddress}:{Model.Port}")</dd>
-                    @if (isProxmox)
-                    {
-                        <dt class="col-sm-4">Node</dt>
-                        <dd class="col-sm-8">@(Model.ProxmoxNode ?? "—")</dd>
-                        <dt class="col-sm-4">VMID</dt>
-                        <dd class="col-sm-8">@(Model.ProxmoxVmId?.ToString() ?? "—")</dd>
-                    }
-                </dl>
-            </div>
-        </div>
+    <div class="card-surface p-6">
+        <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-4">Connection</h2>
+        <dl class="space-y-3 text-sm">
+            <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Address</dt><dd>@(string.IsNullOrEmpty(Model.IpAddress) ? "—" : $"{Model.IpAddress}:{Model.Port}")</dd></div>
+            @if (isProxmox)
+            {
+                <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Node</dt><dd>@(Model.ProxmoxNode ?? "—")</dd></div>
+                <div class="flex justify-between gap-4"><dt class="text-muted-foreground">VMID</dt><dd>@(Model.ProxmoxVmId?.ToString() ?? "—")</dd></div>
+            }
+        </dl>
     </div>
 </div>
 
 @if (isProxmox && !string.IsNullOrEmpty(Model.ConfigJson))
 {
-    <div class="card shadow-sm mt-3">
-        <div class="card-body">
-            <h2 class="h6 text-uppercase text-muted mb-3">VM notes (config)</h2>
-            <pre class="mb-0 small">@Model.ConfigJson</pre>
-        </div>
+    <div class="card-surface p-6 mt-4 max-w-4xl">
+        <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">VM notes (config)</h2>
+        <pre class="text-xs bg-muted rounded-lg p-3 overflow-x-auto">@Model.ConfigJson</pre>
     </div>
 }

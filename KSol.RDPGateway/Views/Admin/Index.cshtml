@@ -1,0 +1,73 @@
+@model KSol.RDPGateway.Controllers.AdminDashboardViewModel
+@using KSol.RDPGateway.Models
+@{
+    ViewData["Title"] = "Dashboard";
+    ViewData["Subtitle"] = "Overview of your gateway.";
+
+    var stats = new (string Label, int Value, string Icon, string Tint, string Controller)[]
+    {
+        ("Resources", Model.ResourceCount, "ri-computer-line", "text-chart-1", "RDPResources"),
+        ("Running now", Model.RunningCount, "ri-play-circle-line", "text-success", "RDPResources"),
+        ("Backends", Model.BackendCount, "ri-server-line", "text-chart-2", "ProxmoxBackends"),
+        ("Users", Model.UserCount, "ri-team-line", "text-chart-3", "Users"),
+        ("Authorizations", Model.AuthorizationCount, "ri-shield-user-line", "text-chart-4", "RDPResourceUserAuthorizations"),
+        ("Recordings", Model.RecordingCount, "ri-film-line", "text-chart-5", "Recordings"),
+    };
+}
+
+<div class="grid grid-cols-2 lg:grid-cols-3 gap-4">
+    @foreach (var s in stats)
+    {
+        <a asp-controller="@s.Controller" asp-action="Index"
+           class="card-surface p-5 hover:shadow-md transition-shadow group">
+            <div class="flex items-center justify-between">
+                <span class="text-sm text-muted-foreground">@s.Label</span>
+                <i class="@s.Icon text-xl @s.Tint"></i>
+            </div>
+            <div class="mt-2 text-3xl font-semibold tracking-tight">@s.Value</div>
+        </a>
+    }
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-6">
+    <div class="card-surface p-6 lg:col-span-2">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="font-medium">Recently active resources</h2>
+            <a asp-controller="RDPResources" asp-action="Index" class="text-sm text-primary hover:underline">View all</a>
+        </div>
+        @if (!Model.RecentResources.Any())
+        {
+            <p class="text-sm text-muted-foreground">No resources yet.</p>
+        }
+        else
+        {
+            <ul class="divide-y divide-border">
+                @foreach (var r in Model.RecentResources)
+                {
+                    <li class="flex items-center justify-between py-3">
+                        <div class="flex items-center gap-3 min-w-0">
+                            <div class="w-9 h-9 rounded-lg bg-primary/10 text-primary flex items-center justify-center flex-shrink-0">
+                                <i class="ri-computer-line"></i>
+                            </div>
+                            <div class="min-w-0">
+                                <a asp-controller="RDPResources" asp-action="Edit" asp-route-id="@r.Id" class="font-medium hover:underline truncate block">@r.Name</a>
+                                <span class="text-xs text-muted-foreground">@(r.LastActivityUtc?.ToString("u") ?? "never used")</span>
+                            </div>
+                        </div>
+                        <partial name="_PowerStateBadge" model="r.PowerState" />
+                    </li>
+                }
+            </ul>
+        }
+    </div>
+
+    <div class="card-surface p-6">
+        <h2 class="font-medium mb-4">Quick actions</h2>
+        <div class="flex flex-col gap-2">
+            <a asp-controller="RDPResources" asp-action="Create" class="btn-secondary justify-start"><i class="ri-add-line"></i> New resource</a>
+            <a asp-controller="ProxmoxBackends" asp-action="Create" class="btn-secondary justify-start"><i class="ri-server-line"></i> Add backend</a>
+            <a asp-controller="Users" asp-action="Create" class="btn-secondary justify-start"><i class="ri-user-add-line"></i> Add user</a>
+            <a asp-controller="RDPResourceUserAuthorizations" asp-action="Create" class="btn-secondary justify-start"><i class="ri-shield-user-line"></i> Grant access</a>
+        </div>
+    </div>
+</div>

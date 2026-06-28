@@ -1,0 +1,124 @@
+@using Microsoft.AspNetCore.Identity
+@inject SignInManager<ApplicationUser> SignInManager
+@inject UserManager<ApplicationUser> UserManager
+@*
+    Right-hand top-bar actions shared by the user and admin layouts: the theme switcher (color +
+    light/dark, persisted via theme.js) and the user/account menu. Pure Tailwind + Remix icons.
+*@
+<div class="flex items-center gap-1 sm:gap-2 ml-auto">
+    @{
+        var themes = new (string Key, string Label, string Swatch)[]
+        {
+            ("neutral", "Neutral", "bg-gray-900"),
+            ("blue", "Blue", "bg-blue-500"),
+            ("green", "Green", "bg-emerald-500"),
+            ("orange", "Orange", "bg-orange-500"),
+            ("rose", "Rose", "bg-rose-500"),
+            ("slate", "Slate", "bg-slate-500"),
+            ("sky", "Sky", "bg-sky-500"),
+            ("azure", "Azure", "bg-indigo-500"),
+        };
+    }
+
+    <!-- Theme switcher -->
+    <div class="relative" id="theme-toggle-container">
+        <button id="theme-toggle-btn" type="button" aria-label="Theme"
+                class="w-10 h-10 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors">
+            <i class="ri-palette-line text-xl"></i>
+        </button>
+        <div id="theme-dropdown"
+             class="absolute right-0 top-12 w-64 bg-popover text-popover-foreground rounded-xl shadow-xl border border-border z-50 hidden overflow-hidden">
+            <div class="p-3 border-b border-border">
+                <h4 class="font-semibold text-sm">Theme</h4>
+                <p class="text-xs text-muted-foreground">Customize your interface</p>
+            </div>
+            <div class="p-3 border-b border-border">
+                <p class="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">Color</p>
+                <div class="grid grid-cols-4 gap-2">
+                    @foreach (var t in themes)
+                    {
+                        <button type="button" data-theme="@t.Key" title="@t.Label"
+                                class="theme-color-btn w-8 h-8 rounded-full @t.Swatch ring-2 ring-offset-2 ring-offset-popover ring-transparent hover:opacity-80 transition-all"></button>
+                    }
+                </div>
+            </div>
+            <div class="p-3">
+                <p class="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">Mode</p>
+                <div class="flex gap-2">
+                    <button type="button" data-mode="light"
+                            class="theme-mode-btn flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-border text-sm font-medium text-muted-foreground hover:bg-muted transition-colors">
+                        <i class="ri-sun-line"></i> Light
+                    </button>
+                    <button type="button" data-mode="dark"
+                            class="theme-mode-btn flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-border text-sm font-medium text-muted-foreground hover:bg-muted transition-colors">
+                        <i class="ri-moon-line"></i> Dark
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    @if (SignInManager.IsSignedIn(User))
+    {
+        var name = User.Identity?.Name ?? "Account";
+        var initial = string.IsNullOrEmpty(name) ? "?" : name.Substring(0, 1).ToUpper();
+        var isAdmin = User.IsInRole("Admin");
+        <!-- User menu -->
+        <div class="relative ml-1 sm:ml-2" id="user-dropdown-container">
+            <button id="user-avatar-btn" type="button" aria-label="Account"
+                    class="w-9 h-9 rounded-full bg-primary text-primary-foreground font-semibold flex items-center justify-center ring-2 ring-background cursor-pointer">
+                @initial
+            </button>
+            <div id="user-dropdown"
+                 class="absolute right-0 top-12 w-72 bg-popover text-popover-foreground rounded-xl shadow-xl border border-border z-50 hidden overflow-hidden">
+                <div class="p-4 border-b border-border">
+                    <div class="flex items-center gap-3">
+                        <div class="w-12 h-12 rounded-full bg-primary text-primary-foreground font-semibold flex items-center justify-center text-lg">@initial</div>
+                        <div class="flex-1 min-w-0">
+                            <div class="flex items-center gap-2">
+                                <h3 class="font-semibold truncate">@name</h3>
+                                @if (isAdmin)
+                                {
+                                    <span class="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded font-medium">Admin</span>
+                                }
+                            </div>
+                            <p class="text-sm text-muted-foreground truncate">@(User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value ?? name)</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="py-2">
+                    <a asp-area="" asp-controller="Home" asp-action="Index"
+                       class="flex items-center gap-3 px-4 py-2.5 text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors">
+                        <i class="ri-home-4-line"></i><span>Dashboard</span>
+                    </a>
+                    <a asp-page="/Account/Manage/Index"
+                       class="flex items-center gap-3 px-4 py-2.5 text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors">
+                        <i class="ri-user-settings-line"></i><span>Profile &amp; settings</span>
+                    </a>
+                    @if (isAdmin)
+                    {
+                        <a asp-controller="Admin" asp-action="Index"
+                           class="flex items-center gap-3 px-4 py-2.5 text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors">
+                            <i class="ri-shield-keyhole-line"></i><span>Admin area</span>
+                        </a>
+                    }
+                </div>
+                <div class="border-t border-border p-3">
+                    <form asp-page="/Account/Logout" asp-route-returnUrl="@Url.Action("Index", "Home", new { area = "" })" method="post">
+                        <button type="submit"
+                                class="w-full px-4 py-2 text-sm font-medium text-muted-foreground border border-border rounded-lg hover:bg-muted hover:text-foreground transition-colors">
+                            Log out
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    }
+    else
+    {
+        <a asp-page="/Account/Login"
+           class="px-4 py-2 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity">
+            Sign in
+        </a>
+    }
+</div>

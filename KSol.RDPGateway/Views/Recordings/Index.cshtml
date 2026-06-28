@@ -2,74 +2,76 @@
 @using KSol.RDPGateway.Models
 @{
     ViewData["Title"] = "Recordings";
+    ViewData["Subtitle"] = "Recorded console sessions — replay the desktop and camera streams.";
 }
 
-<div class="mb-3">
-    <h1 class="h3 mb-0">Session recordings</h1>
-    <p class="text-muted mb-0">Recorded console sessions. Click Replay to watch the desktop and camera streams.</p>
-</div>
-
-<div class="card shadow-sm">
-    <div class="table-responsive">
-        <table class="table table-hover align-middle mb-0">
-            <thead class="table-light">
-                <tr>
-                    <th>Started (UTC)</th>
-                    <th>User</th>
-                    <th>Resource</th>
-                    <th>Duration</th>
-                    <th>Status</th>
-                    <th class="text-end">Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-            @if (!Model.Any())
-            {
-                <tr><td colspan="6" class="text-center text-muted py-4">No recordings yet.</td></tr>
-            }
-            @foreach (var r in Model)
-            {
-                <tr>
-                    <td>@r.StartedUtc.ToString("yyyy-MM-dd HH:mm:ss")</td>
-                    <td>@(r.User?.UserName ?? r.UserId)</td>
-                    <td>@(r.RDPResource?.Name ?? r.RDPResourceId)</td>
-                    <td>@(r.EndedUtc is { } e ? (e - r.StartedUtc).ToString(@"hh\:mm\:ss") : "—")</td>
-                    <td>
-                        @switch (r.Status)
-                        {
-                            case RecordingStatus.Recording: <span class="badge bg-info">Recording</span> break;
-                            case RecordingStatus.Processing: <span class="badge bg-info text-dark">Processing…</span> break;
-                            case RecordingStatus.Completed: <span class="badge bg-success">Completed</span> break;
-                            case RecordingStatus.UnsupportedCodec: <span class="badge bg-warning text-dark" title="Desktop video codec wasn't H.264; audio only">Audio only</span> break;
-                            default: <span class="badge bg-danger">Failed</span> break;
-                        }
-                    </td>
-                    <td class="text-end">
-                        @{ var playable = r.Status is RecordingStatus.Completed or RecordingStatus.UnsupportedCodec
-                               && (r.DesktopFilePath != null || r.CameraFilePath != null
-                                   || r.AudioFilePath != null || r.MicFilePath != null);
-                           // Don't offer delete while capture/mux is still in progress (files are in use).
-                           var deletable = r.Status is not (RecordingStatus.Recording or RecordingStatus.Processing); }
+@if (!Model.Any())
+{
+    <div class="flex flex-col items-center justify-center text-center py-16 px-4 card-surface border-dashed">
+        <div class="w-14 h-14 rounded-full bg-muted flex items-center justify-center mb-4">
+            <i class="ri-film-line text-2xl text-muted-foreground"></i>
+        </div>
+        <h3 class="text-lg font-semibold">No recordings yet</h3>
+        <p class="text-sm text-muted-foreground mt-1">Sessions matching a recording rule will appear here.</p>
+    </div>
+}
+else
+{
+    <table class="table-surface">
+        <thead>
+            <tr>
+                <th>Started (UTC)</th>
+                <th>User</th>
+                <th>Resource</th>
+                <th>Duration</th>
+                <th>Status</th>
+                <th class="text-right">Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        @foreach (var r in Model)
+        {
+            <tr>
+                <td>@r.StartedUtc.ToString("yyyy-MM-dd HH:mm:ss")</td>
+                <td>@(r.User?.UserName ?? r.UserId)</td>
+                <td>@(r.RDPResource?.Name ?? r.RDPResourceId)</td>
+                <td>@(r.EndedUtc is { } e ? (e - r.StartedUtc).ToString(@"hh\:mm\:ss") : "—")</td>
+                <td>
+                    @switch (r.Status)
+                    {
+                        case RecordingStatus.Recording: <span class="badge bg-info/10 text-info">Recording</span> break;
+                        case RecordingStatus.Processing: <span class="badge bg-info/10 text-info">Processing…</span> break;
+                        case RecordingStatus.Completed: <span class="badge bg-success/10 text-success">Completed</span> break;
+                        case RecordingStatus.UnsupportedCodec: <span class="badge bg-warning/10 text-warning" title="Desktop video codec wasn't H.264; audio only">Audio only</span> break;
+                        default: <span class="badge bg-destructive/10 text-destructive">Failed</span> break;
+                    }
+                </td>
+                <td>
+                    @{ var playable = r.Status is RecordingStatus.Completed or RecordingStatus.UnsupportedCodec
+                           && (r.DesktopFilePath != null || r.CameraFilePath != null
+                               || r.AudioFilePath != null || r.MicFilePath != null);
+                       var deletable = r.Status is not (RecordingStatus.Recording or RecordingStatus.Processing); }
+                    <div class="flex items-center justify-end gap-2">
                         @if (playable)
                         {
-                            <a asp-action="Play" asp-route-id="@r.Id" class="btn btn-sm btn-outline-primary">Replay</a>
+                            <a asp-action="Play" asp-route-id="@r.Id" class="btn-secondary btn-sm"><i class="ri-play-line"></i> Replay</a>
                         }
                         @if (deletable)
                         {
-                            <form asp-action="Delete" asp-route-id="@r.Id" method="post" class="d-inline"
+                            <form asp-action="Delete" asp-route-id="@r.Id" method="post" class="inline"
                                   onsubmit="return confirm('Delete this recording and its files? This cannot be undone.');">
                                 @Html.AntiForgeryToken()
-                                <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                                <button type="submit" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Delete</button>
                             </form>
                         }
                         @if (!playable && !deletable)
                         {
-                            <span class="text-muted small">—</span>
+                            <span class="text-muted-foreground text-sm">—</span>
                         }
-                    </td>
-                </tr>
-            }
-            </tbody>
-        </table>
-    </div>
-</div>
+                    </div>
+                </td>
+            </tr>
+        }
+        </tbody>
+    </table>
+}

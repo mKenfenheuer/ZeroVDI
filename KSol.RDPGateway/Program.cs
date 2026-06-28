@@ -12,8 +12,6 @@ public class Program
 {
     public static void Main(string[] args)
     {
-        Environment.SetEnvironmentVariable("RDPGW_DUMP_DIR","../dump");
-
         var builder = WebApplication.CreateBuilder(args);
 
         // Force HTTP/1.1 on all Kestrel endpoints. The RemoteApp & Desktop Connections client
@@ -60,7 +58,7 @@ public class Program
         // recordings left Processing by a previous run — crash-resilient).
         builder.Services.AddHostedService<RDP.RecordingMuxService>();
 
-        builder.Services.AddControllersWithViews();
+        builder.Services.AddControllersWithViews().AddRazorRuntimeCompilation();
 
         // Route native RDGW connections through the gateway's NLA man-in-the-middle so they share the
         // browser console's pipeline: SSO (stored host creds swapped in) and session recording.
@@ -72,62 +70,12 @@ public class Program
         builder.Services.AddSingleton<RDP.ProxmoxClient>();
         builder.Services.AddSingleton<RDP.SessionTracker>();
         builder.Services.AddSingleton<RDP.VdiResourceResolver>();
+        // Tracks the per-(user, resource) connect-readiness sequence so the browser preflight can poll
+        // progress (start VM → guest agent → IP → RDP probe → ready) before launching the console.
+        builder.Services.AddSingleton<RDP.ConnectionReadinessService>();
         builder.Services.AddSingleton<RDP.ProxmoxSyncService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<RDP.ProxmoxSyncService>());
         builder.Services.AddHostedService<RDP.IdleReaperService>();
-
-        // Self-hosted OAuth 2.0 / OpenID Connect server (OpenIddict), backed by the Identity users.
-        // Lets OAuth-capable clients obtain a Bearer token via an interactive login and present it
-        // to the RDWeb feed. OpenIddict's ASP.NET validation also populates HttpContext.User from a
-        // valid Bearer token, so the feed's cookie/bearer resolution works uniformly.
-        builder.Services.AddOpenIddict()
-            .AddCore(options =>
-            {
-                options.UseEntityFrameworkCore().UseDbContext<ApplicationDbContext>();
-            })
-            .AddServer(options =>
-            {
-                options.SetAuthorizationEndpointUris("connect/authorize")
-                       .SetTokenEndpointUris("connect/token")
-                       .SetUserInfoEndpointUris("connect/userinfo")
-                       .SetConfigurationEndpointUris(".well-known/openid-configuration");
-
-                // Authorization Code + PKCE (interactive) and refresh tokens.
-                options.AllowAuthorizationCodeFlow()
-                       .AllowRefreshTokenFlow()
-                       .RequireProofKeyForCodeExchange();
-
-                options.RegisterScopes("openid", "profile", "email", "offline_access", "rdgateway");
-
-                // Signing/encryption credentials.
-                // In Development, use the throwaway development certificates. In production, use
-                // persistent self-signed certificates that are generated on first run and stored on
-                // disk, so issued tokens survive restarts (the development certs are ephemeral).
-                if (builder.Environment.IsDevelopment())
-                {
-                    options.AddDevelopmentEncryptionCertificate()
-                           .AddDevelopmentSigningCertificate();
-                }
-                else
-                {
-                    options.AddSigningCertificate(CertificateProvider.GetSigningCertificate(builder.Configuration, builder.Environment))
-                           .AddEncryptionCertificate(CertificateProvider.GetEncryptionCertificate(builder.Configuration, builder.Environment));
-                }
-
-                // Issue access tokens as JWTs so the feed can validate them as Bearer tokens.
-                options.DisableAccessTokenEncryption();
-
-                options.UseAspNetCore()
-                       .EnableAuthorizationEndpointPassthrough()
-                       .EnableTokenEndpointPassthrough()
-                       .EnableUserInfoEndpointPassthrough()
-                       .EnableStatusCodePagesIntegration();
-            })
-            .AddValidation(options =>
-            {
-                options.UseLocalServer();
-                options.UseAspNetCore();
-            });
 
         // Honor X-Forwarded-Proto / X-Forwarded-Host / X-Forwarded-For when running behind a
         // reverse proxy (e.g. Traefik) that terminates TLS. Without this, Request.Scheme/Host are
@@ -146,62 +94,8 @@ public class Program
 
         var app = builder.Build();
 
-        // Must run before any middleware that inspects scheme/host (RDPGW, HTTPS redirect, auth).
+        // Must run before any middleware that inspects scheme/host (HTTPS redirect, auth).
         app.UseForwardedHeaders();
-
-        // Diagnostic request/response logging for the subscription-related endpoints. MSRDC ("Windows
-        // App"/Remote Desktop) probes several paths during a workspace subscription; when it reports
-        // "the authentication method for the host is not currently supported" we need to see exactly
-        // which path it hit, what auth it presented, and what we replied (status + WWW-Authenticate).
-        // Scoped to the relevant prefixes to avoid noise; logged at Information so it shows in prod.
-        {
-            var diagLogger = app.Services.GetRequiredService<ILoggerFactory>()
-                .CreateLogger("KSol.RDPGateway.SubscribeDiagnostics");
-
-            app.Use(async (context, next) =>
-            {
-                var path = context.Request.Path.Value ?? string.Empty;
-                var watched = path.StartsWith("/rdweb", StringComparison.OrdinalIgnoreCase)
-                    || path.StartsWith("/connect", StringComparison.OrdinalIgnoreCase)
-                    || path.StartsWith("/.well-known", StringComparison.OrdinalIgnoreCase)
-                    || path.StartsWith("/Identity", StringComparison.OrdinalIgnoreCase);
-
-                if (!watched)
-                {
-                    await next(context);
-                    return;
-                }
-
-                var req = context.Request;
-                string AuthScheme()
-                {
-                    var h = req.Headers.Authorization.ToString();
-                    if (string.IsNullOrEmpty(h)) return "(none)";
-                    var sp = h.IndexOf(' ');
-                    return sp > 0 ? h[..sp] : h; // log the scheme only, never the credential
-                }
-
-                diagLogger.LogInformation(
-                    "SUBSCRIBE >> {Method} {Scheme}://{Host}{Path}{Query} | Auth={Auth} UA={UserAgent} Accept={Accept} XFwdProto={XFwdProto} XFwdHost={XFwdHost} XFwdFor={XFwdFor}",
-                    req.Method, req.Scheme, req.Host.Value, req.Path.Value, req.QueryString.Value,
-                    AuthScheme(),
-                    req.Headers.UserAgent.ToString(),
-                    req.Headers.Accept.ToString(),
-                    req.Headers["X-Forwarded-Proto"].ToString(),
-                    req.Headers["X-Forwarded-Host"].ToString(),
-                    req.Headers["X-Forwarded-For"].ToString());
-
-                await next(context);
-
-                var res = context.Response;
-                diagLogger.LogInformation(
-                    "SUBSCRIBE << {Method} {Path} -> {Status} | WWW-Authenticate={WwwAuth} Location={Location} ContentType={ContentType}",
-                    req.Method, req.Path.Value, res.StatusCode,
-                    res.Headers.WWWAuthenticate.ToString(),
-                    res.Headers.Location.ToString(),
-                    res.ContentType ?? string.Empty);
-            });
-        }
 
         using (var scope = app.Services.CreateScope())
         {
@@ -215,8 +109,9 @@ public class Program
                 context.Database.Migrate();
             }
             
-            // Create roles if they don't exist
-            var roles = new[] { "Admin", "User" };
+            // Create roles if they don't exist. "Auditor" may review session recordings (read-only
+            // access to the Recordings area) without full Admin rights; ordinary users never see them.
+            var roles = new[] { "Admin", "User", "Auditor" };
             foreach (var role in roles)
             {
                 if (roleManager != null && !roleManager.RoleExistsAsync(role).Result)
@@ -254,41 +149,6 @@ public class Program
                 }
             }
 
-            // Seed the OAuth client used by Remote Desktop / OAuth-capable clients to subscribe.
-            // A public client (PKCE, no secret) with the redirect URIs MSRDC and generic OAuth
-            // clients use. Adjust RedirectUris for your client if needed.
-            var appManager = scope.ServiceProvider.GetService<OpenIddict.Abstractions.IOpenIddictApplicationManager>();
-            if (appManager != null && appManager.FindByClientIdAsync("rdgateway-client").AsTask().Result == null)
-            {
-                appManager.CreateAsync(new OpenIddict.Abstractions.OpenIddictApplicationDescriptor
-                {
-                    ClientId = "rdgateway-client",
-                    ClientType = OpenIddict.Abstractions.OpenIddictConstants.ClientTypes.Public,
-                    ConsentType = OpenIddict.Abstractions.OpenIddictConstants.ConsentTypes.Implicit,
-                    DisplayName = "KSol.IT RDP Gateway Client",
-                    RedirectUris =
-                    {
-                        new Uri("http://localhost"),
-                        new Uri("http://localhost:0"),
-                        new Uri("ms-appx-web://Microsoft.AAD.BrokerPlugin/rdgateway-client"),
-                    },
-                    Permissions =
-                    {
-                        OpenIddict.Abstractions.OpenIddictConstants.Permissions.Endpoints.Authorization,
-                        OpenIddict.Abstractions.OpenIddictConstants.Permissions.Endpoints.Token,
-                        OpenIddict.Abstractions.OpenIddictConstants.Permissions.GrantTypes.AuthorizationCode,
-                        OpenIddict.Abstractions.OpenIddictConstants.Permissions.GrantTypes.RefreshToken,
-                        OpenIddict.Abstractions.OpenIddictConstants.Permissions.ResponseTypes.Code,
-                        OpenIddict.Abstractions.OpenIddictConstants.Permissions.Scopes.Email,
-                        OpenIddict.Abstractions.OpenIddictConstants.Permissions.Scopes.Profile,
-                        OpenIddict.Abstractions.OpenIddictConstants.Permissions.Prefixes.Scope + "rdgateway",
-                    },
-                    Requirements =
-                    {
-                        OpenIddict.Abstractions.OpenIddictConstants.Requirements.Features.ProofKeyForCodeExchange,
-                    }
-                }).AsTask().Wait();
-            }
         }
 
         // Configure the HTTP request pipeline.
