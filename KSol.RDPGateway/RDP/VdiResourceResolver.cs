@@ -1,3 +1,4 @@
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using KSol.RDPGateway.Data;
 using KSol.RDPGateway.Models;
@@ -75,23 +76,24 @@ public class VdiResourceResolver
 
         var port = (ushort)(res.Port > 0 ? res.Port : requestedPort);
 
-        // Manual resources (or Proxmox resources missing their backend linkage): probe RDP,
-        // and if offline attempt WOL/IPMI wake then poll until reachable.
+        // Manual resources (or Proxmox resources missing their backend linkage):
+        // Start → wait for ping → wait for RDP → connect.
         if (res.Source != ResourceSource.Proxmox || res.ProxmoxBackendId == null
             || res.ProxmoxNode == null || res.ProxmoxVmId == null)
         {
             if (string.IsNullOrEmpty(res.IpAddress))
                 return Fail("This resource has no address configured. Contact an administrator.");
 
-            Report(new ReadinessProgress(ReadinessPhase.RdpProbe, "Checking remote desktop…"));
-            if (await IsPortOpenAsync(res.IpAddress!, port))
+            // 1) Check if the host is already reachable (ping + RDP). Fast path when already on.
+            var hostUp = await PingAsync(res.IpAddress!);
+            if (hostUp && await IsPortOpenAsync(res.IpAddress!, port))
             {
                 res.PowerState = ResourcePowerState.Running;
                 await db.SaveChangesAsync(ct);
                 return Ready(res.IpAddress!, port);
             }
 
-            // Attempt to wake the host if a wake method is configured.
+            // 2) Host is not ready — attempt to wake it if a wake method is configured.
             if (res.WakeMethod != WakeMethod.None)
             {
                 Report(new ReadinessProgress(ReadinessPhase.Starting, "Starting resource…"));
@@ -111,20 +113,38 @@ public class VdiResourceResolver
                 {
                     res.PowerState = ResourcePowerState.Starting;
                     await db.SaveChangesAsync(ct);
-
-                    var wakeDeadline = DateTime.UtcNow.AddSeconds(120);
-                    while (DateTime.UtcNow < wakeDeadline && !ct.IsCancellationRequested)
-                    {
-                        Report(new ReadinessProgress(ReadinessPhase.RdpProbe, "Waiting for remote desktop…"));
-                        await Task.Delay(3000, ct);
-                        if (await IsPortOpenAsync(res.IpAddress!, port))
-                        {
-                            res.PowerState = ResourcePowerState.Running;
-                            await db.SaveChangesAsync(ct);
-                            return Ready(res.IpAddress!, port);
-                        }
-                    }
                 }
+            }
+
+            // 3) Wait for ping — the host's network stack is booting up.
+            var wakeDeadline = DateTime.UtcNow.AddSeconds(120);
+            if (!hostUp)
+            {
+                Report(new ReadinessProgress(ReadinessPhase.WaitingIp, "Waiting for host to come online…"));
+                while (DateTime.UtcNow < wakeDeadline && !ct.IsCancellationRequested)
+                {
+                    if (await PingAsync(res.IpAddress!))
+                    {
+                        hostUp = true;
+                        break;
+                    }
+                    await Task.Delay(3000, ct);
+                }
+                if (!hostUp)
+                    return Fail($"The host {res.IpAddress} did not respond within the timeout.");
+            }
+
+            // 4) Wait for RDP port — the OS is booting services.
+            Report(new ReadinessProgress(ReadinessPhase.RdpProbe, "Waiting for remote desktop…"));
+            while (DateTime.UtcNow < wakeDeadline && !ct.IsCancellationRequested)
+            {
+                if (await IsPortOpenAsync(res.IpAddress!, port))
+                {
+                    res.PowerState = ResourcePowerState.Running;
+                    await db.SaveChangesAsync(ct);
+                    return Ready(res.IpAddress!, port);
+                }
+                await Task.Delay(3000, ct);
             }
 
             return Fail($"The remote desktop service at {res.IpAddress}:{port} is not responding.");
@@ -267,6 +287,17 @@ public class VdiResourceResolver
     {
         res.PowerState = state;
         await db.SaveChangesAsync();
+    }
+
+    private static async Task<bool> PingAsync(string host)
+    {
+        try
+        {
+            using var ping = new Ping();
+            var reply = await ping.SendPingAsync(host, 2000);
+            return reply.Status == IPStatus.Success;
+        }
+        catch { return false; }
     }
 
     private static async Task<bool> IsPortOpenAsync(string host, ushort port)

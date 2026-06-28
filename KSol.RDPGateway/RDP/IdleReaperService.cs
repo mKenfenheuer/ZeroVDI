@@ -18,6 +18,7 @@ public class IdleReaperService : BackgroundService
     private readonly ProxmoxBackendProvider _backends;
     private readonly SessionTracker _sessions;
     private readonly SshCommandService _ssh;
+    private readonly IpmiClient _ipmi;
     private readonly CredentialProtector _credentials;
     private readonly ILogger<IdleReaperService> _logger;
 
@@ -27,6 +28,7 @@ public class IdleReaperService : BackgroundService
         ProxmoxBackendProvider backends,
         SessionTracker sessions,
         SshCommandService ssh,
+        IpmiClient ipmi,
         CredentialProtector credentials,
         ILogger<IdleReaperService> logger)
     {
@@ -35,6 +37,7 @@ public class IdleReaperService : BackgroundService
         _backends = backends;
         _sessions = sessions;
         _ssh = ssh;
+        _ipmi = ipmi;
         _credentials = credentials;
         _logger = logger;
     }
@@ -128,12 +131,12 @@ public class IdleReaperService : BackgroundService
         {
             if (_sessions.HasActiveSessions(res.Id)) continue;
             if (res.LastActivityUtc == null || res.LastActivityUtc > cutoff) continue;
-            if (string.IsNullOrEmpty(res.SshUser) && (res.OsType == OsType.Linux || res.OsType == OsType.MacOS))
-                continue;
 
             _logger.LogInformation("Idle reaper: shutting down manual resource {Name} ({Os})", res.Name, res.OsType);
 
             bool ok = false;
+
+            // Try OS-level graceful shutdown first (SSH or Windows remote shutdown).
             if (res.OsType == OsType.Linux || res.OsType == OsType.MacOS)
             {
                 var key = _credentials.Unprotect(res.ProtectedSshKey);
@@ -144,7 +147,7 @@ public class IdleReaperService : BackgroundService
                     ok = success;
                 }
             }
-            else
+            else if (!string.IsNullOrEmpty(res.ShutdownCommand) || res.OsType is OsType.Windows or OsType.WindowsServer)
             {
                 var cmd = res.ShutdownCommand ?? $"shutdown /s /m \\\\{res.IpAddress} /t 0";
                 try
@@ -157,6 +160,13 @@ public class IdleReaperService : BackgroundService
                     if (proc != null) { await proc.WaitForExitAsync(ct); ok = proc.ExitCode == 0; }
                 }
                 catch (Exception ex) { _logger.LogWarning(ex, "Windows shutdown failed for {Name}", res.Name); }
+            }
+
+            // Fall back to IPMI graceful shutdown if OS-level shutdown wasn't available or failed.
+            if (!ok && res.WakeMethod == WakeMethod.Ipmi && !string.IsNullOrEmpty(res.IpmiHost))
+            {
+                var pass = _credentials.Unprotect(res.ProtectedIpmiPassword);
+                ok = await _ipmi.PowerOffAsync(res.IpmiHost, res.IpmiUser ?? "", pass ?? "");
             }
 
             if (ok)
