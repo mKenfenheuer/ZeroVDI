@@ -5,9 +5,11 @@ using Microsoft.EntityFrameworkCore;
 using KSol.RDPGateway.Data;
 using KSol.RDPGateway.Models;
 using KSol.RDPGateway.RDP;
+using Microsoft.AspNetCore.Authorization;
 
 namespace KSol.RDPGateway.Controllers;
 
+[Authorize]
 public class HomeController : Controller
 {
     private readonly ILogger<HomeController> _logger;
