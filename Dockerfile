@@ -22,7 +22,7 @@ WORKDIR /app
 # timestamps to the copied H.264 for true variable-frame-rate output (ffmpeg can't take a per-frame PTS
 # sidecar for -c copy). Slim install, apt lists pruned to keep the image small.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg mkvtoolnix \
+    && apt-get install -y --no-install-recommends ffmpeg mkvtoolnix ipmitool \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=publish /app/publish .
 ENV ASPNETCORE_HTTP_PORTS=80
