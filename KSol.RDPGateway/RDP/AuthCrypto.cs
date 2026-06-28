@@ -4,21 +4,14 @@ using System.Text;
 namespace KSol.RDPGateway.RDP;
 
 /// <summary>
-/// Cryptographic helpers for the gateway's authentication methods: HTTP Digest HA1 derivation and
-/// the NTLM primitives (MD4 NT-hash, HMAC-MD5 based NTLMv2). MD4 is not provided by the .NET BCL,
-/// so a compact implementation is included here.
+/// Cryptographic helpers for the gateway's NTLM/CredSSP authentication: the NTLM primitives
+/// (MD4 NT-hash, HMAC-MD5 based NTLMv2). MD4 is not provided by the .NET BCL, so a compact
+/// implementation is included here.
 /// </summary>
 public static class AuthCrypto
 {
-    /// <summary>The Digest/NTLM realm advertised by this gateway.</summary>
+    /// <summary>The NTLM realm advertised by this gateway.</summary>
     public const string Realm = "KSol.IT RDP Gateway";
-
-    /// <summary>Computes the HTTP Digest HA1 = MD5(username:realm:password), hex (lowercase).</summary>
-    public static string DigestHA1(string username, string realm, string password)
-    {
-        var bytes = MD5.HashData(Encoding.UTF8.GetBytes($"{username}:{realm}:{password}"));
-        return Convert.ToHexStringLower(bytes);
-    }
 
     /// <summary>Computes the NTLM NT hash = MD4(UTF-16LE(password)), hex (lowercase).</summary>
     public static string NtHash(string password)

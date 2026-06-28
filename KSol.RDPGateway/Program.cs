@@ -2,8 +2,6 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using KSol.RDPGateway.Data;
-using RDPGW.Extensions;
-using RDPGW.AspNetCore;
 using KSol.RDPGateway.RDP;
 using KSol.RDPGateway.Models;
 using Microsoft.AspNetCore.DataProtection;
@@ -66,12 +64,6 @@ public class Program
 
         // Route native RDGW connections through the gateway's NLA man-in-the-middle so they share the
         // browser console's pipeline: SSO (stored host creds swapped in) and session recording.
-        builder.Services.AddRDPGW()
-            .UseConnectionHandler<RDP.GatewayConnectionHandler>();
-        builder.Services.AddSingleton<IRDPGWAuthenticationHandler, RDPAuthenticationHandler>();
-        builder.Services.AddSingleton<IRDPGWAuthorizationHandler, RDPAutorizationHandler>();
-        builder.Services.AddSingleton<RDP.RdpFileGenerator>();
-        builder.Services.AddSingleton<RDP.PaaTokenService>();
 
         // Proxmox VE backend (VDI): settings provider, REST client, session tracking, the gateway
         // resource resolver (GUID -> current host, start-on-connect), and the background services
@@ -79,7 +71,7 @@ public class Program
         builder.Services.AddSingleton<RDP.ProxmoxBackendProvider>();
         builder.Services.AddSingleton<RDP.ProxmoxClient>();
         builder.Services.AddSingleton<RDP.SessionTracker>();
-        builder.Services.AddSingleton<IRDPGWResourceResolver, RDP.VdiResourceResolver>();
+        builder.Services.AddSingleton<RDP.VdiResourceResolver>();
         builder.Services.AddSingleton<RDP.ProxmoxSyncService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<RDP.ProxmoxSyncService>());
         builder.Services.AddHostedService<RDP.IdleReaperService>();
@@ -298,11 +290,6 @@ public class Program
                 }).AsTask().Wait();
             }
         }
-
-
-
-
-        app.UseRDPGW();
 
         // Configure the HTTP request pipeline.
         if (app.Environment.IsDevelopment())

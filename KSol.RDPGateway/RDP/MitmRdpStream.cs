@@ -53,6 +53,9 @@ public sealed class MitmRdpStream : Stream
     private readonly Task _frontEnd;
     private byte[] _readResidual = Array.Empty<byte>();
     private int _readResidualOffset;
+    // Routing token (Cookie: msts=...\r\n) extracted from the client's X.224 CR. mstsc includes it on a
+    // Server Redirection reconnect; we forward it to the host so the broker hands us to the real session.
+    private byte[]? _clientRoutingToken;
 
     /// <param name="hostCreds">
     /// Stored host credentials to authenticate to the host (SSO). When <c>null</c>, the credentials the
@@ -188,14 +191,22 @@ public sealed class MitmRdpStream : Stream
             // 4) Open the real host. For SSO use the stored host credentials (the client's delegated
             // creds are never forwarded); otherwise (recording-only, no SSO) forward the credentials the
             // client just delegated so it reaches the host with the identity it intended.
-            var hostCreds = _hostCreds ?? new RdpRelaySession.VmCredentials(
+            // On a Server Redirection reconnect (routing token present) the broker (GNOME "Remote Login")
+            // expects the ONE-TIME session credentials it handed back — which mstsc presents via NLA, so
+            // they arrive as the client-delegated creds. Prefer those over stored SSO creds in that case;
+            // otherwise use stored SSO creds (or delegated creds when there's no SSO).
+            var delegated = new RdpRelaySession.VmCredentials(
                 auth.DelegatedUser ?? string.Empty, auth.DelegatedPassword ?? string.Empty, auth.DelegatedDomain);
+            var hostCreds = (_clientRoutingToken != null && !string.IsNullOrEmpty(auth.DelegatedPassword))
+                ? delegated
+                : (_hostCreds ?? delegated);
             // Request the SAME protocols toward the host that the client requested, so the host echoes
             // the value the client expects in its MCS Connect-Response (avoids the negotiation-flags
             // mismatch / 0x609 abort).
             host = await new RdpHostConnection(_host, _port, _kerberos, _logger)
-                .ConnectAsync(hostCreds, clientRequestedProtocols, ct);
-            _logger.LogInformation("MITM: bridging client <-> {Host}:{Port} (sso={Sso})", _host, _port, _hostCreds != null);
+                .ConnectAsync(hostCreds, clientRequestedProtocols, ct, _clientRoutingToken);
+            _logger.LogInformation("MITM: bridging client <-> {Host}:{Port} (sso={Sso}, routingToken={Tok}B)",
+                _host, _port, _hostCreds != null, _clientRoutingToken?.Length ?? 0);
 
             // 5) Relay the decrypted RDP stream both ways, teeing into the recorder.
             await RelayDecryptedAsync(clientTls, host.Stream, ct);
@@ -225,17 +236,20 @@ public sealed class MitmRdpStream : Stream
         if (total < 4 || total > 4096) throw new IOException("MITM: implausible X.224 CR length");
         var crBody = await RdpHostConnection.ReadExactAsync(client, total - 4, ct);
 
-        // The negotiation request (if present) follows the 7-byte fixed CR header: type(1) flags(1)
-        // length(2) requestedProtocols(4). We MUST request these same protocols from the host: the host
-        // echoes the client-requested protocols back in its MCS Connect-Response (TS_UD_SC_CORE
-        // clientRequestedProtocols), and the client cross-checks them against what it sent ([MS-RDPBCGR]
-        // 5.4.2.2). If they differ (e.g. host echoes our 0x3 vs the client's 0xb) the client aborts the
-        // connection with a "negotiation flags mismatch" / error 0x609.
+        // The CR variable part (after the 7-byte fixed header LI/CR/dst/src/class) may contain, in order:
+        // an optional routing token / Cookie ("Cookie: msts=...\r\n" or a "mstshash=" cookie) and then an
+        // optional RDP_NEG_REQ: type(1) flags(1) length(2) requestedProtocols(4). On a Server Redirection
+        // reconnect, mstsc puts the LoadBalanceInfo routing token here — we MUST forward it to the host so
+        // the broker lands us on the redirected (handed-over) session instead of looping the redirect.
         uint requested = 0;
-        if (crBody.Length >= 7 + 8 && crBody[7] == TYPE_RDP_NEG_REQ)
-            requested = BitConverter.ToUInt32(crBody, 7 + 4);
-        _logger.LogInformation("MITM: client X.224 CR ({Len}B), requestedProtocols=0x{Req:X} cr={Hex}",
-            total, requested, Convert.ToHexString(crBody));
+        _clientRoutingToken = ExtractRoutingToken(crBody);
+        int negOff = 7 + (_clientRoutingToken?.Length ?? 0);
+        if (crBody.Length >= negOff + 8 && crBody[negOff] == TYPE_RDP_NEG_REQ)
+            requested = BitConverter.ToUInt32(crBody, negOff + 4);
+        var crAscii = new char[crBody.Length];
+        for (int j = 0; j < crBody.Length; j++) crAscii[j] = crBody[j] is >= (byte)0x20 and < (byte)0x7f ? (char)crBody[j] : '.';
+        _logger.LogInformation("MITM: client X.224 CR ({Len}B), requestedProtocols=0x{Req:X} routingToken={Tok}B cr={Hex} ascii='{Ascii}'",
+            total, requested, _clientRoutingToken?.Length ?? 0, Convert.ToHexString(crBody), new string(crAscii));
 
         // Select HYBRID_EX when the client offered it, otherwise plain HYBRID. Matching the client's
         // preference keeps both gateway legs symmetric: the host leg requests the same set and also lands
@@ -262,6 +276,38 @@ public sealed class MitmRdpStream : Stream
         await client.WriteAsync(pdu, ct);
         await client.FlushAsync(ct);
         return (requested, selectedProtocol);
+    }
+
+    /// <summary>
+    /// Extract the X.224 routing token / cookie from a Connection Request body, if present. Per
+    /// [MS-RDPBCGR] 2.2.1.1 the variable part after the 7-byte fixed CR header may begin with a routing
+    /// token ("Cookie: msts=...\r\n") or a cookie ("Cookie: mstshash=...\r\n") — ASCII text terminated by
+    /// CRLF — before the optional RDP_NEG_REQ. Returns the raw bytes INCLUDING the trailing CRLF (the exact
+    /// form to re-send to the host), or null if there is no token. We only treat it as a routing token
+    /// (worth forwarding) when it's the "msts=" load-balance form a redirect produces.
+    /// </summary>
+    private static byte[]? ExtractRoutingToken(byte[] crBody)
+    {
+        // Need at least the 7-byte fixed header + 1 byte to look at.
+        if (crBody.Length <= 7) return null;
+        // A token starts with 'C' ("Cookie:") or, for the bare routing-token form some clients send, the
+        // token bytes directly. mstsc's redirect reconnect uses "Cookie: msts=<...>\r\n".
+        if (crBody[7] != (byte)'C') return null; // not a Cookie/token (likely the RDP_NEG_REQ type byte)
+        // Find the CRLF terminator within the variable part.
+        for (int i = 7; i + 1 < crBody.Length; i++)
+        {
+            if (crBody[i] == 0x0D && crBody[i + 1] == 0x0A)
+            {
+                int len = (i + 2) - 7; // include CRLF
+                var tok = new byte[len];
+                Array.Copy(crBody, 7, tok, 0, len);
+                // Only forward the load-balance routing token ("msts="); a plain "mstshash=" cookie is a
+                // pre-auth hint the host doesn't need on our re-originated CR.
+                var ascii = System.Text.Encoding.ASCII.GetString(tok);
+                return ascii.Contains("msts=", StringComparison.Ordinal) ? tok : null;
+            }
+        }
+        return null;
     }
 
     /// <summary>

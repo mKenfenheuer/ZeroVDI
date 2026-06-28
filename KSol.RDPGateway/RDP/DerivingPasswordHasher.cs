@@ -18,9 +18,7 @@ public class DerivingPasswordHasher : IPasswordHasher<ApplicationUser>
 
     public string HashPassword(ApplicationUser user, string password)
     {
-        // Side-effect: derive the gateway auth secrets from the plaintext while we have it.
-        user.DigestRealm = AuthCrypto.Realm;
-        user.DigestHA1 = AuthCrypto.DigestHA1(user.UserName ?? string.Empty, AuthCrypto.Realm, password);
+        // Side-effect: derive the NTLM NT hash from the plaintext while we have it, for the NLA MITM.
         user.NtHash = AuthCrypto.NtHash(password);
 
         return _inner.HashPassword(user, password);

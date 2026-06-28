@@ -26,9 +26,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\RdpWire\KSol.RDP.Wire.csproj" />
-    <!-- Local project reference to rdpgw.net while iterating on UseConnectionHandler; revert to the
-         RDPGW NuGet PackageReference once a version carrying these changes is published. -->
-    <ProjectReference Include="..\..\rdpgw.net\RDPGW\RDPGW.csproj" />
   </ItemGroup>
 
 </Project>

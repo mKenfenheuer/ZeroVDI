@@ -3,8 +3,8 @@ using System.Collections.Concurrent;
 namespace KSol.RDPGateway.RDP;
 
 /// <summary>
-/// Tracks the number of live gateway tunnels per resource id. Shared (singleton) between
-/// <see cref="VdiResourceResolver"/> (which increments/decrements as sessions come and go) and
+/// Tracks the number of live gateway tunnels per resource id. Shared (singleton) between the
+/// connection path (which increments/decrements as sessions come and go) and
 /// <see cref="IdleReaperService"/> (which only pauses resources with zero active sessions).
 /// </summary>
 public class SessionTracker

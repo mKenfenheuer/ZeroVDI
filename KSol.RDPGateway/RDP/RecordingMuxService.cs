@@ -60,6 +60,17 @@ public sealed class RecordingMuxService : BackgroundService
 
         var baseDir = rec.DesktopFilePath != null ? Path.GetDirectoryName(rec.DesktopFilePath) : null;
         baseDir ??= rec.CameraFilePath != null ? Path.GetDirectoryName(rec.CameraFilePath) : null;
+
+        // Redirect/handover chains (GNOME "Remote Login") record each leg into {baseDir}/leg{N}. Merge them
+        // into the single baseDir layout the rest of this method expects: concatenate each track's raw
+        // stream in leg order with a continuous timeline, dropping empty legs (e.g. the initial no-GFX one).
+        // No-op for single-leg / native recordings (no leg* dirs) — the existing baseDir files are used.
+        if (baseDir != null && !File.Exists(Path.Combine(baseDir, "manifest.json")) && Directory.Exists(baseDir))
+        {
+            try { MergeLegs(baseDir); }
+            catch (Exception ex) { _logger.LogWarning(ex, "RecordingMuxService: merging legs for {Id} failed", rec.Id); }
+        }
+
         if (baseDir == null || !File.Exists(Path.Combine(baseDir, "manifest.json")))
         {
             _logger.LogWarning("RecordingMuxService: recording {Id} has no manifest — marking Failed", rec.Id);
@@ -206,7 +217,8 @@ public sealed class RecordingMuxService : BackgroundService
         rec.CameraFilePath = anyFailed ? null : cameraOut;
         rec.AudioFilePath = anyFailed ? null : audioOut;
         rec.MicFilePath = anyFailed ? null : micOut;
-        rec.Status = anyFailed ? RecordingStatus.Failed
+        bool nothingProduced = desktopOut == null && cameraOut == null && audioOut == null && micOut == null;
+        rec.Status = anyFailed || nothingProduced ? RecordingStatus.Failed
             : manifest.UnsupportedVideoCodec ? RecordingStatus.UnsupportedCodec
             : RecordingStatus.Completed;
         await db.SaveChangesAsync(ct);
@@ -218,6 +230,8 @@ public sealed class RecordingMuxService : BackgroundService
         {
             foreach (var f in rawFiles) { try { File.Delete(f); } catch { } }
             try { File.Delete(Path.Combine(baseDir, "manifest.json")); } catch { }
+            // Remove the per-leg raw subdirs (redirect/handover chain) once merged + muxed.
+            foreach (var d in Directory.GetDirectories(baseDir, "leg*")) { try { Directory.Delete(d, true); } catch { } }
         }
         _logger.LogInformation("RecordingMuxService: recording {Id} → {Status}", rec.Id, rec.Status);
     }
@@ -424,5 +438,111 @@ public sealed class RecordingMuxService : BackgroundService
             return false;
         }
         catch (Exception ex) { _logger.LogWarning(ex, "RecordingMuxService: {Exe} run failed ({Id}/{Tag})", exe, recId, tag); return false; }
+    }
+
+    // ---- Redirect/handover leg merge -------------------------------------------------------------
+    // GNOME "Remote Login" records each redirect leg into {baseDir}/leg{N}. Consolidate the legs that
+    // actually captured desktop video into the single baseDir layout (manifest.json + raw streams) the
+    // mux pipeline expects, concatenating each track in leg order with a continuous timeline. Empty legs
+    // (e.g. the initial no-GFX connection) are skipped. Geometry is constant within a session.
+    private void MergeLegs(string baseDir)
+    {
+        var legDirs = Directory.GetDirectories(baseDir, "leg*")
+            .Select(d => (dir: d, n: int.TryParse(Path.GetFileName(d).AsSpan(3), out var k) ? k : -1))
+            .Where(x => x.n >= 0).OrderBy(x => x.n).Select(x => x.dir).ToList();
+        if (legDirs.Count == 0) return; // not a leg-based recording
+
+        // Load each leg's manifest; keep only legs with actual desktop video (raw BGRA or H.264).
+        var legs = new List<(string dir, RecordingManifest m)>();
+        foreach (var d in legDirs)
+        {
+            var mf = Path.Combine(d, "manifest.json");
+            if (!File.Exists(mf)) continue;
+            RecordingManifest m;
+            try { m = JsonSerializer.Deserialize<RecordingManifest>(File.ReadAllText(mf), JsonOpts)!; }
+            catch { continue; }
+            legs.Add((d, m));
+        }
+        if (legs.Count == 0) return;
+
+        var desktopLegs = legs.Where(l => l.m.DesktopRawVideo != null || l.m.DesktopVideo != null).ToList();
+        _logger.LogInformation("RecordingMuxService: merging {Total} legs ({Desktop} with desktop video) in {Dir}",
+            legs.Count, desktopLegs.Count, baseDir);
+        if (desktopLegs.Count == 0)
+        {
+            // No leg produced desktop video; surface the first leg's manifest so the pipeline marks it
+            // (audio-only / failed) consistently rather than erroring on a missing manifest.
+            File.Copy(Path.Combine(legs[0].dir, "manifest.json"), Path.Combine(baseDir, "manifest.json"), true);
+            return;
+        }
+
+        // All desktop legs share geometry (same session). Use raw-BGRA path if the first uses it.
+        bool raw = desktopLegs[0].m.DesktopRawVideo != null;
+        var merged = new RecordingManifest
+        {
+            VideoCodec = desktopLegs[0].m.VideoCodec,
+            DesktopRawWidth = desktopLegs[0].m.DesktopRawWidth,
+            DesktopRawHeight = desktopLegs[0].m.DesktopRawHeight,
+        };
+
+        // 1) Desktop video: concatenate the raw byte streams.
+        string videoName = raw ? "desktop.bgra" : "desktop.h264";
+        ConcatFiles(desktopLegs.Select(l => Path.Combine(l.dir, videoName)), Path.Combine(baseDir, videoName));
+        if (raw) merged.DesktopRawVideo = "desktop.bgra"; else merged.DesktopVideo = "desktop.h264";
+
+        // 2) Desktop video timestamps: concatenate the v2 sidecars, offsetting each leg by the running
+        // total so the timeline stays strictly increasing across the join.
+        MergeV2Timestamps(desktopLegs.Select(l => Path.Combine(l.dir, l.m.DesktopVideoTs ?? "desktop.ts.txt")),
+            Path.Combine(baseDir, "desktop.ts.txt"));
+        merged.DesktopVideoTs = "desktop.ts.txt";
+
+        // 3) Remote audio (PCM): concatenate from the desktop legs (so audio lines up with the kept video).
+        //    Front offset = first desktop leg's own offset; subsequent legs' audio simply follows.
+        var audioLegs = desktopLegs.Where(l => l.m.DesktopAudio != null && l.m.RemoteAudio != null).ToList();
+        if (audioLegs.Count > 0)
+        {
+            ConcatFiles(audioLegs.Select(l => Path.Combine(l.dir, l.m.DesktopAudio!)), Path.Combine(baseDir, "desktop.pcm"));
+            merged.DesktopAudio = "desktop.pcm";
+            merged.RemoteAudio = audioLegs[0].m.RemoteAudio;
+            merged.DesktopAudioOffsetMs = audioLegs[0].m.DesktopAudioOffsetMs;
+        }
+
+        merged.SessionDurationMs = desktopLegs.Sum(l => l.m.SessionDurationMs);
+        File.WriteAllText(Path.Combine(baseDir, "manifest.json"), JsonSerializer.Serialize(merged));
+    }
+
+    private static void ConcatFiles(IEnumerable<string> inputs, string output)
+    {
+        using var outFs = new FileStream(output, FileMode.Create, FileAccess.Write);
+        foreach (var f in inputs)
+        {
+            if (!File.Exists(f)) continue;
+            using var inFs = File.OpenRead(f);
+            inFs.CopyTo(outFs);
+        }
+    }
+
+    // Concatenate mkvmerge "v2" timestamp sidecars (one ms per frame, strictly increasing). Each leg's
+    // values are leg-relative; we add a running base (last value + 1) so the merged file stays monotonic.
+    private static void MergeV2Timestamps(IEnumerable<string> inputs, string output)
+    {
+        using var w = new StreamWriter(output);
+        w.WriteLine("# timestamp format v2");
+        long baseMs = 0, last = -1;
+        foreach (var f in inputs)
+        {
+            if (!File.Exists(f)) continue;
+            long legLast = 0;
+            foreach (var line in File.ReadLines(f))
+            {
+                if (line.Length == 0 || line[0] == '#') continue;
+                if (!long.TryParse(line, out var v)) continue;
+                long t = baseMs + v;
+                if (t <= last) t = last + 1;
+                w.WriteLine(t);
+                last = t; legLast = v;
+            }
+            baseMs += legLast + 1; // next leg starts just after this leg's last frame
+        }
     }
 }

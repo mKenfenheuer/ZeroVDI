@@ -14,8 +14,14 @@ namespace KSol.RDPGateway.RDP;
 /// </summary>
 public sealed class RedirectionTokenCache(ILogger<RedirectionTokenCache> logger)
 {
-    /// <summary>Routing token plus the optional broker-supplied session credentials for the reconnect.</summary>
-    public sealed record Pending(byte[] Token, string? Username, string? Domain, string? Password);
+    /// <summary>
+    /// Routing token plus the optional broker-supplied session credentials for the reconnect, and the
+    /// recording-continuation state so all legs of a redirect/handover chain (GNOME "Remote Login":
+    /// initial → greeter → logged-in session) record into ONE recording instead of three. Each leg writes
+    /// to <c>{BaseDir}/leg{Leg}</c>; the muxer concatenates them in order.
+    /// </summary>
+    public sealed record Pending(byte[] Token, string? Username, string? Domain, string? Password,
+        string? RecordingId = null, string? BaseDir = null, int Leg = 0);
 
     private static readonly TimeSpan Ttl = TimeSpan.FromSeconds(30);
     private readonly ConcurrentDictionary<string, (Pending Pending, DateTime Expires)> _entries = new();

@@ -67,27 +67,27 @@ public sealed class RdpServerRedirection
 
     private static RdpServerRedirection? TryParseCore(ReadOnlySpan<byte> buffer)
     {
+        // Per [MS-RDPBCGR] the Server Redirection data is the RDP_SERVER_REDIRECTION_PACKET (2.2.13.1),
+        // whose first field is Flags == SEC_REDIRECTION_PKT (0x0400), then Length(2) SessionID(4)
+        // RedirFlags(4), then the length-prefixed optional fields. In the Enhanced Security form
+        // (2.2.13.3.1 — what NLA/TLS hosts incl. GNOME use) this packet sits after a 6-byte Share Control
+        // Header (pduType=PDUTYPE_SERVER_REDIR_PKT 0xA) + 2 pad bytes; in the Standard Security form
+        // (2.2.13.2.1) after a security header. Rather than re-derive the variable MCS/share framing, scan
+        // for the packet's own Flags=0x0400 marker and validate the structure that MUST follow it
+        // (Length sane, RedirFlags has only defined bits, the first length-prefixed field fits). This is
+        // spec-exact on the packet body and robust to the enclosing framing.
         const ushort SEC_REDIRECTION_PKT = 0x0400;
-
-        int i = 0;
-        while (i + 4 <= buffer.Length)
+        for (int o = 0; o + 12 <= buffer.Length; o++)
         {
-            if (buffer[i] != 0x03) { i++; continue; }                 // TPKT version
-            int len = (buffer[i + 2] << 8) | buffer[i + 3];
-            if (len < 11 || i + len > buffer.Length) { i++; continue; }
-            var pdu = buffer.Slice(i, len);
-            i += len;
-
-            // TPKT(4) + X.224 Data(3) + MCS Send-Data-Indication header. The MCS header length varies;
-            // locate the security header by scanning the small window after the fixed framing for the
-            // SEC_REDIRECTION_PKT flag, which is the simplest robust approach across MCS length encodings.
-            for (int o = 7; o + 4 <= pdu.Length && o <= 20; o++)
-            {
-                ushort flags = BinaryPrimitives.ReadUInt16LittleEndian(pdu.Slice(o, 2));
-                if ((flags & SEC_REDIRECTION_PKT) == 0) continue;
-                var parsed = ParsePacket(pdu.Slice(o + 4).ToArray()); // skip flags(2) + flagsHi(2)
-                if (parsed != null) return parsed;
-            }
+            if (BinaryPrimitives.ReadUInt16LittleEndian(buffer.Slice(o, 2)) != SEC_REDIRECTION_PKT) continue;
+            // Candidate packet starts at o: Flags(2) Length(2) SessionID(4) RedirFlags(4) → RedirFlags @ o+8.
+            ushort length = BinaryPrimitives.ReadUInt16LittleEndian(buffer.Slice(o + 2, 2));
+            if (length < 12 || o + length > buffer.Length + 8) continue; // Length covers the packet (slack for optional pad)
+            // ParsePacket validates RedirFlags + fields; pass the slice starting AT Flags so its rfOff=8
+            // candidate lands exactly on RedirFlags (spec layout). Keep rfOff=12 as a fallback for the
+            // older observed +4 variant.
+            var parsed = ParsePacket(buffer.Slice(o).ToArray());
+            if (parsed != null) return parsed;
         }
         return null;
     }
@@ -99,9 +99,11 @@ public sealed class RdpServerRedirection
     // candidate header sizes and accept the one whose RedirFlags + length-prefixed fields parse cleanly.
     private static RdpServerRedirection? ParsePacket(byte[] s)
     {
-        if (s.Length < 16) return null;
-        // Try the observed header layout (RedirFlags @ 12) first, then the spec's 12-byte header (@ 8).
-        foreach (int rfOff in new[] { 12, 8 })
+        if (s.Length < 12) return null;
+        // 's' starts at the packet's Flags field. Per [MS-RDPBCGR] 2.2.13.1: Flags(2) Length(2)
+        // SessionID(4) RedirFlags(4) → RedirFlags at offset 8. Try the spec layout first; keep 12 as a
+        // fallback for the older observed variant where the slice started 4 bytes earlier.
+        foreach (int rfOff in new[] { 8, 12 })
         {
             var parsed = ParseFrom(s, rfOff);
             if (parsed != null) return parsed;

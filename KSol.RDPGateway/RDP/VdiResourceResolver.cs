@@ -2,18 +2,16 @@ using System.Net.Sockets;
 using KSol.RDPGateway.Data;
 using KSol.RDPGateway.Models;
 using Microsoft.EntityFrameworkCore;
-using RDPGW.AspNetCore;
 
 namespace KSol.RDPGateway.RDP;
 
 /// <summary>
 /// Resolves a resource id (the .rdp full address, a GUID) to the backing machine's current host and
 /// port, starting a Proxmox VM on demand and waiting until it is reachable before the tunnel is
-/// opened. While this waits, the RDP client sits in channel-create and shows its native "Initiating
-/// remote connection / starting remote computer" UI. Also records active sessions and stamps last
-/// activity so <see cref="IdleReaperService"/> can pause idle VMs.
+/// opened. While this waits, the browser console shows its "starting remote computer" UI. Also records
+/// active sessions and stamps last activity so <see cref="IdleReaperService"/> can pause idle VMs.
 /// </summary>
-public class VdiResourceResolver : IRDPGWResourceResolver
+public class VdiResourceResolver
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ProxmoxClient _proxmox;
