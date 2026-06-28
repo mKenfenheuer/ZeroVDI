@@ -181,7 +181,7 @@ public class VdiResourceResolver
             await SetPowerStateAsync(db, res, ResourcePowerState.Starting);
             if (!await _proxmox.EnsureRunningAsync(backend, node, vmid, ct))
             {
-                await SetPowerStateAsync(db, res, ResourcePowerState.Unknown);
+                await SetPowerStateAsync(db, res, ResourcePowerState.Stopped);
                 return Fail("Failed to start the VM. Contact an administrator if this persists.");
             }
         }
@@ -240,7 +240,7 @@ public class VdiResourceResolver
         if (ip == null)
         {
             _logger.LogWarning("Resolve: VM {Node}/{VmId} not reachable within timeout", node, vmid);
-            await SetPowerStateAsync(db, res, ResourcePowerState.Unknown);
+            await SetPowerStateAsync(db, res, ResourcePowerState.Stopped);
             return Fail(probedRdp
                 ? "Timed out waiting for the remote desktop service (RDP service unavailable)."
                 : "Timed out waiting for the VM to report an IP address (no IP address reported).");

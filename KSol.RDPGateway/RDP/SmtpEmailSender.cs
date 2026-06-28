@@ -13,7 +13,7 @@ public class SmtpSettings
     public string? Username { get; set; }
     public string? Password { get; set; }
     public string FromAddress { get; set; } = "noreply@example.com";
-    public string FromName { get; set; } = "RDP Gateway";
+    public string FromName { get; set; } = "ZeroVDI";
     public bool UseSsl { get; set; } = true;
 }
 

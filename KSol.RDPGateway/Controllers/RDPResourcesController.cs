@@ -20,6 +20,7 @@ namespace KSol.RDPGateway.Controllers
         private readonly ProxmoxClient _proxmox;
         private readonly ProxmoxBackendProvider _backends;
         private readonly CredentialProtector _credentials;
+        private readonly ResourceShutdownService _shutdown;
         private readonly Microsoft.AspNetCore.Identity.UserManager<ApplicationUser> _userManager;
 
         public RDPResourcesController(
@@ -27,12 +28,14 @@ namespace KSol.RDPGateway.Controllers
             ProxmoxClient proxmox,
             ProxmoxBackendProvider backends,
             CredentialProtector credentials,
+            ResourceShutdownService shutdown,
             Microsoft.AspNetCore.Identity.UserManager<ApplicationUser> userManager)
         {
             _context = context;
             _proxmox = proxmox;
             _backends = backends;
             _credentials = credentials;
+            _shutdown = shutdown;
             _userManager = userManager;
         }
 
@@ -44,23 +47,10 @@ namespace KSol.RDPGateway.Controllers
         }
 
         // GET: /admin/resources/details/5
+        // The standalone Details view was merged into the tabbed Edit page (its "Backend & VM" tab
+        // shows everything Details did). Kept as a redirect so old links keep working.
         [HttpGet("details/{id}")]
-        public async Task<IActionResult> Details(string id)
-        {
-            if (id == null)
-            {
-                return NotFound();
-            }
-
-            var rDPResource = await _context.RDPResources
-                .FirstOrDefaultAsync(m => m.Id == id);
-            if (rDPResource == null)
-            {
-                return NotFound();
-            }
-
-            return View(rDPResource);
-        }
+        public IActionResult Details(string id) => RedirectToAction(nameof(Edit), new { id });
 
         // GET: /admin/resources/create
         [HttpGet("create")]
@@ -74,7 +64,7 @@ namespace KSol.RDPGateway.Controllers
         // are created by the sync service, not here. Id is server-generated (GUID).
         [HttpPost("create")]
         [ValidateAntiForgeryToken]
-        public async Task<IActionResult> Create([Bind("Name,Description,IpAddress,Port,RdpOptions,OsType,WakeMethod,WolMacAddress,IpmiHost,IpmiUser,SshUser,ShutdownCommand")] RDPResource rDPResource, string? ipmiPassword, string? sshKey)
+        public async Task<IActionResult> Create([Bind("Name,Description,IpAddress,Port,OsType,WakeMethod,WolMacAddress,IpmiHost,IpmiUser,ShutdownMethod,SshUser,ShutdownCommand,WindowsUser,DefaultConnectionDefaults")] RDPResource rDPResource, string? ipmiPassword, string? sshKey, string? windowsPassword)
         {
             if (ModelState.IsValid)
             {
@@ -83,6 +73,8 @@ namespace KSol.RDPGateway.Controllers
                     rDPResource.ProtectedIpmiPassword = _credentials.Protect(ipmiPassword);
                 if (!string.IsNullOrEmpty(sshKey))
                     rDPResource.ProtectedSshKey = _credentials.Protect(sshKey);
+                if (!string.IsNullOrEmpty(windowsPassword))
+                    rDPResource.ProtectedWindowsPassword = _credentials.Protect(windowsPassword);
                 _context.Add(rDPResource);
                 await _context.SaveChangesAsync();
                 return RedirectToAction(nameof(Index));
@@ -150,7 +142,7 @@ namespace KSol.RDPGateway.Controllers
         // applied; for Manual resources the address, port and RDP options are editable too.
         [HttpPost("edit/{id}")]
         [ValidateAntiForgeryToken]
-        public async Task<IActionResult> Edit(string id, [Bind("Id,Name,Description,IpAddress,Port,RdpOptions,OsType,WakeMethod,WolMacAddress,IpmiHost,IpmiUser,SshUser,ShutdownCommand")] RDPResource input, string? ipmiPassword, string? sshKey)
+        public async Task<IActionResult> Edit(string id, [Bind("Id,Name,Description,IpAddress,Port,OsType,WakeMethod,WolMacAddress,IpmiHost,IpmiUser,ShutdownMethod,SshUser,ShutdownCommand,WindowsUser")] RDPResource input, string? ipmiPassword, string? sshKey, string? windowsPassword)
         {
             if (id != input.Id)
             {
@@ -171,7 +163,6 @@ namespace KSol.RDPGateway.Controllers
                 {
                     existing.IpAddress = input.IpAddress;
                     existing.Port = input.Port;
-                    existing.RdpOptions = input.RdpOptions ?? existing.RdpOptions;
                     existing.OsType = input.OsType;
                     existing.WakeMethod = input.WakeMethod;
                     existing.WolMacAddress = input.WolMacAddress;
@@ -179,16 +170,56 @@ namespace KSol.RDPGateway.Controllers
                     existing.IpmiUser = input.IpmiUser;
                     if (!string.IsNullOrEmpty(ipmiPassword))
                         existing.ProtectedIpmiPassword = _credentials.Protect(ipmiPassword);
+                    existing.ShutdownMethod = input.ShutdownMethod;
                     existing.SshUser = input.SshUser;
                     if (!string.IsNullOrEmpty(sshKey))
                         existing.ProtectedSshKey = _credentials.Protect(sshKey);
                     existing.ShutdownCommand = input.ShutdownCommand;
+                    existing.WindowsUser = input.WindowsUser;
+                    if (!string.IsNullOrEmpty(windowsPassword))
+                        existing.ProtectedWindowsPassword = _credentials.Protect(windowsPassword);
                 }
                 await _context.SaveChangesAsync();
                 TempData["Status"] = "Resource saved.";
                 return RedirectToAction(nameof(Edit), new { id });
             }
             return View(await BuildEditViewModelAsync(existing));
+        }
+
+        // POST: /admin/resources/{id}/stop — on-demand graceful shutdown of a running resource.
+        // Manual resources use their configured ShutdownMethod (SSH/IPMI/Windows); Proxmox resources
+        // are stopped through the backend API.
+        [HttpPost("{id}/stop")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> Stop(string id)
+        {
+            var res = await _context.RDPResources.FirstOrDefaultAsync(r => r.Id == id);
+            if (res == null) return NotFound();
+
+            bool ok;
+            if (res.Source == ResourceSource.Proxmox && res.ProxmoxBackendId != null
+                && res.ProxmoxNode != null && res.ProxmoxVmId != null)
+            {
+                var backend = await _backends.GetAsync(res.ProxmoxBackendId.Value);
+                ok = backend != null && backend.IsConfigured
+                    && await _proxmox.StopAsync(backend, res.ProxmoxNode, res.ProxmoxVmId.Value);
+            }
+            else
+            {
+                ok = await _shutdown.ShutDownAsync(res);
+            }
+
+            if (ok)
+            {
+                res.PowerState = ResourcePowerState.Stopped;
+                await _context.SaveChangesAsync();
+                TempData["Status"] = $"Shutdown requested for \"{res.Name}\".";
+            }
+            else
+            {
+                TempData["Error"] = $"Could not shut down \"{res.Name}\" — check its shutdown configuration.";
+            }
+            return RedirectToAction(nameof(Edit), new { id });
         }
 
         // --- Assigned users + authorizations (folded into the resource editor) ---
@@ -365,10 +396,25 @@ namespace KSol.RDPGateway.Controllers
             var rDPResource = await _context.RDPResources.FindAsync(id);
             if (rDPResource != null)
             {
+                // Clean up dependents first, or SQLite's FK enforcement rejects the delete.
+                // Authorizations are pure access grants with no value once the resource is gone.
+                var auths = await _context.RDPResourceUserAuthorizations
+                    .Where(a => a.RDPResourceId == id)
+                    .ToListAsync();
+                _context.RDPResourceUserAuthorizations.RemoveRange(auths);
+
+                // Recordings are an audit artifact (with files on disk) — preserve them by detaching
+                // from the resource rather than cascade-deleting.
+                var recordings = await _context.Recordings
+                    .Where(r => r.RDPResourceId == id)
+                    .ToListAsync();
+                foreach (var rec in recordings)
+                    rec.RDPResourceId = null;
+
                 _context.RDPResources.Remove(rDPResource);
+                await _context.SaveChangesAsync();
             }
 
-            await _context.SaveChangesAsync();
             return RedirectToAction(nameof(Index));
         }
 

@@ -9,10 +9,11 @@ using KSol.RDPGateway.RDP;
 namespace KSol.RDPGateway.Controllers;
 
 /// <summary>
-/// The transparent connect workflow. Instead of dropping the user straight into the console (and a
-/// blank "starting remote computer" wait), <c>/connect/{id}</c> shows a preflight page that polls the
-/// readiness API: it starts/resumes the VM if needed and waits until the guest agent, IP and RDP probe
-/// all succeed, with granular progress and meaningful errors. Only then does it launch the console.
+/// The transparent connect workflow's readiness API. The console page (<c>Home/Console</c>) runs a
+/// preflight overlay on load that drives these endpoints: <c>begin</c> starts/resumes the VM if needed,
+/// and <c>status</c> is polled until the guest agent, IP and RDP probe all succeed — with granular
+/// progress and meaningful errors — before the RDP session is established. <c>save</c> persists the
+/// in-flow "store credentials / remember settings" choices.
 ///
 /// Every action re-checks that the signed-in user is authorized for the resource — users can't probe
 /// or start resources they aren't assigned.
@@ -46,18 +47,6 @@ public class ConnectController : Controller
             .Include(a => a.RDPResource)
             .FirstOrDefaultAsync(a => a.UserId == userId && a.RDPResourceId == id);
         return auth?.RDPResource;
-    }
-
-    // GET /connect/{id} — the preflight progress page.
-    [HttpGet("{id}")]
-    public async Task<IActionResult> Index(string id)
-    {
-        var resource = await AuthorizeResourceAsync(id);
-        if (resource == null) return NotFound();
-
-        ViewData["ResourceId"] = id;
-        ViewData["ResourceName"] = resource.Name ?? id;
-        return View();
     }
 
     // POST /connect/{id}/begin — kick off (or attach to) the readiness sequence.
@@ -125,6 +114,26 @@ public class ConnectController : Controller
 
         await _context.SaveChangesAsync();
         return Ok(new { saved = true });
+    }
+
+    // POST /connect/{id}/clear-credentials — drop the stored SSO credentials on the current user's
+    // own authorization for this resource, mirroring the admin "Clear stored credentials" action.
+    [HttpPost("{id}/clear-credentials")]
+    public async Task<IActionResult> ClearCredentials(string id)
+    {
+        var userId = _userManager.GetUserId(User);
+        if (userId == null) return Unauthorized();
+
+        var auth = await _context.RDPResourceUserAuthorizations
+            .FirstOrDefaultAsync(a => a.UserId == userId && a.RDPResourceId == id);
+        if (auth == null) return NotFound();
+
+        auth.ProtectedUsername = null;
+        auth.ProtectedPassword = null;
+        auth.ProtectedDomain = null;
+
+        await _context.SaveChangesAsync();
+        return Ok(new { cleared = true });
     }
 
     private static object ToDto(ReadinessProgress p) => new

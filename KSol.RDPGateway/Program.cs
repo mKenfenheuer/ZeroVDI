@@ -82,11 +82,12 @@ public class Program
         builder.Services.AddHostedService(sp => sp.GetRequiredService<RDP.ProxmoxSyncService>());
         builder.Services.AddHostedService<RDP.IdleReaperService>();
 
-        // Manual resource lifecycle: status polling, WOL, IPMI, SSH shutdown.
+        // Resource lifecycle: periodic power-state polling (all sources), WOL, IPMI, SSH shutdown.
         builder.Services.AddSingleton<RDP.IpmiClient>();
         builder.Services.AddSingleton<RDP.SshCommandService>();
-        builder.Services.AddSingleton<RDP.ManualHostStatusService>();
-        builder.Services.AddHostedService(sp => sp.GetRequiredService<RDP.ManualHostStatusService>());
+        builder.Services.AddSingleton<RDP.ResourceShutdownService>();
+        builder.Services.AddSingleton<RDP.ResourceStatusService>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<RDP.ResourceStatusService>());
 
         // Honor X-Forwarded-Proto / X-Forwarded-Host / X-Forwarded-For when running behind a
         // reverse proxy (e.g. Traefik) that terminates TLS. Without this, Request.Scheme/Host are

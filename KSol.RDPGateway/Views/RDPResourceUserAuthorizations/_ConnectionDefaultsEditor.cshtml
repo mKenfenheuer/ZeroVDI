@@ -1,16 +1,38 @@
 @model KSol.RDPGateway.Models.ConnectionDefaults
 
 @*
-    Editor for the per-(user, resource) console connect defaults. Bound under the
-    "ConnectionDefaults" prefix so it round-trips into RDPResourceUserAuthorization.ConnectionDefaults
-    on the Edit POST. Mirrors the session options in Views/Home/Console.cshtml.
+    Editor for the (user, resource) / resource-wide console connect defaults. Bound under the
+    "ConnectionDefaults" prefix so it round-trips into ConnectionDefaults on the owning POST.
+
+    This is the SAME option set the console "Session options" popup offers
+    (Views/Home/Console.cshtml) — the two must stay identical. The visual-quality checkboxes are
+    assembled into the single PerformanceFlags bitmask on submit, mirroring the console's logic and
+    the PERF bit table in wwwroot/lib/rdpweb/protocol.js.
 *@
 @{
-    var prefix = "ConnectionDefaults";
+    // Honour an ambient field prefix when the caller sets one (e.g. "DefaultConnectionDefaults" on
+    // the resource Create form); default to "ConnectionDefaults" for the standalone POST actions.
+    var prefix = ViewData.TemplateInfo.HtmlFieldPrefix;
+    if (string.IsNullOrEmpty(prefix)) prefix = "ConnectionDefaults";
     string Name(string p) => $"{prefix}.{p}";
+    // Unique id base so multiple editors can coexist on one page (per-user + resource-wide).
+    var uid = "cd-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+    var mask = Model.PerformanceFlags;
+    // PERF bits (mirror of protocol.js). Checkbox semantics: ENABLE_* → checked sets the bit;
+    // DISABLE_* (data-invert) → "keep this eye-candy", so UNchecked sets the DISABLE bit.
+    const int FONT_SMOOTHING = 0x00000080;
+    const int DESKTOP_COMPOSITION = 0x00000100;
+    const int DISABLE_WALLPAPER = 0x00000001;
+    const int DISABLE_THEMING = 0x00000008;
+    const int DISABLE_FULLWINDOWDRAG = 0x00000002;
+    const int DISABLE_MENUANIMATIONS = 0x00000004;
+    const int DISABLE_CURSOR_SHADOW = 0x00000020;
+    const int DISABLE_CURSORSETTINGS = 0x00000040;
+    bool On(int bit) => (mask & bit) != 0;        // ENABLE_* flag is on when its bit is set
+    bool Keep(int bit) => (mask & bit) == 0;      // DISABLE_* eye-candy kept when its bit is NOT set
 }
 
-<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+<div class="@uid grid grid-cols-1 md:grid-cols-2 gap-6">
     <div class="space-y-2">
         <label class="flex items-center gap-2 text-sm cursor-pointer">
             <input class="form-check" type="checkbox" name="@Name("Audio")" value="true" @(Model.Audio ? "checked" : "") />
@@ -32,21 +54,75 @@
             <input type="hidden" name="@Name("Camera")" value="false" />
             <span>Camera redirection</span>
         </label>
-    </div>
-    <div class="space-y-3">
-        <div>
-            <label class="form-label" for="cd-gfx">Display mode</label>
-            <select class="form-select" name="@Name("GfxMode")" id="cd-gfx">
+
+        <div class="pt-1">
+            <label class="form-label" for="@(uid)-gfx">Display mode</label>
+            <select class="form-select" name="@Name("GfxMode")" id="@(uid)-gfx">
                 <option value="off" selected="@(Model.GfxMode == "off")">Legacy bitmaps (most compatible)</option>
                 <option value="clearcodec" selected="@(Model.GfxMode == "clearcodec")">GFX — ClearCodec</option>
-                <option value="avc420" selected="@(Model.GfxMode == "avc420")">GFX — H.264 (AVC420)</option>
-                <option value="avc444" selected="@(Model.GfxMode == "avc444")">GFX — H.264 (AVC444)</option>
+                <option value="avc420" selected="@(Model.GfxMode == "avc420")">GFX — H.264 (AVC420), fallback ClearCodec</option>
+                <option value="avc444" selected="@(Model.GfxMode == "avc444")">GFX — H.264 (AVC444), fallback ClearCodec</option>
             </select>
         </div>
-        <div>
-            <label class="form-label" for="cd-perf">Performance flags (RDP bitmask)</label>
-            <input class="form-input" type="number" name="@Name("PerformanceFlags")" id="cd-perf" value="@Model.PerformanceFlags" min="0" />
-            <p class="form-hint">0 = protocol default (best visuals). Advanced: an ExtendedInfoPacket performanceFlags bitmask.</p>
-        </div>
+    </div>
+
+    <div class="space-y-2">
+        <div class="text-xs font-medium text-muted-foreground">Visual quality</div>
+        @* The perf checkboxes assemble into the hidden PerformanceFlags field on change/submit.
+           Checked = the named feature is ON (good visuals); see PERF semantics above. *@
+        <input type="hidden" name="@Name("PerformanceFlags")" value="@mask" class="perf-mask" />
+        <label class="flex items-center gap-2 text-sm cursor-pointer">
+            <input class="form-check perf-flag" type="checkbox" data-perf="@FONT_SMOOTHING" checked="@On(FONT_SMOOTHING)" />
+            <span>Font smoothing (anti-alias)</span>
+        </label>
+        <label class="flex items-center gap-2 text-sm cursor-pointer">
+            <input class="form-check perf-flag" type="checkbox" data-perf="@DESKTOP_COMPOSITION" checked="@On(DESKTOP_COMPOSITION)" />
+            <span>Desktop composition (Aero)</span>
+        </label>
+        <label class="flex items-center gap-2 text-sm cursor-pointer">
+            <input class="form-check perf-flag" type="checkbox" data-perf="@DISABLE_WALLPAPER" data-invert="1" checked="@Keep(DISABLE_WALLPAPER)" />
+            <span>Wallpaper</span>
+        </label>
+        <label class="flex items-center gap-2 text-sm cursor-pointer">
+            <input class="form-check perf-flag" type="checkbox" data-perf="@DISABLE_THEMING" data-invert="1" checked="@Keep(DISABLE_THEMING)" />
+            <span>Themes</span>
+        </label>
+        <label class="flex items-center gap-2 text-sm cursor-pointer">
+            <input class="form-check perf-flag" type="checkbox" data-perf="@DISABLE_FULLWINDOWDRAG" data-invert="1" checked="@Keep(DISABLE_FULLWINDOWDRAG)" />
+            <span>Show window contents while dragging</span>
+        </label>
+        <label class="flex items-center gap-2 text-sm cursor-pointer">
+            <input class="form-check perf-flag" type="checkbox" data-perf="@DISABLE_MENUANIMATIONS" data-invert="1" checked="@Keep(DISABLE_MENUANIMATIONS)" />
+            <span>Menu animations</span>
+        </label>
+        <label class="flex items-center gap-2 text-sm cursor-pointer">
+            <input class="form-check perf-flag" type="checkbox" data-perf="@DISABLE_CURSOR_SHADOW" data-invert="1" checked="@Keep(DISABLE_CURSOR_SHADOW)" />
+            <span>Cursor shadow</span>
+        </label>
+        <label class="flex items-center gap-2 text-sm cursor-pointer">
+            <input class="form-check perf-flag" type="checkbox" data-perf="@DISABLE_CURSORSETTINGS" data-invert="1" checked="@Keep(DISABLE_CURSORSETTINGS)" />
+            <span>Cursor blink</span>
+        </label>
     </div>
 </div>
+
+<script>
+    (function () {
+        var root = document.querySelector(".@uid");
+        if (!root) return;
+        var mask = root.querySelector(".perf-mask");
+        function recompute() {
+            var v = 0;
+            root.querySelectorAll(".perf-flag").forEach(function (cb) {
+                var bit = parseInt(cb.getAttribute("data-perf"), 10) || 0;
+                var invert = cb.getAttribute("data-invert") === "1";
+                if (invert ? !cb.checked : cb.checked) v |= bit;
+            });
+            mask.value = v >>> 0;
+        }
+        root.querySelectorAll(".perf-flag").forEach(function (cb) {
+            cb.addEventListener("change", recompute);
+        });
+        recompute();
+    })();
+</script>

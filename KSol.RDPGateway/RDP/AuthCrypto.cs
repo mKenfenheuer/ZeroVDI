@@ -11,7 +11,7 @@ namespace KSol.RDPGateway.RDP;
 public static class AuthCrypto
 {
     /// <summary>The NTLM realm advertised by this gateway.</summary>
-    public const string Realm = "KSol.IT RDP Gateway";
+    public const string Realm = "KSol.IT ZeroVDI";
 
     /// <summary>Computes the NTLM NT hash = MD4(UTF-16LE(password)), hex (lowercase).</summary>
     public static string NtHash(string password)

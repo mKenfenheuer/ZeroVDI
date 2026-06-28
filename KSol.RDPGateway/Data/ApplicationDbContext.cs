@@ -21,13 +21,13 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
     {
         base.OnModelCreating(builder);
 
-        // Persist the per-resource RDP options as a single JSON column rather than a side table,
-        // so the option set can evolve without a migration per field.
-        builder.Entity<RDPResource>().OwnsOne(r => r.RdpOptions, b => b.ToJson());
+        // Resource-wide console connect defaults (inherited by newly granted users), stored as a
+        // single JSON column rather than a side table so the option set can evolve without a
+        // migration per field.
         builder.Entity<RDPResource>().OwnsOne(r => r.DefaultConnectionDefaults, b => b.ToJson());
 
         // Per-(user, resource) console connect defaults, stored as a JSON column on the authorization
-        // (same rationale as RdpOptions above). Stored credentials are plain encrypted-string columns.
+        // (same rationale as above). Stored credentials are plain encrypted-string columns.
         builder.Entity<RDPResourceUserAuthorization>()
             .OwnsOne(a => a.ConnectionDefaults, b => b.ToJson());
     }

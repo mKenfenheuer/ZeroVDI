@@ -45,7 +45,16 @@
         </div>
     </div>
 
-    <partial name="_RdpOptionsEditor" for="RdpOptions" />
+    <div>
+        <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">Session options</h2>
+        @{
+            // Resource-wide connection defaults inherited by newly granted users. Same editor the
+            // console "Session options" popup uses; bound under DefaultConnectionDefaults.
+            await Html.RenderPartialAsync("~/Views/RDPResourceUserAuthorizations/_ConnectionDefaultsEditor.cshtml",
+                Model.DefaultConnectionDefaults ?? new ConnectionDefaults(),
+                new ViewDataDictionary(ViewData) { TemplateInfo = { HtmlFieldPrefix = "DefaultConnectionDefaults" } });
+        }
+    </div>
 
     <div>
         <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">Lifecycle</h2>
@@ -86,11 +95,22 @@
                 <input name="ipmiPassword" type="password" class="form-input" autocomplete="new-password" />
             </div>
         </div>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+        <div class="flex items-end gap-4 mt-4">
+            <div class="md:w-1/3">
+                <label class="form-label">Shutdown method</label>
+                <select name="ShutdownMethod" id="shutdown-method" class="form-select">
+                    <option value="0">None</option>
+                    <option value="1">SSH (Linux/macOS)</option>
+                    <option value="2">IPMI (ACPI soft off)</option>
+                    <option value="3">Windows (net rpc)</option>
+                </select>
+            </div>
+            <p class="form-hint pb-2">IPMI reuses the wake IPMI host &amp; credentials above.</p>
+        </div>
+        <div id="shutdown-ssh-fields" class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4 hidden">
             <div>
                 <label class="form-label">SSH user</label>
                 <input name="SshUser" class="form-input" placeholder="root" />
-                <p class="form-hint">For Linux/macOS shutdown.</p>
             </div>
             <div>
                 <label class="form-label">SSH private key</label>
@@ -98,7 +118,18 @@
             </div>
             <div>
                 <label class="form-label">Shutdown command</label>
-                <input name="ShutdownCommand" class="form-input" placeholder="Auto-detected from OS type" />
+                <input name="ShutdownCommand" class="form-input" placeholder="shutdown -h now" />
+            </div>
+        </div>
+        <div id="shutdown-windows-fields" class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4 hidden">
+            <div>
+                <label class="form-label">Windows user</label>
+                <input name="WindowsUser" class="form-input" placeholder="Administrator" />
+                <p class="form-hint">Local or DOMAIN\\user with shutdown rights.</p>
+            </div>
+            <div>
+                <label class="form-label">Windows password</label>
+                <input name="windowsPassword" type="password" class="form-input" autocomplete="new-password" />
             </div>
         </div>
     </div>
@@ -116,6 +147,11 @@
             var v = this.value;
             document.getElementById('wol-fields').classList.toggle('hidden', v !== '1');
             document.getElementById('ipmi-fields').classList.toggle('hidden', v !== '2');
+        });
+        document.getElementById('shutdown-method').addEventListener('change', function () {
+            var v = this.value;
+            document.getElementById('shutdown-ssh-fields').classList.toggle('hidden', v !== '1');
+            document.getElementById('shutdown-windows-fields').classList.toggle('hidden', v !== '3');
         });
     </script>
 }

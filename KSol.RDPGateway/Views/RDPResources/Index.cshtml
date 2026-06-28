@@ -53,7 +53,6 @@ else
                 </td>
                 <td>
                     <div class="flex items-center justify-end gap-2">
-                        <a asp-action="Details" asp-route-id="@item.Id" class="btn-ghost btn-sm">Details</a>
                         <a asp-action="Edit" asp-route-id="@item.Id" class="btn-secondary btn-sm">Edit</a>
                         @if (item.Source == ResourceSource.Proxmox)
                         {

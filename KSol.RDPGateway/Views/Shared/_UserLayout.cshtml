@@ -9,14 +9,14 @@
 <html lang="en">
 <head>
     <meta charset="utf-8" />
-    <title>@ViewData["Title"] — KSol.IT RDP Gateway</title>
+    <title>@ViewData["Title"] — KSol.IT ZeroVDI</title>
     <partial name="_ThemeHead" />
 </head>
 <body class="bg-background text-foreground min-h-screen flex flex-col">
     <header class="sticky top-0 z-50 h-16 bg-card border-b border-border flex items-center px-4 sm:px-6">
         <a asp-controller="Home" asp-action="Index" class="flex items-center gap-2 mr-4">
-            <i class="ri-remote-control-line text-2xl text-primary"></i>
-            <span class="font-semibold text-lg hidden sm:inline">RDP Gateway</span>
+            <partial name="_Logo" />
+            <span class="font-semibold text-lg hidden sm:inline">ZeroVDI</span>
         </a>
         <partial name="_NavActions" />
     </header>

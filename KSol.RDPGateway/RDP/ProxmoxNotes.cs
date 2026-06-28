@@ -9,8 +9,8 @@ namespace KSol.RDPGateway.RDP;
 ///
 /// The binding between a VM and its <see cref="RDPResource"/> row is the <c>ksol-rdpgw-id</c>
 /// property stamped into the notes JSON — not the (node, VMID) tuple — so the binding survives a
-/// live-migration to another node and any re-discovery. The same JSON object may carry an
-/// <c>rdp</c> object with <see cref="RdpOptions"/> and a <c>description</c> string.
+/// live-migration to another node and any re-discovery. The same JSON object may carry a
+/// <c>description</c> string.
 ///
 /// Notes that are not JSON are preserved: on write they are moved under <c>description</c> rather
 /// than discarded.
@@ -19,11 +19,6 @@ public static class ProxmoxNotes
 {
     public const string IdProperty = "ksol-rdpgw-id";
     public const string ExcludeProperty = "ksol-rdpgw-exclude";
-
-    private static readonly JsonSerializerOptions ReadOptions = new()
-    {
-        PropertyNameCaseInsensitive = true,
-    };
 
     /// <summary>The gateway resource id stamped in the notes, or null if not present/parseable.</summary>
     public static string? ReadId(string? notes)
@@ -86,21 +81,9 @@ public static class ProxmoxNotes
         return null;
     }
 
-    /// <summary>The "rdp" options object from the notes JSON, if present and valid.</summary>
-    public static RdpOptions? ReadRdpOptions(string? notes)
-    {
-        var obj = TryParseObject(notes);
-        if (obj != null && obj.TryGetPropertyValue("rdp", out var rdp) && rdp is JsonObject)
-        {
-            try { return rdp.Deserialize<RdpOptions>(ReadOptions); }
-            catch (JsonException) { return null; }
-        }
-        return null;
-    }
-
     /// <summary>
     /// Returns notes JSON identical to <paramref name="existingNotes"/> but with
-    /// <c>ksol-rdpgw-id</c> set to <paramref name="id"/>, preserving any existing <c>rdp</c> /
+    /// <c>ksol-rdpgw-id</c> set to <paramref name="id"/>, preserving any existing
     /// <c>description</c> content. Free-text notes are moved under <c>description</c>.
     /// </summary>
     public static string WriteId(string? existingNotes, string id)

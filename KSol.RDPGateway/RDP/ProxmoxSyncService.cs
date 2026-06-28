@@ -150,15 +150,14 @@ public class ProxmoxSyncService : BackgroundService
             res.ProxmoxNode = vm.Node;
             res.ProxmoxVmId = vm.VmId;
             res.Name = string.IsNullOrWhiteSpace(vm.Name) ? $"vm-{vm.VmId}" : vm.Name;
-            res.PowerState = MapState(vm.Status);
             res.ConfigJson = notes;
 
             var desc = ProxmoxNotes.ReadDescription(notes);
             if (desc != null) res.Description = desc;
-            var opts = ProxmoxNotes.ReadRdpOptions(notes);
-            if (opts != null) res.RdpOptions = opts;
 
-            if (res.PowerState == ResourcePowerState.Running)
+            // Refresh the guest IP while the VM is up so the status probe loop (ResourceStatusService)
+            // and connect-time resolve have a current address. Power state itself is owned by that loop.
+            if (string.Equals(vm.Status, "running", StringComparison.OrdinalIgnoreCase))
             {
                 var ip = await _proxmox.GetGuestIpAsync(backend, vm.Node, vm.VmId, ct);
                 if (ip != null) res.IpAddress = ip;
@@ -210,12 +209,4 @@ public class ProxmoxSyncService : BackgroundService
         _logger.LogInformation("Proxmox sync[{BackendId}]: removed {Count} excluded/template row(s) for VM {VmId}",
             backendId, rows.Count, vmid);
     }
-
-    private static ResourcePowerState MapState(string status) => status.ToLowerInvariant() switch
-    {
-        "running" => ResourcePowerState.Running,
-        "stopped" => ResourcePowerState.Stopped,
-        "suspended" or "paused" => ResourcePowerState.Suspended,
-        _ => ResourcePowerState.Unknown,
-    };
 }

@@ -29,10 +29,21 @@ public enum WakeMethod
     Ipmi = 2,
 }
 
+/// <summary>How to gracefully shut down a manual resource when it goes idle.</summary>
+public enum ShutdownMethod
+{
+    None = 0,
+    /// <summary>SSH into the host and run a shutdown command (Linux/macOS).</summary>
+    Ssh = 1,
+    /// <summary>Send an ACPI soft power-off over IPMI (shares the wake IPMI config).</summary>
+    Ipmi = 2,
+    /// <summary>Remote Windows shutdown via Samba's <c>net rpc shutdown</c>.</summary>
+    Windows = 3,
+}
+
 /// <summary>Last known power state of a resource's backing machine.</summary>
 public enum ResourcePowerState
 {
-    Unknown = 0,
     Running = 1,
     Stopped = 2,
     Suspended = 3,
@@ -81,18 +92,13 @@ public class RDPResource
     public int? ProxmoxVmId { get; set; }
 
     // --- Lifecycle ---
-    public ResourcePowerState PowerState { get; set; } = ResourcePowerState.Unknown;
+    public ResourcePowerState PowerState { get; set; } = ResourcePowerState.Stopped;
     /// <summary>UTC time of the last connect/disconnect activity; drives idle pausing.</summary>
     public DateTime? LastActivityUtc { get; set; }
 
     /// <summary>
-    /// Configurable .rdp options for this resource. Persisted as an owned/JSON value; never null.
-    /// </summary>
-    public RdpOptions RdpOptions { get; set; } = new();
-
-    /// <summary>
-    /// For Proxmox resources, the raw JSON read from the VM notes/description field (the source the
-    /// <see cref="RdpOptions"/> were parsed from). Kept for diagnostics and round-tripping.
+    /// For Proxmox resources, the raw JSON read from the VM notes/description field. Kept for
+    /// diagnostics and round-tripping.
     /// </summary>
     public string? ConfigJson { get; set; }
 
@@ -103,6 +109,7 @@ public class RDPResource
 
     public OsType OsType { get; set; } = OsType.Windows;
     public WakeMethod WakeMethod { get; set; } = WakeMethod.None;
+    public ShutdownMethod ShutdownMethod { get; set; } = ShutdownMethod.None;
 
     /// <summary>MAC address for Wake-on-LAN (AA:BB:CC:DD:EE:FF).</summary>
     public string? WolMacAddress { get; set; }
@@ -119,6 +126,11 @@ public class RDPResource
     public string? ProtectedSshKey { get; set; }
     /// <summary>Custom shutdown command (defaults based on OsType if null).</summary>
     public string? ShutdownCommand { get; set; }
+
+    /// <summary>Windows admin user for remote shutdown via <c>net rpc shutdown</c>.</summary>
+    public string? WindowsUser { get; set; }
+    /// <summary>Encrypted via CredentialProtector.</summary>
+    public string? ProtectedWindowsPassword { get; set; }
 
     List<RDPResourceUserAuthorization>? UserAuthorizations { get; set; }
 }

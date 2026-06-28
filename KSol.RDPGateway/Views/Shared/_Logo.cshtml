@@ -1,0 +1,20 @@
+@{
+    // ZeroVDI "0VDI" wordmark. Inlined (not an <img>) so the SVG's currentColor resolves to the
+    // active theme accent (text-primary) and follows whatever theme the user selects. Grayscale is
+    // baked in via per-letter opacity. Size via the optional model (a height utility), e.g.
+    // await Html.PartialAsync("_Logo", "h-9").
+    var sizeClass = (Model as string) ?? "h-6";
+}
+<div class="logo"></div>
+<style>
+    .logo {
+        width: 60px;
+        height: 22px;
+        background: var(--primary);
+
+        -webkit-mask: url("/img/zerovdi-logo.svg") no-repeat center;
+        mask: url("/img/zerovdi-logo.svg") no-repeat center;
+        -webkit-mask-size: contain;
+        mask-size: contain;
+    }
+</style>

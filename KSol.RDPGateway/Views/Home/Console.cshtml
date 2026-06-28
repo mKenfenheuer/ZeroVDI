@@ -11,7 +11,9 @@
     var storedUser = autoConnect ? "sso" : "";
     var storedPassword = autoConnect ? "sso" : "";
     var storedDomain = "";
-    var defaults = ViewData["Defaults"] as ConnectionDefaults;
+    // Fall back to a fresh ConnectionDefaults so the model's defaults (all session + visual options on)
+    // drive the popup when this (user, resource) has nothing stored yet.
+    var defaults = ViewData["Defaults"] as ConnectionDefaults ?? new ConnectionDefaults();
     var recordingNotice = ViewData["RecordingNotice"] is true;
 }
 <!DOCTYPE html>
@@ -21,7 +23,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>@resourceName — RDP Console</title>
     <link rel="stylesheet" href="~/lib/fontawesome/css/all.min.css" />
-    <link rel="stylesheet" href="~/lib/bootstrap/dist/css/bootstrap.min.css" />
+    @* The redesigned overlays (preflight, login, reconnect, clipboard) use the Tailwind design system.
+       Load the same bundle + icons + pre-paint theme script as the rest of the app so they match. *@
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/remixicon@4.5.0/fonts/remixicon.css" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="~/css/app.css" asp-append-version="true" />
+    <script>
+        (function () {
+            try {
+                var theme = localStorage.getItem('rdpgw-theme') || 'blue';
+                var mode = localStorage.getItem('rdpgw-mode') || 'light';
+                document.documentElement.setAttribute('data-theme', theme);
+                if (mode === 'dark') document.documentElement.classList.add('dark');
+            } catch (e) { /* localStorage unavailable — fall back to defaults */ }
+        })();
+    </script>
     <style>
         html, body { height: 100%; margin: 0; background: #1a1a1a; color: #eee; overflow: hidden; }
 
@@ -62,17 +78,79 @@
         #pointer-cache { display: none; }
         .pointer-cache-null { cursor: none; }
         .pointer-cache-default { cursor: default; }
+        /* Preflight overlay: the readiness flow (start VM, wait for guest agent / IP / RDP) shown before
+           the login form or auto-connect. Ensures even a direct link to the console runs the start
+           process. Uses the Tailwind design system (see markup for classes). */
+        #preflight-overlay {
+            position: fixed; inset: 0; z-index: 33; display: flex; align-items: center; justify-content: center;
+            background: rgba(0,0,0,.85);
+        }
+        #preflight-overlay.hidden { display: none !important; }
+
+        /* Animated connection icon at the top of the preflight popup: a remote-control glyph with two
+           concentric "signal" rings that pulse outward, conveying an in-progress connection attempt.
+           Switches to a steady error tint when the flow fails (.failed on the wrapper). */
+        #pf-icon {
+            position: relative; width: 4.5rem; height: 4.5rem; display: flex;
+            align-items: center; justify-content: center; flex-shrink: 0;
+        }
+        #pf-icon .pf-icon-core {
+            position: relative; z-index: 2; width: 3rem; height: 3rem; border-radius: 9999px;
+            display: flex; align-items: center; justify-content: center;
+            background: var(--color-primary); color: var(--color-primary-foreground);
+            box-shadow: 0 4px 14px rgba(0,0,0,.18);
+        }
+        #pf-icon .pf-icon-core i { font-size: 1.5rem; animation: pf-bob 1.8s ease-in-out infinite; }
+        #pf-icon .pf-ring {
+            position: absolute; inset: 0; border-radius: 9999px; z-index: 1;
+            border: 2px solid var(--color-primary);
+            animation: pf-ping 1.8s cubic-bezier(0, 0, 0.2, 1) infinite;
+        }
+        #pf-icon .pf-ring.pf-ring-2 { animation-delay: .9s; }
+        @@keyframes pf-ping {
+            0%   { transform: scale(.55); opacity: .7; }
+            80%, 100% { transform: scale(1); opacity: 0; }
+        }
+        @@keyframes pf-bob {
+            0%, 100% { transform: translateY(0); }
+            50%      { transform: translateY(-2px); }
+        }
+        /* Progress bar: animated pulse sweeping left-to-right in the direction of progress.
+           Set the fill colour from the theme variable directly: Bootstrap (loaded on this page) also
+           defines a .bg-primary utility with !important that would otherwise force its own blue, so we
+           can't rely on the Tailwind bg-primary class here. Matches the #pf-icon core colour. */
+        #pf-progress-bar {
+            position: relative;
+            overflow: hidden;
+            background-color: var(--color-primary);
+        }
+        #pf-progress-bar::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(90deg, transparent 0%, color-mix(in srgb, var(--color-primary-foreground) 35%, transparent) 50%, transparent 100%);
+            transform: translateX(-100%);
+            animation: pf-bar-sweep 1.4s ease-in-out infinite;
+        }
+        #pf-progress-bar.done::after { animation: none; opacity: 0; }
+        @@keyframes pf-bar-sweep {
+            0%   { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+        /* Failed state: stop the pulsing, tint everything with the destructive colour. */
+        #pf-icon.failed .pf-icon-core { background: var(--color-destructive); }
+        #pf-icon.failed .pf-icon-core i { animation: none; }
+        #pf-icon.failed .pf-ring { animation: none; opacity: 0; }
+        @@media (prefers-reduced-motion: reduce) {
+            #pf-icon .pf-icon-core i, #pf-icon .pf-ring { animation: none; }
+            #pf-icon .pf-ring { opacity: .25; transform: scale(.85); }
+            #pf-progress-bar::after { animation: none; opacity: 0; }
+        }
+
         #login-overlay {
             position: fixed; inset: 0; z-index: 30; display: flex; align-items: center; justify-content: center;
             background: rgba(0,0,0,.85);
         }
-        #login-card { width: 360px; max-width: 90vw; background: #2a2a2a; border: 1px solid #444;
-            border-radius: 8px; padding: 1.25rem; }
-        #login-card h5 { margin-bottom: 1rem; }
-        #login-card label { font-size: .8rem; color: #bbb; }
-        .form-control { background: #1e1e1e; color: #eee; border-color: #555; }
-        .form-control:focus { background: #1e1e1e; color: #eee; }
-        #login-error { color: #f88; font-size: .85rem; min-height: 1.2em; }
         /* Auto-connect / SSO sessions never show the login form: it's hidden outright so the page goes
            straight to connecting. */
         #login-overlay.hidden { display: none !important; }
@@ -84,12 +162,6 @@
             background: rgba(0,0,0,.85);
         }
         #reconnect-overlay.show { display: flex; }
-        #reconnect-card {
-            width: 320px; max-width: 90vw; background: #2a2a2a; border: 1px solid #444;
-            border-radius: 8px; padding: 1.25rem; text-align: center;
-        }
-        #reconnect-card h5 { margin-bottom: .75rem; }
-        #reconnect-msg { color: #bbb; font-size: .85rem; min-height: 1.2em; margin-bottom: 1rem; }
         .btn-session-control {
             appearance: none;
             background: transparent;
@@ -146,21 +218,13 @@
             background: rgba(0,0,0,.55);
         }
         #clip-overlay.show { display: flex; }
-        #clip-card {
-            width: 520px; max-width: 92vw; background: #2a2a2a; border: 1px solid #444;
-            border-radius: 8px; padding: 1rem 1.1rem; box-shadow: 0 8px 30px rgba(0,0,0,.5);
-        }
-        #clip-card h6 { margin: 0 0 .25rem; font-weight: 600; }
-        #clip-card .clip-sub { font-size: .76rem; color: #999; margin-bottom: .6rem; }
+        #clip-card { width: 520px; max-width: 92vw; }
         #clip-text {
-            width: 100%; min-height: 180px; resize: vertical; font-family: var(--bs-font-monospace, monospace);
-            font-size: .85rem; background: #1e1e1e; color: #eee; border: 1px solid #555;
-            border-radius: 6px; padding: .5rem .6rem;
+            width: 100%; min-height: 180px; resize: vertical;
+            font-family: var(--font-mono, monospace); font-size: .85rem;
         }
-        #clip-text:focus { outline: none; border-color: #6aa7ff; }
         #clip-actions { display: flex; align-items: center; gap: .5rem; margin-top: .65rem; }
-        #clip-actions .clip-hint { font-size: .74rem; color: #8c9; margin-left: auto; min-height: 1em; }
-        #clip-actions .clip-hint.muted { color: #888; }
+        #clip-actions .clip-hint { font-size: .74rem; margin-left: auto; min-height: 1em; }
     </style>
 </head>
 <body>
@@ -175,6 +239,46 @@
             <button type="button" class="rec-close" id="rec-banner-close" title="Dismiss">&times;</button>
         </div>
     }
+    @* Preflight overlay — the readiness flow (start/resume the VM, wait for guest agent, IP, RDP probe).
+       Runs on page load BEFORE the login form / auto-connect, so even a direct link to the console kicks
+       off the start process. On success it hands over to the login overlay (or auto-connect). *@
+    <div id="preflight-overlay">
+        <div class="card-surface p-6 w-[26rem] max-w-[90vw]">
+            <div class="flex flex-col items-center text-center mb-5">
+                <div id="pf-icon" class="mb-3">
+                    <span class="pf-ring"></span>
+                    <span class="pf-ring pf-ring-2"></span>
+                    <span class="pf-icon-core"><i class="ri-remote-control-line"></i></span>
+                </div>
+                <h1 class="text-base font-semibold truncate max-w-full">@resourceName</h1>
+                <p id="pf-message" class="text-sm text-muted-foreground">Checking resource…</p>
+            </div>
+
+            <div class="mb-2">
+                <div class="flex items-center gap-2 mb-2 text-sm font-medium text-foreground">
+                    <span id="pf-step-label">Checking resource…</span>
+                </div>
+                <div class="h-2 rounded-full bg-muted ring-1 ring-border/50 overflow-hidden">
+                    <div id="pf-progress-bar" class="h-full rounded-full transition-all duration-500 ease-out" style="width: 0%"></div>
+                </div>
+                <p id="pf-step-counter" class="mt-1.5 text-xs text-muted-foreground"></p>
+            </div>
+
+            <div id="pf-error" class="alert-error mt-4 hidden">
+                <i class="ri-error-warning-line text-destructive text-lg"></i>
+                <div class="text-sm flex-1">
+                    <p id="pf-error-text" class="font-medium"></p>
+                    <p class="text-muted-foreground mt-0.5">If this keeps happening, contact an administrator.</p>
+                </div>
+            </div>
+
+            <div id="pf-actions" class="flex items-center gap-2 mt-4 hidden">
+                <button id="pf-retry" type="button" class="btn-primary"><i class="ri-refresh-line"></i> Try again</button>
+                <a asp-controller="Home" asp-action="Index" class="btn-ghost">Cancel</a>
+            </div>
+        </div>
+    </div>
+
     <div id="reveal-zone"></div>
     <div id="floatbar" class="hidden">
         <span class="name">@resourceName</span>
@@ -198,16 +302,16 @@
        by the floatbar clipboard button. The textarea shows text the remote copied and is the source for
        "Send to remote". *@
     <div id="clip-overlay">
-        <div id="clip-card">
-            <h6>Clipboard</h6>
-            <div class="clip-sub">Edit the text and send it to the remote session, or copy text the
+        <div id="clip-card" class="card-surface p-5">
+            <h6 class="text-base font-semibold mb-1">Clipboard</h6>
+            <div class="text-xs text-muted-foreground mb-3">Edit the text and send it to the remote session, or copy text the
                 remote put on its clipboard from here.</div>
-            <textarea id="clip-text" placeholder="Type or paste text here, then “Send to remote”…"></textarea>
+            <textarea id="clip-text" class="form-input" placeholder="Type or paste text here, then “Send to remote”…"></textarea>
             <div id="clip-actions">
-                <button class="btn btn-primary btn-sm" type="button" id="clip-send">Send to remote</button>
-                <button class="btn btn-outline-secondary btn-sm" type="button" id="clip-copy">Copy</button>
-                <button class="btn btn-outline-secondary btn-sm" type="button" id="clip-close">Close</button>
-                <span class="clip-hint" id="clip-hint"></span>
+                <button class="btn-primary" type="button" id="clip-send">Send to remote</button>
+                <button class="btn-secondary" type="button" id="clip-copy">Copy</button>
+                <button class="btn-ghost" type="button" id="clip-close">Close</button>
+                <span class="clip-hint text-success" id="clip-hint"></span>
             </div>
         </div>
     </div>
@@ -215,118 +319,126 @@
     @* Reconnect popup — shown when an auto-connect (SSO) session drops. The full login form is hidden
        for SSO sessions, so instead of re-rendering it on disconnect we offer a single Reconnect button. *@
     <div id="reconnect-overlay">
-        <div id="reconnect-card">
-            <h5>Session disconnected</h5>
-            <div id="reconnect-msg"></div>
-            <div class="d-grid">
-                <button class="btn btn-primary btn-sm" type="button" id="btn-reconnect">Reconnect</button>
+        <div id="reconnect-card" class="card-surface p-6 w-80 max-w-[90vw] text-center">
+            <div class="w-11 h-11 rounded-xl bg-primary/10 text-primary flex items-center justify-center mx-auto mb-3">
+                <i class="ri-link-unlink text-2xl"></i>
             </div>
+            <h5 class="text-base font-semibold mb-1">Session disconnected</h5>
+            <div id="reconnect-msg" class="text-sm text-muted-foreground min-h-[1.2em] mb-4"></div>
+            <button class="btn-primary w-full justify-center" type="button" id="btn-reconnect"><i class="ri-refresh-line"></i> Reconnect</button>
         </div>
     </div>
 
-    <div id="login-overlay" class="@(autoConnect ? "hidden" : "")">
-        <div id="login-card">
-            <h5>Connect to @resourceName</h5>
-            <form id="login-form" autocomplete="off">
-                <div class="mb-2">
-                    <label for="vm-user">Username</label>
-                    <input class="form-control form-control-sm" id="vm-user" value="@storedUser" autocomplete="username" />
+    @* Hidden on load: the preflight overlay runs first and reveals this (manual sessions) or triggers
+       auto-connect (SSO) once the resource is ready. *@
+    <div id="login-overlay" class="hidden">
+        <div id="login-card" class="card-surface p-6 w-[26rem] max-w-[90vw] max-h-[90vh] overflow-y-auto">
+            <div class="flex items-center gap-3 mb-4">
+                <div class="w-11 h-11 rounded-xl bg-primary/10 text-primary flex items-center justify-center flex-shrink-0">
+                    <i class="ri-computer-line text-2xl"></i>
                 </div>
-                <div class="mb-2">
-                    <label for="vm-pass">Password</label>
-                    <input class="form-control form-control-sm" id="vm-pass" type="password" value="@storedPassword" autocomplete="current-password" />
+                <h5 class="text-base font-semibold truncate">Connect to @resourceName</h5>
+            </div>
+            <form id="login-form" autocomplete="off" class="space-y-3">
+                <div>
+                    <label for="vm-user" class="form-label">Username</label>
+                    <input class="form-input" id="vm-user" value="@storedUser" autocomplete="username" />
                 </div>
-                <div class="mb-2">
-                    <label for="vm-domain">Domain <span class="text-muted">(optional)</span></label>
-                    <input class="form-control form-control-sm" id="vm-domain" value="@storedDomain" />
+                <div>
+                    <label for="vm-pass" class="form-label">Password</label>
+                    <input class="form-input" id="vm-pass" type="password" value="@storedPassword" autocomplete="current-password" />
+                </div>
+                <div>
+                    <label for="vm-domain" class="form-label">Domain <span class="text-muted-foreground font-normal">(optional)</span></label>
+                    <input class="form-input" id="vm-domain" value="@storedDomain" />
                 </div>
 
-                <details class="mb-2">
-                    <summary style="cursor:pointer; font-size:.82rem; color:#bbb;">Session options</summary>
-                    <div class="mt-2">
-                        <div class="form-check form-check-sm">
-                            <input class="form-check-input" type="checkbox" id="opt-audio" checked="@(defaults?.Audio ?? true)" />
-                            <label class="form-check-label" for="opt-audio" style="font-size:.82rem;">Remote sound</label>
-                        </div>
-                        <div class="form-check form-check-sm">
-                            <input class="form-check-input" type="checkbox" id="opt-clipboard" checked="@(defaults?.Clipboard ?? true)" />
-                            <label class="form-check-label" for="opt-clipboard" style="font-size:.82rem;">Clipboard sync</label>
-                        </div>
-                        <div class="form-check form-check-sm">
-                            <input class="form-check-input" type="checkbox" id="opt-microphone" checked="@(defaults?.Microphone ?? true)"/>
-                            <label class="form-check-label" for="opt-microphone" style="font-size:.82rem;">Microphone (prompts for permission)</label>
-                        </div>
-                        <div class="form-check form-check-sm">
-                            <input class="form-check-input" type="checkbox" id="opt-camera" checked="@(defaults?.Camera ?? true)"/>
-                            <label class="form-check-label" for="opt-camera" style="font-size:.82rem;">Camera (prompts for permission)</label>
+                <details class="rounded-lg border border-border">
+                    <summary class="cursor-pointer select-none px-3 py-2 text-sm font-medium text-foreground">Session options</summary>
+                    <div class="px-3 pb-3 space-y-2">
+                        <label class="flex items-center gap-2 text-sm cursor-pointer">
+                            <input class="form-check" type="checkbox" id="opt-audio" checked="@(defaults?.Audio ?? true)" />
+                            <span>Remote sound</span>
+                        </label>
+                        <label class="flex items-center gap-2 text-sm cursor-pointer">
+                            <input class="form-check" type="checkbox" id="opt-clipboard" checked="@(defaults?.Clipboard ?? true)" />
+                            <span>Clipboard sync</span>
+                        </label>
+                        <label class="flex items-center gap-2 text-sm cursor-pointer">
+                            <input class="form-check" type="checkbox" id="opt-microphone" checked="@(defaults?.Microphone ?? true)"/>
+                            <span>Microphone (prompts for permission)</span>
+                        </label>
+                        <label class="flex items-center gap-2 text-sm cursor-pointer">
+                            <input class="form-check" type="checkbox" id="opt-camera" checked="@(defaults?.Camera ?? true)"/>
+                            <span>Camera (prompts for permission)</span>
+                        </label>
+
+                        <div class="pt-1">
+                            <label for="opt-gfx-mode" class="form-label">Display mode</label>
+                            @* GFX graphics pipeline + codec. "Legacy bitmaps" = the classic fastpath path
+                               (most compatible). The GFX modes use MS-RDPEGFX surfaces; H.264 needs the host
+                               to grant AVC over GFX (server GPU + the "Prioritize H.264/AVC 444" policy),
+                               otherwise the host streams ClearCodec, which we also decode. *@
+                            @{ var gfxMode = defaults?.GfxMode ?? "avc420"; }
+                            <select class="form-select" id="opt-gfx-mode">
+                                <option value="off" selected="@(gfxMode == "off")">Legacy bitmaps (most compatible)</option>
+                                <option value="clearcodec" selected="@(gfxMode == "clearcodec")">GFX — ClearCodec</option>
+                                <option value="avc420" selected="@(gfxMode == "avc420")">GFX — H.264 (AVC420), fallback ClearCodec</option>
+                                <option value="avc444" selected="@(gfxMode == "avc444")">GFX — H.264 (AVC444), fallback ClearCodec</option>
+                            </select>
                         </div>
 
-                        <div class="mt-2" style="font-size:.78rem; color:#999;">Display mode</div>
-                        @* GFX graphics pipeline + codec. "Legacy bitmaps" = the classic fastpath path
-                           (most compatible). The GFX modes use MS-RDPEGFX surfaces; H.264 needs the host
-                           to grant AVC over GFX (server GPU + the "Prioritize H.264/AVC 444" policy),
-                           otherwise the host streams ClearCodec, which we also decode. *@
-                        @{ var gfxMode = defaults?.GfxMode ?? "avc420"; }
-                        <select class="form-select form-select-sm" id="opt-gfx-mode" style="font-size:.82rem; max-width: 22rem;">
-                            <option value="off" selected="@(gfxMode == "off")">Legacy bitmaps (most compatible)</option>
-                            <option value="clearcodec" selected="@(gfxMode == "clearcodec")">GFX — ClearCodec</option>
-                            <option value="avc420" selected="@(gfxMode == "avc420")">GFX — H.264 (AVC420), fallback ClearCodec</option>
-                            <option value="avc444" selected="@(gfxMode == "avc444")">GFX — H.264 (AVC444), fallback ClearCodec</option>
-                        </select>
-
-                        <div class="mt-2" style="font-size:.78rem; color:#999;">Visual quality</div>
+                        <div class="pt-1 text-xs font-medium text-muted-foreground">Visual quality</div>
                         @* Performance flags. Checked = the named eye-candy / quality feature is ON.
                            Defaults below favour better visuals (font smoothing + composition, all
                            eye-candy left on). The data-perf attribute holds the RDP flag bit. *@
-                        <div class="form-check form-check-sm">
-                            <input class="form-check-input perf-flag" type="checkbox" id="perf-font" data-perf="ENABLE_FONT_SMOOTHING" checked />
-                            <label class="form-check-label" for="perf-font" style="font-size:.82rem;">Font smoothing (anti-alias)</label>
-                        </div>
-                        <div class="form-check form-check-sm">
-                            <input class="form-check-input perf-flag" type="checkbox" id="perf-comp" data-perf="ENABLE_DESKTOP_COMPOSITION" checked />
-                            <label class="form-check-label" for="perf-comp" style="font-size:.82rem;">Desktop composition (Aero)</label>
-                        </div>
-                        <div class="form-check form-check-sm">
-                            <input class="form-check-input perf-flag" type="checkbox" id="perf-wallpaper" data-perf="DISABLE_WALLPAPER" data-invert="1" checked />
-                            <label class="form-check-label" for="perf-wallpaper" style="font-size:.82rem;">Wallpaper</label>
-                        </div>
-                        <div class="form-check form-check-sm">
-                            <input class="form-check-input perf-flag" type="checkbox" id="perf-theming" data-perf="DISABLE_THEMING" data-invert="1" checked />
-                            <label class="form-check-label" for="perf-theming" style="font-size:.82rem;">Themes</label>
-                        </div>
-                        <div class="form-check form-check-sm">
-                            <input class="form-check-input perf-flag" type="checkbox" id="perf-drag" data-perf="DISABLE_FULLWINDOWDRAG" data-invert="1" checked />
-                            <label class="form-check-label" for="perf-drag" style="font-size:.82rem;">Show window contents while dragging</label>
-                        </div>
-                        <div class="form-check form-check-sm">
-                            <input class="form-check-input perf-flag" type="checkbox" id="perf-menu" data-perf="DISABLE_MENUANIMATIONS" data-invert="1" checked />
-                            <label class="form-check-label" for="perf-menu" style="font-size:.82rem;">Menu animations</label>
-                        </div>
-                        <div class="form-check form-check-sm">
-                            <input class="form-check-input perf-flag" type="checkbox" id="perf-cursorshadow" data-perf="DISABLE_CURSOR_SHADOW" data-invert="1" checked />
-                            <label class="form-check-label" for="perf-cursorshadow" style="font-size:.82rem;">Cursor shadow</label>
-                        </div>
-                        <div class="form-check form-check-sm">
-                            <input class="form-check-input perf-flag" type="checkbox" id="perf-cursorsettings" data-perf="DISABLE_CURSORSETTINGS" data-invert="1" checked />
-                            <label class="form-check-label" for="perf-cursorsettings" style="font-size:.82rem;">Cursor blink</label>
-                        </div>
+                        <label class="flex items-center gap-2 text-sm cursor-pointer">
+                            <input class="form-check perf-flag" type="checkbox" id="perf-font" data-perf="ENABLE_FONT_SMOOTHING" checked />
+                            <span>Font smoothing (anti-alias)</span>
+                        </label>
+                        <label class="flex items-center gap-2 text-sm cursor-pointer">
+                            <input class="form-check perf-flag" type="checkbox" id="perf-comp" data-perf="ENABLE_DESKTOP_COMPOSITION" checked />
+                            <span>Desktop composition (Aero)</span>
+                        </label>
+                        <label class="flex items-center gap-2 text-sm cursor-pointer">
+                            <input class="form-check perf-flag" type="checkbox" id="perf-wallpaper" data-perf="DISABLE_WALLPAPER" data-invert="1" checked />
+                            <span>Wallpaper</span>
+                        </label>
+                        <label class="flex items-center gap-2 text-sm cursor-pointer">
+                            <input class="form-check perf-flag" type="checkbox" id="perf-theming" data-perf="DISABLE_THEMING" data-invert="1" checked />
+                            <span>Themes</span>
+                        </label>
+                        <label class="flex items-center gap-2 text-sm cursor-pointer">
+                            <input class="form-check perf-flag" type="checkbox" id="perf-drag" data-perf="DISABLE_FULLWINDOWDRAG" data-invert="1" checked />
+                            <span>Show window contents while dragging</span>
+                        </label>
+                        <label class="flex items-center gap-2 text-sm cursor-pointer">
+                            <input class="form-check perf-flag" type="checkbox" id="perf-menu" data-perf="DISABLE_MENUANIMATIONS" data-invert="1" checked />
+                            <span>Menu animations</span>
+                        </label>
+                        <label class="flex items-center gap-2 text-sm cursor-pointer">
+                            <input class="form-check perf-flag" type="checkbox" id="perf-cursorshadow" data-perf="DISABLE_CURSOR_SHADOW" data-invert="1" checked />
+                            <span>Cursor shadow</span>
+                        </label>
+                        <label class="flex items-center gap-2 text-sm cursor-pointer">
+                            <input class="form-check perf-flag" type="checkbox" id="perf-cursorsettings" data-perf="DISABLE_CURSORSETTINGS" data-invert="1" checked />
+                            <span>Cursor blink</span>
+                        </label>
                     </div>
                 </details>
 
-                <div class="form-check form-check-sm mt-2">
-                    <input class="form-check-input" type="checkbox" id="opt-store-creds" />
-                    <label class="form-check-label" for="opt-store-creds" style="font-size:.82rem;">Store credentials for next time</label>
-                </div>
-                <div class="form-check form-check-sm">
-                    <input class="form-check-input" type="checkbox" id="opt-remember-settings" />
-                    <label class="form-check-label" for="opt-remember-settings" style="font-size:.82rem;">Remember these settings</label>
-                </div>
+                <label class="flex items-center gap-2 text-sm cursor-pointer">
+                    <input class="form-check" type="checkbox" id="opt-store-creds" />
+                    <span>Store credentials for next time</span>
+                </label>
+                <label class="flex items-center gap-2 text-sm cursor-pointer">
+                    <input class="form-check" type="checkbox" id="opt-remember-settings" />
+                    <span>Remember these settings</span>
+                </label>
 
-                <div id="login-error"></div>
-                <div class="d-grid mt-2">
-                    <button class="btn btn-primary btn-sm" type="submit" id="btn-connect">Connect</button>
-                </div>
-                <p class="text-muted mt-2 mb-0" style="font-size:.72rem;">
+                <div id="login-error" class="text-sm text-destructive min-h-[1.2em]"></div>
+                <button class="btn-primary w-full justify-center" type="submit" id="btn-connect">Connect</button>
+                <p class="text-xs text-muted-foreground mt-1 mb-0">
                     Credentials authenticate the desktop (NLA) over this HTTPS connection. When “Store credentials”
                     is checked they are saved encrypted to your account for one-click reconnect.
                 </p>
@@ -378,6 +490,7 @@
     <script>
         (function () {
             var wsUrl = "/ws/rdp/@resourceId";
+            var preflightOverlay = document.getElementById("preflight-overlay");
             var loginOverlay = document.getElementById("login-overlay");
             var loginError = document.getElementById("login-error");
             var reconnectOverlay = document.getElementById("reconnect-overlay");
@@ -691,19 +804,21 @@
             // couple of seconds after you stop interacting with it. The grip toggles a minimized
             // (name + status only) state that persists across reveals.
             var hideTimer = null;
-            function showBar() { floatbar.classList.remove("hidden"); }
+            // Only reveal the bar while a session is live — when disconnected / not yet connected there
+            // is nothing to control, so the bar stays hidden.
+            function showBar() { if (client.connected) floatbar.classList.remove("hidden"); }
             function scheduleAutoHide() {
                 if (hideTimer) clearTimeout(hideTimer);
                 hideTimer = setTimeout(function () {
-                    if (!client.connected) return;     // keep it visible while disconnected
+                    if (!client.connected) { floatbar.classList.add("hidden"); return; } // never linger while disconnected
                     if (floatbar.matches(":hover")) { scheduleAutoHide(); return; }
                     floatbar.classList.add("hidden");
                 }, 2200);
             }
             floatbar.addEventListener("mouseenter", function () { if (hideTimer) clearTimeout(hideTimer); });
             floatbar.addEventListener("mouseleave", scheduleAutoHide);
-            // Reveal when the pointer reaches the top edge of the screen.
-            revealZone.addEventListener("mouseenter", function () { showBar(); scheduleAutoHide(); });
+            // Reveal when the pointer reaches the top edge of the screen (only while connected).
+            revealZone.addEventListener("mouseenter", function () { if (!client.connected) return; showBar(); scheduleAutoHide(); });
             // Live remote resolution changes (MS-RDPEDISP). On a *genuine, settled* viewport change we
             // ask the server for a new resolution that fills the area. Guards against the spurious
             // resize/reflow events that fire right after connect (which must NOT trigger a layout —
@@ -726,26 +841,121 @@
 
             window.addEventListener("beforeunload", function () { client.disconnect(); });
 
-            // ---- SSO auto-connect -------------------------------------------------------------------
-            // Reflect the stored PerformanceFlags onto the perf checkboxes (so the existing submit
-            // handler reassembles the same mask), then submit the form programmatically. The submit
-            // handler reads all fields/checkboxes exactly as for a manual login; the only difference is
-            // client.js suppresses the credentials WS frame (window.RDP_AUTOCONNECT), since the gateway
-            // already holds the credentials for NLA.
-            if (window.RDP_AUTOCONNECT) {
-                var PERF = window.RDP_PERF || {};
-                var mask = window.RDP_DEFAULT_PERF | 0;
-                document.querySelectorAll(".perf-flag").forEach(function (cb) {
-                    var bit = PERF[cb.getAttribute("data-perf")] || 0;
-                    var set = bit ? (mask & bit) !== 0 : false;
-                    var invert = cb.getAttribute("data-invert") === "1";
-                    // checked = "keep eye-candy": for an inverted (DISABLE_*) flag, checked means the
-                    // bit is NOT set; for a plain ENABLE_* flag, checked means the bit IS set.
-                    cb.checked = invert ? !set : set;
-                });
-                var form = document.getElementById("login-form");
-                if (form.requestSubmit) form.requestSubmit(); else form.dispatchEvent(new Event("submit", { cancelable: true }));
+            // ---- session start (after preflight) ----------------------------------------------------
+            // Called once the preflight readiness flow reports the resource is up. For an SSO session it
+            // primes the perf checkboxes from the stored mask and auto-submits the (hidden) login form;
+            // for a manual session it reveals the login form so the user can enter credentials.
+            function startSession() {
+                if (window.RDP_AUTOCONNECT) {
+                    // Reflect the stored PerformanceFlags onto the perf checkboxes (so the existing submit
+                    // handler reassembles the same mask), then submit the form programmatically. The submit
+                    // handler reads all fields/checkboxes exactly as for a manual login; the only difference
+                    // is client.js suppresses the credentials WS frame (window.RDP_AUTOCONNECT), since the
+                    // gateway already holds the credentials for NLA.
+                    var PERF = window.RDP_PERF || {};
+                    var mask = window.RDP_DEFAULT_PERF | 0;
+                    document.querySelectorAll(".perf-flag").forEach(function (cb) {
+                        var bit = PERF[cb.getAttribute("data-perf")] || 0;
+                        var set = bit ? (mask & bit) !== 0 : false;
+                        var invert = cb.getAttribute("data-invert") === "1";
+                        // checked = "keep eye-candy": for an inverted (DISABLE_*) flag, checked means the
+                        // bit is NOT set; for a plain ENABLE_* flag, checked means the bit IS set.
+                        cb.checked = invert ? !set : set;
+                    });
+                    var form = document.getElementById("login-form");
+                    if (form.requestSubmit) form.requestSubmit(); else form.dispatchEvent(new Event("submit", { cancelable: true }));
+                } else {
+                    // Manual session: show the login form now that the resource is ready.
+                    loginOverlay.classList.remove("hidden");
+                    loginOverlay.style.display = "flex";
+                }
             }
+
+            // ---- preflight: resource readiness ------------------------------------------------------
+            // Before the login form / auto-connect, run the readiness flow (start/resume the VM, wait for
+            // the guest agent, IP and RDP probe) via /connect/{id}/begin + /status. This runs even on a
+            // direct link to the console, so the start process always happens. On success, startSession()
+            // takes over; on failure, an error + "Try again" is shown in the preflight card.
+            var pfBar = document.getElementById("pf-progress-bar");
+            var pfMessage = document.getElementById("pf-message");
+            var pfStepLabel = document.getElementById("pf-step-label");
+            var pfStepCounter = document.getElementById("pf-step-counter");
+            var pfError = document.getElementById("pf-error");
+            var pfErrorText = document.getElementById("pf-error-text");
+            var pfActions = document.getElementById("pf-actions");
+            var pfRetry = document.getElementById("pf-retry");
+            var pfIcon = document.getElementById("pf-icon");
+            var pfId = window.RDP_RESOURCE_ID;
+            var pfLabels = {
+                checking: "Checking resource…",
+                starting: "Starting resource…",
+                guestagent: "Waiting for guest agent…",
+                waitingip: "Waiting for IP address…",
+                rdpprobe: "Waiting for remote desktop…",
+                finalizing: "Finalizing connection…",
+                ready: "Ready"
+            };
+            var pfOrder = ["checking", "starting", "guestagent", "waitingip", "rdpprobe", "finalizing", "ready"];
+            var pfStepCount = pfOrder.length - 1; // 'ready' is completion, not a step
+
+            function pfRender(phase) {
+                var idx = pfOrder.indexOf(phase);
+                if (idx < 0) return;
+                pfBar.style.width = Math.round((idx / pfStepCount) * 100) + "%";
+                pfBar.classList.toggle("done", idx === pfOrder.length - 1);
+                if (idx === pfOrder.length - 1) {
+                    pfStepLabel.textContent = pfLabels.ready;
+                    pfStepCounter.textContent = "";
+                } else {
+                    pfStepLabel.textContent = pfLabels[phase] || phase;
+                    pfStepCounter.textContent = "Step " + (idx + 1) + " of " + pfStepCount;
+                }
+            }
+
+            function pfFail(message) {
+                pfErrorText.textContent = message || "The connection could not be prepared.";
+                pfError.classList.remove("hidden");
+                pfActions.classList.remove("hidden");
+                pfBar.className = "h-full rounded-full bg-destructive transition-all duration-500 ease-out";
+                pfIcon.classList.add("failed"); // stop the pulse, tint the icon red
+            }
+
+            // Apply a status DTO; returns true when the flow is terminal (ready or failed).
+            function pfApply(dto) {
+                if (!dto) return false;
+                if (dto.message) pfMessage.textContent = dto.message;
+                if (dto.failed) { pfFail(dto.error || dto.message); return true; }
+                pfRender(dto.phase);
+                if (dto.done) {
+                    pfMessage.textContent = "Connecting…";
+                    preflightOverlay.classList.add("hidden");
+                    startSession();
+                    return true;
+                }
+                return false;
+            }
+
+            function pfPoll() {
+                fetch("/connect/" + encodeURIComponent(pfId) + "/status", { headers: { "Accept": "application/json" } })
+                    .then(function (r) { return r.json(); })
+                    .then(function (dto) { if (!pfApply(dto)) setTimeout(pfPoll, 1000); })
+                    .catch(function () { setTimeout(pfPoll, 2000); });
+            }
+
+            function pfBegin() {
+                pfError.classList.add("hidden");
+                pfActions.classList.add("hidden");
+                pfIcon.classList.remove("failed"); // resume the pulsing animation
+                pfBar.className = "h-full rounded-full transition-all duration-500 ease-out";
+                pfRender("checking");
+                fetch("/connect/" + encodeURIComponent(pfId) + "/begin", { method: "POST", headers: { "Accept": "application/json" } })
+                    .then(function (r) { return r.json(); })
+                    .then(function (dto) { if (!pfApply(dto)) pfPoll(); })
+                    .catch(function () { pfFail("Could not reach the gateway."); });
+            }
+
+            pfRetry.addEventListener("click", function (e) { e.preventDefault(); pfBegin(); });
+            pfBegin();
         })();
     </script>
 </body>

@@ -3,6 +3,7 @@ using System;
 using KSol.RDPGateway.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace KSol.RDPGateway.Data.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260628204219_RemoveRdpOptions")]
+    partial class RemoveRdpOptions
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "9.0.0");
@@ -170,9 +173,6 @@ namespace KSol.RDPGateway.Data.Migrations
                     b.Property<string>("ProtectedSshKey")
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("ProtectedWindowsPassword")
-                        .HasColumnType("TEXT");
-
                     b.Property<int?>("ProxmoxBackendId")
                         .HasColumnType("INTEGER");
 
@@ -185,9 +185,6 @@ namespace KSol.RDPGateway.Data.Migrations
                     b.Property<string>("ShutdownCommand")
                         .HasColumnType("TEXT");
 
-                    b.Property<int>("ShutdownMethod")
-                        .HasColumnType("INTEGER");
-
                     b.Property<int>("Source")
                         .HasColumnType("INTEGER");
 
@@ -196,9 +193,6 @@ namespace KSol.RDPGateway.Data.Migrations
 
                     b.Property<int>("WakeMethod")
                         .HasColumnType("INTEGER");
-
-                    b.Property<string>("WindowsUser")
-                        .HasColumnType("TEXT");
 
                     b.Property<string>("WolMacAddress")
                         .HasColumnType("TEXT");

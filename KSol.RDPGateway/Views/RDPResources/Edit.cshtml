@@ -22,6 +22,16 @@
     <div class="flex items-center gap-2">
         <span class="@(isProxmox ? "badge-primary" : "badge-muted")">@r.Source</span>
         <partial name="_PowerStateBadge" model="r.PowerState" />
+        @if (r.PowerState == ResourcePowerState.Running || r.PowerState == ResourcePowerState.Starting)
+        {
+            <form asp-action="Stop" asp-route-id="@r.Id" method="post"
+                  onsubmit="return confirm('Shut down this resource now?');">
+                @Html.AntiForgeryToken()
+                <button type="submit" class="btn-outline text-destructive border-destructive/40 hover:bg-destructive/10">
+                    <i class="ri-shut-down-line"></i> Shut down
+                </button>
+            </form>
+        }
         <a asp-action="Index" class="btn-secondary"><i class="ri-arrow-left-line"></i> Back</a>
     </div>
 }
@@ -68,11 +78,7 @@
 
             @if (isProxmox)
             {
-                <p class="text-sm text-muted-foreground">Address and RDP options are synced from the VM notes and not editable here.</p>
-            }
-            else
-            {
-                <partial name="_RdpOptionsEditor" for="Resource.RdpOptions" />
+                <p class="text-sm text-muted-foreground">Address is synced from the VM notes and not editable here. Session options live in the "Connection" tab.</p>
             }
 
             @if (isManual)
@@ -120,13 +126,24 @@
                         </div>
                     </div>
 
-                    <div class="border-t border-border pt-4">
-                        <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">Remote shutdown</h3>
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div class="border-t border-border pt-4 space-y-4">
+                        <div class="flex items-end gap-4">
+                            <div class="md:w-1/3">
+                                <label class="form-label">Shutdown method</label>
+                                <select name="ShutdownMethod" id="shutdown-method" class="form-select">
+                                    <option value="0" selected="@(r.ShutdownMethod == ShutdownMethod.None)">None</option>
+                                    <option value="1" selected="@(r.ShutdownMethod == ShutdownMethod.Ssh)">SSH (Linux/macOS)</option>
+                                    <option value="2" selected="@(r.ShutdownMethod == ShutdownMethod.Ipmi)">IPMI (ACPI soft off)</option>
+                                    <option value="3" selected="@(r.ShutdownMethod == ShutdownMethod.Windows)">Windows (net rpc)</option>
+                                </select>
+                            </div>
+                            <p class="form-hint pb-2">IPMI reuses the wake IPMI host &amp; credentials above.</p>
+                        </div>
+
+                        <div id="shutdown-ssh-fields" class="grid grid-cols-1 md:grid-cols-3 gap-4 @(r.ShutdownMethod != ShutdownMethod.Ssh ? "hidden" : "")">
                             <div>
                                 <label class="form-label">SSH user</label>
                                 <input name="SshUser" value="@r.SshUser" class="form-input" placeholder="root" />
-                                <p class="form-hint">For Linux/macOS shutdown.</p>
                             </div>
                             <div>
                                 <label class="form-label">SSH private key</label>
@@ -134,9 +151,26 @@
                             </div>
                             <div>
                                 <label class="form-label">Shutdown command</label>
-                                <input name="ShutdownCommand" value="@r.ShutdownCommand" class="form-input" placeholder="Auto-detected from OS type" />
+                                <input name="ShutdownCommand" value="@r.ShutdownCommand" class="form-input" placeholder="shutdown -h now" />
                             </div>
                         </div>
+
+                        <div id="shutdown-windows-fields" class="grid grid-cols-1 md:grid-cols-3 gap-4 @(r.ShutdownMethod != ShutdownMethod.Windows ? "hidden" : "")">
+                            <div>
+                                <label class="form-label">Windows user</label>
+                                <input name="WindowsUser" value="@r.WindowsUser" class="form-input" placeholder="Administrator" />
+                                <p class="form-hint">Local or DOMAIN\\user with shutdown rights.</p>
+                            </div>
+                            <div>
+                                <label class="form-label">Windows password</label>
+                                <input name="windowsPassword" type="password" class="form-input" placeholder="@(string.IsNullOrEmpty(r.ProtectedWindowsPassword) ? "" : "••••••••")" autocomplete="new-password" />
+                                <p class="form-hint">Leave blank to keep existing.</p>
+                            </div>
+                        </div>
+
+                        <p id="shutdown-ipmi-note" class="form-hint @(r.ShutdownMethod != ShutdownMethod.Ipmi ? "hidden" : "")">
+                            Sends an ACPI soft power-off to the IPMI host configured under "Wake method".
+                        </p>
                     </div>
                 </div>
             }
@@ -378,6 +412,20 @@
                     var ipmiFields = document.getElementById('ipmi-fields');
                     if (wolFields) wolFields.classList.toggle('hidden', v !== '1');
                     if (ipmiFields) ipmiFields.classList.toggle('hidden', v !== '2');
+                });
+            }
+
+            // Shutdown method toggle
+            var shutdownSelect = document.getElementById('shutdown-method');
+            if (shutdownSelect) {
+                shutdownSelect.addEventListener('change', function () {
+                    var v = this.value;
+                    var sshFields = document.getElementById('shutdown-ssh-fields');
+                    var winFields = document.getElementById('shutdown-windows-fields');
+                    var ipmiNote = document.getElementById('shutdown-ipmi-note');
+                    if (sshFields) sshFields.classList.toggle('hidden', v !== '1');
+                    if (winFields) winFields.classList.toggle('hidden', v !== '3');
+                    if (ipmiNote) ipmiNote.classList.toggle('hidden', v !== '2');
                 });
             }
 

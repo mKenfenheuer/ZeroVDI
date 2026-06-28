@@ -17,9 +17,7 @@ public class IdleReaperService : BackgroundService
     private readonly ProxmoxClient _proxmox;
     private readonly ProxmoxBackendProvider _backends;
     private readonly SessionTracker _sessions;
-    private readonly SshCommandService _ssh;
-    private readonly IpmiClient _ipmi;
-    private readonly CredentialProtector _credentials;
+    private readonly ResourceShutdownService _shutdown;
     private readonly ILogger<IdleReaperService> _logger;
 
     public IdleReaperService(
@@ -27,18 +25,14 @@ public class IdleReaperService : BackgroundService
         ProxmoxClient proxmox,
         ProxmoxBackendProvider backends,
         SessionTracker sessions,
-        SshCommandService ssh,
-        IpmiClient ipmi,
-        CredentialProtector credentials,
+        ResourceShutdownService shutdown,
         ILogger<IdleReaperService> logger)
     {
         _scopeFactory = scopeFactory;
         _proxmox = proxmox;
         _backends = backends;
         _sessions = sessions;
-        _ssh = ssh;
-        _ipmi = ipmi;
-        _credentials = credentials;
+        _shutdown = shutdown;
         _logger = logger;
     }
 
@@ -132,42 +126,10 @@ public class IdleReaperService : BackgroundService
             if (_sessions.HasActiveSessions(res.Id)) continue;
             if (res.LastActivityUtc == null || res.LastActivityUtc > cutoff) continue;
 
-            _logger.LogInformation("Idle reaper: shutting down manual resource {Name} ({Os})", res.Name, res.OsType);
+            _logger.LogInformation("Idle reaper: shutting down manual resource {Name} ({Os}, {Method})",
+                res.Name, res.OsType, res.ShutdownMethod);
 
-            bool ok = false;
-
-            // Try OS-level graceful shutdown first (SSH or Windows remote shutdown).
-            if (res.OsType == OsType.Linux || res.OsType == OsType.MacOS)
-            {
-                var key = _credentials.Unprotect(res.ProtectedSshKey);
-                if (!string.IsNullOrEmpty(key) && !string.IsNullOrEmpty(res.SshUser))
-                {
-                    var cmd = res.ShutdownCommand ?? "shutdown -h now";
-                    var (success, _) = await _ssh.ExecuteAsync(res.IpAddress!, res.SshUser, key, cmd);
-                    ok = success;
-                }
-            }
-            else if (!string.IsNullOrEmpty(res.ShutdownCommand) || res.OsType is OsType.Windows or OsType.WindowsServer)
-            {
-                var cmd = res.ShutdownCommand ?? $"shutdown /s /m \\\\{res.IpAddress} /t 0";
-                try
-                {
-                    using var proc = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c {cmd}")
-                    {
-                        RedirectStandardOutput = true, RedirectStandardError = true,
-                        UseShellExecute = false, CreateNoWindow = true,
-                    });
-                    if (proc != null) { await proc.WaitForExitAsync(ct); ok = proc.ExitCode == 0; }
-                }
-                catch (Exception ex) { _logger.LogWarning(ex, "Windows shutdown failed for {Name}", res.Name); }
-            }
-
-            // Fall back to IPMI graceful shutdown if OS-level shutdown wasn't available or failed.
-            if (!ok && res.WakeMethod == WakeMethod.Ipmi && !string.IsNullOrEmpty(res.IpmiHost))
-            {
-                var pass = _credentials.Unprotect(res.ProtectedIpmiPassword);
-                ok = await _ipmi.PowerOffAsync(res.IpmiHost, res.IpmiUser ?? "", pass ?? "");
-            }
+            var ok = await _shutdown.ShutDownAsync(res, ct);
 
             if (ok)
             {

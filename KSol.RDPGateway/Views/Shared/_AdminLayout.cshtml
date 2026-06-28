@@ -18,7 +18,7 @@
 <html lang="en">
 <head>
     <meta charset="utf-8" />
-    <title>@ViewData["Title"] — Admin — KSol.IT RDP Gateway</title>
+    <title>@ViewData["Title"] — Admin — KSol.IT ZeroVDI</title>
     <partial name="_ThemeHead" />
 </head>
 <body class="bg-background text-foreground min-h-screen">
@@ -26,8 +26,8 @@
     <header class="fixed top-0 left-0 right-0 h-16 bg-card border-b border-border z-50 flex items-center">
         <div class="w-[260px] h-full items-center px-5 border-r border-border flex-shrink-0 hidden lg:flex">
             <a asp-controller="Admin" asp-action="Index" class="flex items-center gap-2">
-                <i class="ri-remote-control-line text-2xl text-primary"></i>
-                <span class="font-semibold text-lg">RDP Gateway</span>
+                <partial name="_Logo" />
+                <span class="font-semibold text-lg text-foreground">ZeroVDI</span>
             </a>
         </div>
         <div class="flex items-center px-4 lg:hidden">
@@ -36,8 +36,8 @@
                 <i class="ri-menu-line text-xl"></i>
             </button>
             <a asp-controller="Admin" asp-action="Index" class="flex items-center gap-2">
-                <i class="ri-remote-control-line text-2xl text-primary"></i>
-                <span class="font-semibold text-lg">RDP Gateway</span>
+                <partial name="_Logo" />
+                <span class="font-semibold text-lg text-foreground">ZeroVDI</span>
             </a>
         </div>
         <div class="flex-1 h-full flex items-center px-4 lg:px-5">
