@@ -1,0 +1,64 @@
+@model IReadOnlyList<KSol.RDPGateway.RDP.ActiveSession>
+@{
+    ViewData["Title"] = "Active sessions";
+    ViewData["Subtitle"] = "Live gateway tunnels. Force-disconnect terminates a session immediately.";
+    var isAdmin = User.IsInRole("Admin");
+    var now = DateTime.UtcNow;
+}
+
+@if (!Model.Any())
+{
+    <div class="flex flex-col items-center justify-center text-center py-16 px-4 card-surface border-dashed">
+        <div class="w-14 h-14 rounded-full bg-muted flex items-center justify-center mb-4">
+            <i class="ri-pulse-line text-2xl text-muted-foreground"></i>
+        </div>
+        <h3 class="text-lg font-semibold">No active sessions</h3>
+        <p class="text-sm text-muted-foreground mt-1">Live console sessions will appear here.</p>
+    </div>
+}
+else
+{
+    <table class="table-surface">
+        <thead>
+            <tr>
+                <th>User</th>
+                <th>Resource</th>
+                <th>Host</th>
+                <th>Client IP</th>
+                <th>Started (UTC)</th>
+                <th>Duration</th>
+                @if (isAdmin)
+                {
+                    <th class="text-right">Actions</th>
+                }
+            </tr>
+        </thead>
+        <tbody>
+        @foreach (var s in Model)
+        {
+            <tr>
+                <td class="font-medium">@(s.UserName ?? s.UserId)</td>
+                <td>@(s.ResourceName ?? s.ResourceId)</td>
+                <td class="text-muted-foreground">@(s.Host ?? "—")@(s.Port > 0 ? $":{s.Port}" : "")</td>
+                <td class="text-muted-foreground">@(s.ClientIp ?? "—")</td>
+                <td class="whitespace-nowrap">@s.StartedUtc.ToString("yyyy-MM-dd HH:mm:ss")</td>
+                <td>@((now - s.StartedUtc).ToString(@"hh\:mm\:ss"))</td>
+                @if (isAdmin)
+                {
+                    <td>
+                        <div class="flex items-center justify-end">
+                            <form asp-action="Disconnect" asp-route-sessionId="@s.SessionId" method="post" class="inline"
+                                  onsubmit="return confirm('Force-disconnect this session? The user will be dropped immediately.');">
+                                @Html.AntiForgeryToken()
+                                <button type="submit" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">
+                                    <i class="ri-logout-box-r-line"></i> Disconnect
+                                </button>
+                            </form>
+                        </div>
+                    </td>
+                }
+            </tr>
+        }
+        </tbody>
+    </table>
+}

@@ -67,6 +67,9 @@
             @if (User.IsInRole("Admin") || User.IsInRole("Auditor"))
             {
                 <p class="px-3 py-2 mt-3 text-xs font-medium text-sidebar-foreground/50 uppercase tracking-wide">Audit</p>
+                <a asp-area="" asp-controller="Sessions" asp-action="Index" class="@ItemClass("Sessions")">
+                    <i class="ri-pulse-line text-lg"></i><span>Active sessions</span>
+                </a>
                 <a asp-area="" asp-controller="Audit" asp-action="Index" class="@ItemClass("Audit")">
                     <i class="ri-history-line text-lg"></i><span>Audit log</span>
                 </a>

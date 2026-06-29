@@ -17,7 +17,6 @@ public class VdiResourceResolver
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ProxmoxClient _proxmox;
     private readonly ProxmoxBackendProvider _backends;
-    private readonly SessionTracker _sessions;
     private readonly IpmiClient _ipmi;
     private readonly CredentialProtector _credentials;
     private readonly ILogger<VdiResourceResolver> _logger;
@@ -26,7 +25,6 @@ public class VdiResourceResolver
         IServiceScopeFactory scopeFactory,
         ProxmoxClient proxmox,
         ProxmoxBackendProvider backends,
-        SessionTracker sessions,
         IpmiClient ipmi,
         CredentialProtector credentials,
         ILogger<VdiResourceResolver> logger)
@@ -34,7 +32,6 @@ public class VdiResourceResolver
         _scopeFactory = scopeFactory;
         _proxmox = proxmox;
         _backends = backends;
-        _sessions = sessions;
         _ipmi = ipmi;
         _credentials = credentials;
         _logger = logger;
@@ -259,17 +256,12 @@ public class VdiResourceResolver
             new(ReadinessPhase.Error, message, Error: message);
     }
 
-    public async Task OnConnectedAsync(string userId, string resource)
-    {
-        _sessions.Increment(resource);
-        await StampActivityAsync(resource);
-    }
+    // Live-session registration moved to RdpWebSocketController (which has the user name, client IP and
+    // resolved host needed for the admin sessions view). These now only stamp the resource's activity
+    // timestamp, which the IdleReaper and UI use.
+    public Task OnConnectedAsync(string userId, string resource) => StampActivityAsync(resource);
 
-    public async Task OnDisconnectedAsync(string userId, string resource)
-    {
-        _sessions.Decrement(resource);
-        await StampActivityAsync(resource);
-    }
+    public Task OnDisconnectedAsync(string userId, string resource) => StampActivityAsync(resource);
 
     private async Task StampActivityAsync(string resource)
     {

@@ -25,6 +25,7 @@ public class RdpWebSocketController : Controller
     private readonly CredentialProtector _credentials;
     private readonly RecordingPolicy _recordingPolicy;
     private readonly RedirectionTokenCache _redirections;
+    private readonly SessionTracker _sessions;
     private readonly IConfiguration _config;
     private readonly IAuditLogger _audit;
     private readonly ILogger<RdpWebSocketController> _logger;
@@ -37,6 +38,7 @@ public class RdpWebSocketController : Controller
         CredentialProtector credentials,
         RecordingPolicy recordingPolicy,
         RedirectionTokenCache redirections,
+        SessionTracker sessions,
         IConfiguration config,
         IAuditLogger audit,
         ILogger<RdpWebSocketController> logger)
@@ -48,6 +50,7 @@ public class RdpWebSocketController : Controller
         _credentials = credentials;
         _recordingPolicy = recordingPolicy;
         _redirections = redirections;
+        _sessions = sessions;
         _config = config;
         _audit = audit;
         _logger = logger;
@@ -122,6 +125,22 @@ public class RdpWebSocketController : Controller
         if (pending?.Username != null && pending.Password != null)
             redirectCreds = new RdpRelaySession.VmCredentials(pending.Username, pending.Password, pending.Domain);
 
+        // Concurrent-session limit: cap how many live tunnels a single user may hold at once (0 = unlimited).
+        // Redirect/handover continuation legs (pending != null) are part of an existing session, so they
+        // bypass the cap. The check runs after socket accept so we can report the reason to the browser.
+        var maxConcurrent = _config.GetValue("Sessions:MaxConcurrentPerUser", 0);
+        if (pending == null && maxConcurrent > 0 && _sessions.CountForUser(userId) >= maxConcurrent)
+        {
+            await _audit.LogAsync(AuditCategory.Session, "SessionRejectedLimit", success: false,
+                targetType: nameof(RDPResource), targetId: id, targetName: resource.Name,
+                detail: new { maxConcurrent });
+            var msg = System.Text.Encoding.UTF8.GetBytes(
+                "{\"status\":\"error\",\"message\":\"You have reached the maximum number of concurrent sessions.\"}");
+            await socket.SendAsync(msg, System.Net.WebSockets.WebSocketMessageType.Text, true, HttpContext.RequestAborted);
+            await socket.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "session limit", HttpContext.RequestAborted);
+            return;
+        }
+
         // Recording: GNOME "Remote Login" redirects/hands-over up to 3 times (initial → greeter → session).
         // We record ALL legs into ONE recording: the FIRST leg creates the Recording row + base dir; later
         // legs (carried in the redirect Pending) reuse that id/base dir. Each leg's raw streams go into
@@ -191,9 +210,18 @@ public class RdpWebSocketController : Controller
         await _audit.LogAsync(AuditCategory.Session, "SessionConnected",
             targetType: nameof(RDPResource), targetId: id, targetName: resource.Name,
             detail: new { host, port, recorded = recorder != null });
+
+        // Register the live session so the admin sessions view can see it and force-disconnect it. The
+        // relay's run token is linked to the registry's cancellation source: an admin force-disconnect
+        // trips it and aborts the loop. Skip registering pure continuation legs to avoid double-counting —
+        // each redirect leg replaces the previous one for the same (user, resource).
+        var tracked = _sessions.Register(userId, User.Identity?.Name, id, resource.Name, host, port,
+            HttpContext.Connection.RemoteIpAddress?.ToString());
+        using var runCts = CancellationTokenSource.CreateLinkedTokenSource(
+            HttpContext.RequestAborted, tracked.Cancellation.Token);
         try
         {
-            await session.RunAsync(HttpContext.RequestAborted);
+            await session.RunAsync(runCts.Token);
         }
         catch (Exception ex)
         {
@@ -201,10 +229,12 @@ public class RdpWebSocketController : Controller
         }
         finally
         {
+            var forced = tracked.Cancellation.IsCancellationRequested && !HttpContext.RequestAborted.IsCancellationRequested;
+            _sessions.Remove(tracked.SessionId);
             await _resolver.OnDisconnectedAsync(userId, id);
             await _audit.LogAsync(AuditCategory.Session, "SessionDisconnected",
                 targetType: nameof(RDPResource), targetId: id, targetName: resource.Name,
-                detail: new { durationSeconds = (int)(DateTime.UtcNow - sessionStartUtc).TotalSeconds });
+                detail: new { durationSeconds = (int)(DateTime.UtcNow - sessionStartUtc).TotalSeconds, forced });
 
             // Close this leg's raw streams (Dispose writes the leg's manifest.json). Only FINALIZE the
             // recording (hand off to the mux job) when no continuation was armed — i.e. this is the last
