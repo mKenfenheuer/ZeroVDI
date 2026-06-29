@@ -1,4 +1,6 @@
 @{
+    // The top-bar help icon (in _NavActions) follows the current dashboard: "admin" → /admin/docs.
+    ViewData["DocsArea"] = "admin";
     var currentController = ViewContext.RouteData.Values["controller"] as string;
     // Admin sidebar: only the three approved top-level items.
     // NOTE: controllers are still area-less (RDPResources/ProxmoxBackends/Users); they move into the
@@ -22,6 +24,16 @@
     <meta charset="utf-8" />
     <title>@ViewData["Title"] — Admin — ZeroVDI</title>
     <partial name="_ThemeHead" />
+    <style>
+        /* Documentation contents tree (collapsible, in the sidebar under the Documentation link). */
+        .doc-nav-list { list-style: none; margin: 0; padding: 0; }
+        .doc-nav-children { padding-left: 0.5rem; border-left: 1px solid var(--sidebar-border); margin-left: 0.6rem; }
+        .doc-nav-link, .doc-nav-header { display: flex; align-items: center; gap: 0.45rem; padding: 0.35rem 0.55rem; border-radius: 0.45rem; font-size: 0.82rem; color: color-mix(in oklch, var(--sidebar-foreground) 72%, transparent); text-decoration: none; }
+        .doc-nav-link:hover { background: var(--sidebar-accent); color: var(--sidebar-accent-foreground); }
+        .doc-nav-header { color: color-mix(in oklch, var(--sidebar-foreground) 48%, transparent); font-weight: 600; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; margin-top: 0.25rem; }
+        .doc-nav-active { background: var(--sidebar-accent); color: var(--sidebar-accent-foreground); font-weight: 500; }
+        details > summary::-webkit-details-marker { display: none; }
+    </style>
 </head>
 <body class="bg-background text-foreground min-h-screen">
     <!-- Top bar -->
@@ -70,6 +82,9 @@
                 <a asp-area="" asp-controller="DevicePolicy" asp-action="Index" class="@ItemClass("DevicePolicy")">
                     <i class="ri-shield-keyhole-line text-lg"></i><span>Device policy</span>
                 </a>
+                <a asp-area="" asp-controller="Appearance" asp-action="Index" class="@ItemClass("Appearance")">
+                    <i class="ri-palette-line text-lg"></i><span>Appearance</span>
+                </a>
             }
 
             @if (User.IsInRole("Admin") || User.IsInRole("Auditor"))
@@ -91,6 +106,22 @@
                     </a>
                 }
             }
+
+            @{
+                var onDocs = string.Equals(currentController, "Docs", StringComparison.OrdinalIgnoreCase);
+                var docsCurrentUrl = onDocs ? (ViewContext.RouteData.Values["path"] as string ?? "") : "";
+            }
+            <p class="px-3 py-2 mt-3 text-xs font-medium text-sidebar-foreground/50 uppercase tracking-wide">Help</p>
+            <details class="group/docs" @(onDocs ? "open" : null)>
+                <summary class="@ItemClass("Docs") cursor-pointer list-none">
+                    <i class="ri-book-open-line text-lg"></i>
+                    <a href="/admin/docs" class="flex-1">Documentation</a>
+                    <i class="ri-arrow-right-s-line text-base transition-transform group-open/docs:rotate-90"></i>
+                </summary>
+                <div class="mt-1 ml-2 pl-2 border-l border-sidebar-border">
+                    @await Component.InvokeAsync("DocsNav", new { currentUrl = docsCurrentUrl })
+                </div>
+            </details>
 
             <div class="mt-auto pt-4 border-t border-sidebar-border mt-4">
                 <a asp-area="" asp-controller="Home" asp-action="Index" class="@ItemClass("__none__")">

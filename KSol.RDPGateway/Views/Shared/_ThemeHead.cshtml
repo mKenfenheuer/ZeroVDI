@@ -1,21 +1,52 @@
+@inject KSol.RDPGateway.RDP.AppearanceService Appearance
 @*
     Common <head> assets for the redesigned UI: fonts, icons, the compiled Tailwind bundle, and an
-    inline script that applies the persisted theme/mode BEFORE first paint (avoids a flash of the
-    default theme). Include this in every non-console layout's <head>.
+    inline script that applies the theme/mode BEFORE first paint (avoids a flash of the default theme).
+    Include this in every non-console layout's <head>.
+
+    When an admin forces the theme and/or mode (AppearanceSettings), the forced value is applied
+    server-side here and overrides the user's localStorage choice; the theme switcher is also hidden
+    (see _NavActions). A custom primary color (Custom theme source) is emitted as inline CSS overrides.
 *@
+@{
+    var appearance = Appearance.Get();
+    var customCss = appearance.ForceTheme && appearance.ThemeSource == KSol.RDPGateway.Models.ThemeSource.Custom
+        ? KSol.RDPGateway.RDP.AppearanceService.BuildCustomColorCss(appearance.CustomColorHex)
+        : string.Empty;
+}
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <link rel="icon" type="image/svg+xml" href="~/img/zerovdi-logo.svg" />
 <link rel="apple-touch-icon" href="~/img/zerovdi-logo.svg" />
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/remixicon@4.5.0/fonts/remixicon.css" />
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="~/css/app.css" asp-append-version="true" />
+
 <script>
+    // Server-rendered appearance policy. When forced, these win over the user's saved choice.
+    window.__appearancePolicy = {
+        forceTheme: @(appearance.ForceTheme ? "true" : "false"),
+        forceMode: @(appearance.ForceMode ? "true" : "false"),
+        @if (appearance.ForceTheme && appearance.ThemeSource == KSol.RDPGateway.Models.ThemeSource.Preset)
+        {
+            <text>theme: '@appearance.PresetTheme',</text>
+        }
+        mode: '@(appearance.Mode == KSol.RDPGateway.Models.ThemeModePreference.Dark ? "dark" : "light")'
+    };
     (function () {
+        var p = window.__appearancePolicy;
         try {
-            var theme = localStorage.getItem('rdpgw-theme') || 'blue';
-            var mode = localStorage.getItem('rdpgw-mode') || 'light';
+            var theme = (p.forceTheme && p.theme) ? p.theme : (localStorage.getItem('rdpgw-theme') || 'blue');
+            var mode = p.forceMode ? p.mode : (localStorage.getItem('rdpgw-mode') || 'light');
             document.documentElement.setAttribute('data-theme', theme);
-            if (mode === 'dark') document.documentElement.classList.add('dark');
-        } catch (e) { /* localStorage unavailable — fall back to defaults */ }
+            document.documentElement.classList.toggle('dark', mode === 'dark');
+        } catch (e) {
+            // localStorage unavailable — honor any forced values, else defaults.
+            document.documentElement.setAttribute('data-theme', (p.forceTheme && p.theme) ? p.theme : 'blue');
+            if (p.forceMode && p.mode === 'dark') document.documentElement.classList.add('dark');
+        }
     })();
 </script>
+@if (!string.IsNullOrEmpty(customCss))
+{
+    <style>@Html.Raw(customCss)</style>
+}

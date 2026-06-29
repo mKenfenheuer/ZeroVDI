@@ -124,6 +124,14 @@ public class Program
         // Cached singleton; clamps the effective console ConnectionDefaults at every enforcement point.
         builder.Services.AddSingleton<RDP.DevicePolicyService>();
 
+        // Renders the bundled documentation (markdown under wwwroot/docs), split into an admin set
+        // (docs/admin → /admin/docs) and a user set (docs/user → /docs). The factory caches one
+        // DocsService per section; each holds no per-request state, just its resolved docs root path.
+        builder.Services.AddSingleton<RDP.DocsServiceFactory>();
+
+        // Tenant-wide appearance policy (forced theme/mode + custom logo). Cached singleton.
+        builder.Services.AddSingleton<RDP.AppearanceService>();
+
         // MFA enforcement: Identity already runs the 2FA challenge for enrolled users at login; this
         // policy decides who is REQUIRED to enroll (Mfa section). The middleware (added below) forces
         // required-but-unenrolled users to the authenticator setup page.
@@ -347,10 +355,14 @@ public class Program
         }
         else
         {
-            app.UseExceptionHandler("/Home/Error");
+            app.UseExceptionHandler("/error/500");
             // The default HSTS value is 30 days. You may want to change this for production scenarios, see https://aka.ms/aspnetcore-hsts.
             app.UseHsts();
         }
+
+        // Render styled pages for 4xx/5xx responses (e.g. 404) instead of the framework default. The
+        // {0} placeholder is replaced with the status code; re-execution preserves the original URL.
+        app.UseStatusCodePagesWithReExecute("/error/{0}");
 
         app.UseHttpsRedirection();
 

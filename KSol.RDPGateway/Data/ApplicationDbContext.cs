@@ -29,6 +29,7 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
     public DbSet<RecordingRule> RecordingRules { get; set; }
     public DbSet<AuditEvent> AuditEvents { get; set; }
     public DbSet<DevicePolicy> DevicePolicies { get; set; }
+    public DbSet<AppearanceSettings> AppearanceSettings { get; set; }
     public DbSet<UserGroup> UserGroups { get; set; }
     public DbSet<UserGroupMembership> UserGroupMemberships { get; set; }
     public DbSet<RDPResourceGroupAuthorization> RDPResourceGroupAuthorizations { get; set; }

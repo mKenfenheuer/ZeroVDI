@@ -1,11 +1,33 @@
 @using Microsoft.AspNetCore.Identity
 @inject SignInManager<ApplicationUser> SignInManager
 @inject UserManager<ApplicationUser> UserManager
+@inject KSol.RDPGateway.RDP.AppearanceService Appearance
 @*
     Right-hand top-bar actions shared by the user and admin layouts: the theme switcher (color +
     light/dark, persisted via theme.js) and the user/account menu. Pure Tailwind + Remix icons.
+
+    When an admin forces the theme and/or mode (AppearanceSettings), the corresponding switcher
+    sections are hidden so users can't override the policy; the whole switcher disappears when both
+    are forced.
 *@
+@{
+    var appearance = Appearance.Get();
+}
 <div class="flex items-center gap-1 sm:gap-2 ml-auto">
+    @if (SignInManager.IsSignedIn(User))
+    {
+        @* Help icon. The destination follows the *current dashboard*, not the user's role: the admin
+           layout sets ViewData["DocsArea"] = "admin" (administrator guide, /admin/docs); everywhere
+           else it's the end-user help (/docs). So an admin browsing the user dashboard still lands on
+           the user help. The two doc sets are served by separate controllers. *@
+        var isAdminDocs = string.Equals(ViewData["DocsArea"] as string, "admin", StringComparison.OrdinalIgnoreCase);
+        var docsHref = isAdminDocs ? "/admin/docs" : "/docs";
+        var docsTitle = isAdminDocs ? "Documentation" : "Help";
+        <a href="@docsHref" aria-label="@docsTitle" title="@docsTitle"
+           class="w-10 h-10 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors">
+            <i class="ri-question-line text-xl"></i>
+        </a>
+    }
     @{
         var themes = new (string Key, string Label, string Swatch)[]
         {
@@ -20,43 +42,53 @@
         };
     }
 
-    <!-- Theme switcher -->
-    <div class="relative" id="theme-toggle-container">
-        <button id="theme-toggle-btn" type="button" aria-label="Theme"
-                class="w-10 h-10 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors">
-            <i class="ri-palette-line text-xl"></i>
-        </button>
-        <div id="theme-dropdown"
-             class="absolute right-0 top-12 w-64 bg-popover text-popover-foreground rounded-xl shadow-xl border border-border z-50 hidden overflow-hidden">
-            <div class="p-3 border-b border-border">
-                <h4 class="font-semibold text-sm">Theme</h4>
-                <p class="text-xs text-muted-foreground">Customize your interface</p>
-            </div>
-            <div class="p-3 border-b border-border">
-                <p class="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">Color</p>
-                <div class="grid grid-cols-4 gap-2">
-                    @foreach (var t in themes)
-                    {
-                        <button type="button" data-theme="@t.Key" title="@t.Label"
-                                class="theme-color-btn w-8 h-8 rounded-full @t.Swatch ring-2 ring-offset-2 ring-offset-popover ring-transparent hover:opacity-80 transition-all"></button>
-                    }
+    @* Hide the whole switcher only when BOTH theme and mode are admin-forced (nothing left to pick). *@
+    @if (!(appearance.ForceTheme && appearance.ForceMode))
+    {
+        <!-- Theme switcher -->
+        <div class="relative" id="theme-toggle-container">
+            <button id="theme-toggle-btn" type="button" aria-label="Theme"
+                    class="w-10 h-10 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors">
+                <i class="ri-palette-line text-xl"></i>
+            </button>
+            <div id="theme-dropdown"
+                 class="absolute right-0 top-12 w-64 bg-popover text-popover-foreground rounded-xl shadow-xl border border-border z-50 hidden overflow-hidden">
+                <div class="p-3 border-b border-border">
+                    <h4 class="font-semibold text-sm">Theme</h4>
+                    <p class="text-xs text-muted-foreground">Customize your interface</p>
                 </div>
-            </div>
-            <div class="p-3">
-                <p class="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">Mode</p>
-                <div class="flex gap-2">
-                    <button type="button" data-mode="light"
-                            class="theme-mode-btn flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-border text-sm font-medium text-muted-foreground hover:bg-muted transition-colors">
-                        <i class="ri-sun-line"></i> Light
-                    </button>
-                    <button type="button" data-mode="dark"
-                            class="theme-mode-btn flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-border text-sm font-medium text-muted-foreground hover:bg-muted transition-colors">
-                        <i class="ri-moon-line"></i> Dark
-                    </button>
-                </div>
+                @if (!appearance.ForceTheme)
+                {
+                    <div class="p-3 border-b border-border">
+                        <p class="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">Color</p>
+                        <div class="grid grid-cols-4 gap-2">
+                            @foreach (var t in themes)
+                            {
+                                <button type="button" data-theme="@t.Key" title="@t.Label"
+                                        class="theme-color-btn w-8 h-8 rounded-full @t.Swatch ring-2 ring-offset-2 ring-offset-popover ring-transparent hover:opacity-80 transition-all"></button>
+                            }
+                        </div>
+                    </div>
+                }
+                @if (!appearance.ForceMode)
+                {
+                    <div class="p-3">
+                        <p class="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wide">Mode</p>
+                        <div class="flex gap-2">
+                            <button type="button" data-mode="light"
+                                    class="theme-mode-btn flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-border text-sm font-medium text-muted-foreground hover:bg-muted transition-colors">
+                                <i class="ri-sun-line"></i> Light
+                            </button>
+                            <button type="button" data-mode="dark"
+                                    class="theme-mode-btn flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-border text-sm font-medium text-muted-foreground hover:bg-muted transition-colors">
+                                <i class="ri-moon-line"></i> Dark
+                            </button>
+                        </div>
+                    </div>
+                }
             </div>
         </div>
-    </div>
+    }
 
     @if (SignInManager.IsSignedIn(User))
     {

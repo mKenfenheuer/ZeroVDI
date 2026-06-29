@@ -14,6 +14,7 @@
   <ItemGroup>
     <PackageReference Include="Kerberos.NET" Version="4.6.146" />
     <PackageReference Include="MailKit" Version="4.17.0" />
+    <PackageReference Include="Markdig" Version="0.42.0" />
     <PackageReference Include="Microsoft.AspNetCore.Diagnostics.EntityFrameworkCore" Version="9.0.0" />
     <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="9.0.0" />
     <PackageReference Include="Microsoft.AspNetCore.Identity.UI" Version="9.0.0" />
