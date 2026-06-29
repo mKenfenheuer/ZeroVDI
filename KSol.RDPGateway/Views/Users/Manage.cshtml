@@ -11,6 +11,7 @@
         ("roles", "Roles", "ri-shield-keyhole-line"),
         ("groups", "Groups", "ri-group-line"),
         ("access", "Resource access", "ri-computer-line"),
+        ("pools", "Desktop pools", "ri-stack-line"),
     };
 }
 
@@ -223,6 +224,77 @@
                                             @Html.AntiForgeryToken()
                                             <input type="hidden" name="resourceId" value="@a.Resource.Id" />
                                             <button type="submit" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Revoke</button>
+                                        </form>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-xs text-muted-foreground">Manage on group</span>
+                                    }
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            }
+        </div>
+    </section>
+
+    <!-- Desktop pools -->
+    <section data-panel="pools" class="hidden">
+        <div class="card-surface p-6">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="font-medium">VDI pool assignments</h2>
+                <span class="text-sm text-muted-foreground">@Model.Pools.Count pool@(Model.Pools.Count == 1 ? "" : "s")</span>
+            </div>
+
+            <div class="mb-5">
+                @{
+                    var poolPicker = new AccessPickerModel
+                    {
+                        FormAction = "AssignPool",
+                        RouteId = u.Id,
+                        FieldName = "poolId",
+                        Placeholder = "Assign a desktop pool…",
+                        ButtonLabel = "Assign",
+                        Candidates = Model.AssignablePools.Select(p => (p.Id, p.Name)),
+                    };
+                }
+                <partial name="_AccessPicker" model="poolPicker" />
+                <p class="form-hint mt-1">Assigned users get a desktop cloned from the pool template on first connect. To assign via a group, add the user to a group and assign the pool to that group.</p>
+            </div>
+
+            @if (!Model.Pools.Any())
+            {
+                <p class="text-sm text-muted-foreground">No pool assignments yet.</p>
+            }
+            else
+            {
+                <table class="table-surface">
+                    <thead>
+                        <tr>
+                            <th>Pool</th>
+                            <th>Assignment</th>
+                            <th class="text-right">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    @foreach (var p in Model.Pools)
+                    {
+                        <tr>
+                            <td>
+                                <a asp-controller="VdiPools" asp-action="Manage" asp-route-id="@p.Pool.Id" class="font-medium hover:underline">@p.Pool.Name</a>
+                            </td>
+                            <td><partial name="_AccessBadges" model="new AccessBadgesModel(p.Direct, p.ViaGroups)" /></td>
+                            <td>
+                                <div class="flex items-center justify-end gap-2">
+                                    @if (p.Direct)
+                                    {
+                                        <form asp-action="UnassignPool" asp-route-id="@u.Id" method="post" class="inline"
+                                              data-confirm="Remove @u.UserName's direct assignment to “@p.Pool.Name”?">
+                                            @Html.AntiForgeryToken()
+                                            <input type="hidden" name="poolId" value="@p.Pool.Id" />
+                                            <button type="submit" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Unassign</button>
                                         </form>
                                     }
                                     else

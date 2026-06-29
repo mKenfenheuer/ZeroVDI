@@ -10,6 +10,11 @@ public enum ResourceSource
     Manual = 0,
     /// <summary>Discovered from and synchronized with a Proxmox VE backend.</summary>
     Proxmox = 1,
+    /// <summary>
+    /// A VM cloned from a template by a <see cref="VdiPool"/>. Owned by the provisioner, not by
+    /// <c>ProxmoxSyncService</c> (which ignores these rows so it does not prune or re-discover them).
+    /// </summary>
+    VdiClone = 2,
 }
 
 /// <summary>Operating system type of the resource's backing machine.</summary>
@@ -90,6 +95,12 @@ public class RDPResource
     public string? ProxmoxNode { get; set; }
     /// <summary>The Proxmox VM id (VMID).</summary>
     public int? ProxmoxVmId { get; set; }
+
+    /// <summary>
+    /// For <see cref="ResourceSource.VdiClone"/> resources, the <see cref="VdiInstance"/> that owns
+    /// this clone (and the pool it was provisioned from). Null for Manual/Proxmox resources.
+    /// </summary>
+    public string? VdiInstanceId { get; set; }
 
     // --- Lifecycle ---
     public ResourcePowerState PowerState { get; set; } = ResourcePowerState.Stopped;

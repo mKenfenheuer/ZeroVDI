@@ -2,9 +2,11 @@
 @using KSol.RDPGateway.Models
 @{
     ViewData["Title"] = $"Group: {Model.Name}";
-    ViewData["Subtitle"] = "Members and granted resources. Every member can connect to every granted resource.";
+    ViewData["Subtitle"] = "Members, granted resources, and assigned desktop pools. Every member inherits all of them.";
     var nonMembers = ViewBag.NonMembers as List<ApplicationUser> ?? new();
     var ungranted = ViewBag.UngrantedResources as List<RDPResource> ?? new();
+    var assignedPools = ViewBag.AssignedPools as List<VdiPool> ?? new();
+    var unassignedPools = ViewBag.UnassignedPools as List<VdiPool> ?? new();
 }
 
 @section PageActions {
@@ -100,6 +102,45 @@
                         @Html.AntiForgeryToken()
                         <input type="hidden" name="resourceId" value="@a.RDPResourceId" />
                         <button type="submit" class="text-destructive hover:underline text-xs">Revoke</button>
+                    </form>
+                </li>
+            }
+            </ul>
+        }
+    </div>
+
+    <!-- Assigned desktop pools -->
+    <div class="card-surface p-5">
+        <h3 class="font-medium mb-3">Assigned desktop pools <span class="badge bg-muted text-muted-foreground">@assignedPools.Count</span></h3>
+        <div class="mb-3">
+            @{
+                var poolPicker = new AccessPickerModel
+                {
+                    FormAction = "AddPool",
+                    RouteId = Model.Id,
+                    FieldName = "poolId",
+                    Placeholder = "Assign a desktop pool…",
+                    ButtonLabel = "Assign",
+                    Candidates = unassignedPools.Select(p => (p.Id, p.Name)),
+                };
+            }
+            <partial name="_AccessPicker" model="poolPicker" />
+        </div>
+        @if (!assignedPools.Any())
+        {
+            <p class="text-sm text-muted-foreground">No pools assigned.</p>
+        }
+        else
+        {
+            <ul class="space-y-1">
+            @foreach (var p in assignedPools)
+            {
+                <li class="flex items-center justify-between text-sm py-1 border-b border-border last:border-0">
+                    <a asp-controller="VdiPools" asp-action="Manage" asp-route-id="@p.Id" class="hover:underline">@p.Name</a>
+                    <form asp-action="RemovePool" asp-route-id="@Model.Id" method="post" class="inline">
+                        @Html.AntiForgeryToken()
+                        <input type="hidden" name="poolId" value="@p.Id" />
+                        <button type="submit" class="text-destructive hover:underline text-xs">Remove</button>
                     </form>
                 </li>
             }

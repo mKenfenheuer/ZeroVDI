@@ -19,6 +19,7 @@ public class VdiResourceResolver
     private readonly ProxmoxBackendProvider _backends;
     private readonly IpmiClient _ipmi;
     private readonly CredentialProtector _credentials;
+    private readonly VdiProvisioningService _provisioning;
     private readonly ILogger<VdiResourceResolver> _logger;
 
     public VdiResourceResolver(
@@ -27,6 +28,7 @@ public class VdiResourceResolver
         ProxmoxBackendProvider backends,
         IpmiClient ipmi,
         CredentialProtector credentials,
+        VdiProvisioningService provisioning,
         ILogger<VdiResourceResolver> logger)
     {
         _scopeFactory = scopeFactory;
@@ -34,6 +36,7 @@ public class VdiResourceResolver
         _backends = backends;
         _ipmi = ipmi;
         _credentials = credentials;
+        _provisioning = provisioning;
         _logger = logger;
     }
 
@@ -64,6 +67,17 @@ public class VdiResourceResolver
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
 
+        // A pool entry point: the supplied id is a VdiPool, not a concrete resource. Provision (or
+        // reuse) the user's clone and continue with the concrete resource id. Authorization for the
+        // pool is checked by the caller (HomeController/ConnectController via ResourceAccessService).
+        if (await db.VdiPools.AnyAsync(p => p.Id == resource, ct))
+        {
+            var provisioned = await _provisioning.EnsureResourceForUserAsync(resource, userId, Report, ct);
+            if (!provisioned.Ok)
+                return Fail(provisioned.Error ?? "Could not prepare a desktop for you.");
+            resource = provisioned.ResourceId!;
+        }
+
         var res = await db.RDPResources.FirstOrDefaultAsync(r => r.Id == resource, ct);
         if (res == null)
         {
@@ -73,9 +87,11 @@ public class VdiResourceResolver
 
         var port = (ushort)(res.Port > 0 ? res.Port : requestedPort);
 
-        // Manual resources (or Proxmox resources missing their backend linkage):
-        // Start → wait for ping → wait for RDP → connect.
-        if (res.Source != ResourceSource.Proxmox || res.ProxmoxBackendId == null
+        // Manual resources (or Proxmox/VdiClone resources missing their backend linkage):
+        // Start → wait for ping → wait for RDP → connect. VDI clones are Proxmox-backed and take the
+        // Proxmox start path below whenever their backend/node/VMID linkage is present.
+        var proxmoxBacked = res.Source is ResourceSource.Proxmox or ResourceSource.VdiClone;
+        if (!proxmoxBacked || res.ProxmoxBackendId == null
             || res.ProxmoxNode == null || res.ProxmoxVmId == null)
         {
             if (string.IsNullOrEmpty(res.IpAddress))

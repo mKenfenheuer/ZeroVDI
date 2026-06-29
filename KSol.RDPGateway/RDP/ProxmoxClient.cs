@@ -79,6 +79,311 @@ public class ProxmoxClient
         }
     }
 
+    /// <summary>
+    /// Lists QEMU <em>template</em> VMs (the ones <see cref="ListVmsAsync"/> deliberately skips). Used
+    /// by the VDI pool editor to pick a clone source. Optionally filtered to a single node.
+    /// </summary>
+    public async Task<IReadOnlyList<ProxmoxVm>> ListTemplatesAsync(ProxmoxBackend backend, CancellationToken ct = default)
+    {
+        using var client = CreateClient(backend);
+        if (client == null) return Array.Empty<ProxmoxVm>();
+
+        try
+        {
+            using var doc = await GetJsonAsync(client, "cluster/resources?type=vm", ct);
+            if (doc == null) return Array.Empty<ProxmoxVm>();
+
+            var list = new List<ProxmoxVm>();
+            foreach (var item in doc.RootElement.GetProperty("data").EnumerateArray())
+            {
+                if (item.TryGetProperty("type", out var type) && type.GetString() != "qemu") continue;
+                // Keep ONLY templates (the inverse of ListVmsAsync).
+                if (!(item.TryGetProperty("template", out var tmpl) && tmpl.ValueKind == JsonValueKind.Number
+                      && tmpl.GetInt32() == 1)) continue;
+                var vmid = item.TryGetProperty("vmid", out var v) ? v.GetInt32() : 0;
+                var node = item.TryGetProperty("node", out var n) ? n.GetString() ?? "" : "";
+                var name = item.TryGetProperty("name", out var nm) ? nm.GetString() ?? "" : "";
+                if (vmid != 0) list.Add(new ProxmoxVm(vmid, node, name, "template"));
+            }
+            return list;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Proxmox[{Backend}]: failed to list templates", backend.Name);
+            return Array.Empty<ProxmoxVm>();
+        }
+    }
+
+    /// <summary>
+    /// Allocates a free VMID from the cluster (<c>cluster/nextid</c>). If a <paramref name="rangeStart"/>/
+    /// <paramref name="rangeEnd"/> window is given, returns the first free id in that window instead (so a
+    /// pool can keep its clones in a dedicated VMID band). Returns null if none is available.
+    /// </summary>
+    public async Task<int?> GetNextVmIdAsync(ProxmoxBackend backend, int? rangeStart = null, int? rangeEnd = null, CancellationToken ct = default)
+    {
+        using var client = CreateClient(backend);
+        if (client == null) return null;
+        try
+        {
+            if (rangeStart is int start && rangeEnd is int end && end >= start)
+            {
+                // Walk the requested band, asking Proxmox whether each id is free via cluster/nextid?vmid=.
+                var taken = (await ListAllVmIdsAsync(client, ct));
+                for (var id = start; id <= end; id++)
+                    if (!taken.Contains(id)) return id;
+                return null;
+            }
+
+            using var doc = await GetJsonAsync(client, "cluster/nextid", ct);
+            if (doc == null) return null;
+            var data = doc.RootElement.GetProperty("data");
+            return data.ValueKind switch
+            {
+                JsonValueKind.Number => data.GetInt32(),
+                JsonValueKind.String when int.TryParse(data.GetString(), out var n) => n,
+                _ => (int?)null,
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Proxmox[{Backend}]: failed to get next VMID", backend.Name);
+            return null;
+        }
+    }
+
+    private static async Task<HashSet<int>> ListAllVmIdsAsync(HttpClient client, CancellationToken ct)
+    {
+        var ids = new HashSet<int>();
+        using var doc = await GetJsonAsync(client, "cluster/resources?type=vm", ct);
+        if (doc == null) return ids;
+        foreach (var item in doc.RootElement.GetProperty("data").EnumerateArray())
+            if (item.TryGetProperty("vmid", out var v) && v.ValueKind == JsonValueKind.Number)
+                ids.Add(v.GetInt32());
+        return ids;
+    }
+
+    /// <summary>
+    /// Clones a template into a new VM. Returns the Proxmox task UPID (the clone runs asynchronously —
+    /// poll it with <see cref="WaitForTaskAsync"/> before the clone is bootable), or null on failure.
+    /// </summary>
+    public async Task<string?> CloneAsync(
+        ProxmoxBackend backend, string templateNode, int templateVmId, int newVmId, string name,
+        bool full, string? targetNode = null, string? targetStorage = null, CancellationToken ct = default)
+    {
+        using var client = CreateClient(backend);
+        if (client == null) return null;
+
+        var form = new List<KeyValuePair<string, string>>
+        {
+            new("newid", newVmId.ToString()),
+            new("name", name),
+            new("full", full ? "1" : "0"),
+        };
+        if (!string.IsNullOrWhiteSpace(targetNode)) form.Add(new("target", targetNode));
+        if (!string.IsNullOrWhiteSpace(targetStorage)) form.Add(new("storage", targetStorage));
+
+        try
+        {
+            var resp = await client.PostAsync($"nodes/{templateNode}/qemu/{templateVmId}/clone",
+                new FormUrlEncodedContent(form), ct);
+            var body = await SafeReadBodyAsync(resp, ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogError("Proxmox[{Backend}]: clone {Tpl}->{New} failed {Status}: {Body}",
+                    backend.Name, templateVmId, newVmId, (int)resp.StatusCode, body);
+                return null;
+            }
+            var upid = ReadDataString(body);
+            _logger.LogInformation("Proxmox[{Backend}]: clone {Tpl}->{New} started (upid {Upid})",
+                backend.Name, templateVmId, newVmId, upid);
+            return upid;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Proxmox[{Backend}]: clone {Tpl}->{New} failed", backend.Name, templateVmId, newVmId);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Polls a Proxmox task (UPID) until it stops, then reports success (<c>exitstatus == "OK"</c>).
+    /// Returns false on timeout, a non-OK exit, or any error. Tasks run on the node that started them.
+    /// </summary>
+    public async Task<bool> WaitForTaskAsync(
+        ProxmoxBackend backend, string node, string upid, TimeSpan timeout, CancellationToken ct = default)
+    {
+        using var client = CreateClient(backend);
+        if (client == null) return false;
+
+        var deadline = DateTime.UtcNow.Add(timeout);
+        var encoded = Uri.EscapeDataString(upid);
+        while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+        {
+            try
+            {
+                using var doc = await GetJsonAsync(client, $"nodes/{node}/tasks/{encoded}/status", ct);
+                if (doc != null)
+                {
+                    var data = doc.RootElement.GetProperty("data");
+                    var status = data.TryGetProperty("status", out var s) ? s.GetString() : null;
+                    if (string.Equals(status, "stopped", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var exit = data.TryGetProperty("exitstatus", out var e) ? e.GetString() : null;
+                        var ok = string.Equals(exit, "OK", StringComparison.OrdinalIgnoreCase);
+                        if (!ok)
+                            _logger.LogError("Proxmox[{Backend}]: task {Upid} finished with exitstatus '{Exit}'",
+                                backend.Name, upid, exit);
+                        return ok;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Proxmox[{Backend}]: polling task {Upid}", backend.Name, upid);
+            }
+            await Task.Delay(2000, ct);
+        }
+        _logger.LogWarning("Proxmox[{Backend}]: task {Upid} did not finish within {Timeout}", backend.Name, upid, timeout);
+        return false;
+    }
+
+    /// <summary>Deletes (destroys) a VM and its disks. Returns the task UPID, or null on failure.</summary>
+    public async Task<string?> DeleteVmAsync(ProxmoxBackend backend, string node, int vmid, CancellationToken ct = default)
+    {
+        using var client = CreateClient(backend);
+        if (client == null) return null;
+        try
+        {
+            // purge=1 also removes the VM from any HA/backup jobs and its disks.
+            var resp = await client.DeleteAsync($"nodes/{node}/qemu/{vmid}?purge=1&destroy-unreferenced-disks=1", ct);
+            var body = await SafeReadBodyAsync(resp, ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogError("Proxmox[{Backend}]: delete {Node}/{VmId} failed {Status}: {Body}",
+                    backend.Name, node, vmid, (int)resp.StatusCode, body);
+                return null;
+            }
+            return ReadDataString(body);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Proxmox[{Backend}]: delete {Node}/{VmId} failed", backend.Name, node, vmid);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Sets cloud-init customization fields on a (stopped) clone before first boot: ciuser, cipassword,
+    /// sshkeys, and the guest hostname (Proxmox stores the hostname via the searchdomain/ipconfig path;
+    /// here we use the dedicated <c>name</c> plus cloud-init <c>ciuser</c>/etc.). Returns true on success.
+    /// </summary>
+    public async Task<bool> SetCloudInitAsync(
+        ProxmoxBackend backend, string node, int vmid,
+        string? ciUser, string? ciPassword, string? sshKeys, CancellationToken ct = default)
+    {
+        using var client = CreateClient(backend);
+        if (client == null) return false;
+
+        var form = new List<KeyValuePair<string, string>>();
+        if (!string.IsNullOrWhiteSpace(ciUser)) form.Add(new("ciuser", ciUser));
+        if (!string.IsNullOrWhiteSpace(ciPassword)) form.Add(new("cipassword", ciPassword));
+        if (!string.IsNullOrWhiteSpace(sshKeys)) form.Add(new("sshkeys", Uri.EscapeDataString(sshKeys)));
+        if (form.Count == 0) return true;
+
+        try
+        {
+            var resp = await client.PutAsync($"nodes/{node}/qemu/{vmid}/config", new FormUrlEncodedContent(form), ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                var body = await SafeReadBodyAsync(resp, ct);
+                _logger.LogError("Proxmox[{Backend}]: set cloud-init for {Node}/{VmId} failed {Status}: {Body}",
+                    backend.Name, node, vmid, (int)resp.StatusCode, body);
+                return false;
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Proxmox[{Backend}]: set cloud-init for {Node}/{VmId} failed", backend.Name, node, vmid);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Runs a command in the guest via the QEMU guest agent (<c>agent/exec</c>). Returns the agent's
+    /// PID handle for <see cref="GetGuestExecStatusAsync"/>, or null on failure. Used by the GuestAgent
+    /// identity path (rename / domain-join on Windows clones without cloud-init).
+    /// </summary>
+    public async Task<int?> GuestExecAsync(
+        ProxmoxBackend backend, string node, int vmid, string command, IEnumerable<string>? args = null, CancellationToken ct = default)
+    {
+        using var client = CreateClient(backend);
+        if (client == null) return null;
+
+        var form = new List<KeyValuePair<string, string>> { new("command", command) };
+        if (args != null)
+            foreach (var a in args) form.Add(new("command", a)); // repeated 'command' = argv array
+
+        try
+        {
+            var resp = await client.PostAsync($"nodes/{node}/qemu/{vmid}/agent/exec",
+                new FormUrlEncodedContent(form), ct);
+            var body = await SafeReadBodyAsync(resp, ct);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogError("Proxmox[{Backend}]: guest exec on {Node}/{VmId} failed {Status}: {Body}",
+                    backend.Name, node, vmid, (int)resp.StatusCode, body);
+                return null;
+            }
+            using var doc = JsonDocument.Parse(body);
+            var data = doc.RootElement.GetProperty("data");
+            return data.TryGetProperty("pid", out var pid) && pid.ValueKind == JsonValueKind.Number
+                ? pid.GetInt32() : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Proxmox[{Backend}]: guest exec on {Node}/{VmId} failed", backend.Name, node, vmid);
+            return null;
+        }
+    }
+
+    /// <summary>The result of a guest-agent exec: whether it exited and, if so, its exit code.</summary>
+    public record GuestExecStatus(bool Exited, int? ExitCode);
+
+    /// <summary>Reads the status of a previously started guest-agent exec (<c>agent/exec-status</c>).</summary>
+    public async Task<GuestExecStatus?> GetGuestExecStatusAsync(
+        ProxmoxBackend backend, string node, int vmid, int pid, CancellationToken ct = default)
+    {
+        using var client = CreateClient(backend);
+        if (client == null) return null;
+        try
+        {
+            using var doc = await GetJsonAsync(client, $"nodes/{node}/qemu/{vmid}/agent/exec-status?pid={pid}", ct);
+            if (doc == null) return null;
+            var data = doc.RootElement.GetProperty("data");
+            var exited = data.TryGetProperty("exited", out var ex) && ex.ValueKind == JsonValueKind.Number && ex.GetInt32() == 1;
+            int? code = data.TryGetProperty("exitcode", out var c) && c.ValueKind == JsonValueKind.Number ? c.GetInt32() : null;
+            return new GuestExecStatus(exited, code);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Proxmox[{Backend}]: guest exec-status on {Node}/{VmId} pid {Pid}", backend.Name, node, vmid, pid);
+            return null;
+        }
+    }
+
+    /// <summary>Pulls the <c>data</c> string (e.g. a UPID) out of a Proxmox JSON response body.</summary>
+    private static string? ReadDataString(string body)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            return doc.RootElement.TryGetProperty("data", out var d) && d.ValueKind == JsonValueKind.String
+                ? d.GetString() : null;
+        }
+        catch { return null; }
+    }
+
     /// <summary>Returns the qmpstatus ("running", "stopped", "suspended", ...) for a VM, or null.</summary>
     public async Task<string?> GetStatusAsync(ProxmoxBackend backend, string node, int vmid, CancellationToken ct = default)
     {

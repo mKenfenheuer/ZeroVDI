@@ -30,7 +30,12 @@ public sealed class ResourceAccessService
     private IQueryable<string> GroupIdsFor(string userId) =>
         _db.UserGroupMemberships.Where(m => m.UserId == userId).Select(m => m.GroupId);
 
-    /// <summary>True if the user may connect to the resource (directly or via any group). </summary>
+    /// <summary>
+    /// True if the user may connect to the id, which may be a resource OR a VDI pool entry point.
+    /// Resource access = direct ∪ group. Pool access = the user is assigned to the pool directly or via
+    /// a group. A user also "accesses" the VDI clone resource the pool provisioned for them (the relay
+    /// reconnects to the concrete clone id after provisioning).
+    /// </summary>
     public async Task<bool> CanAccessAsync(string userId, string resourceId, CancellationToken ct = default)
     {
         var direct = await _db.RDPResourceUserAuthorizations
@@ -38,8 +43,43 @@ public sealed class ResourceAccessService
         if (direct) return true;
 
         var groupIds = GroupIdsFor(userId);
-        return await _db.RDPResourceGroupAuthorizations
+        var viaGroup = await _db.RDPResourceGroupAuthorizations
             .AnyAsync(g => g.RDPResourceId == resourceId && groupIds.Contains(g.GroupId), ct);
+        if (viaGroup) return true;
+
+        // A VDI pool entry point the user is entitled to.
+        if (await CanAccessPoolAsync(userId, resourceId, ct)) return true;
+
+        // The user's own provisioned clone (a VdiClone resource owned by their instance).
+        return await _db.VdiInstances
+            .AnyAsync(i => i.OwnerUserId == userId && i.RDPResourceId == resourceId, ct);
+    }
+
+    /// <summary>True if the user is entitled to the VDI pool (direct user assignment or via a group).</summary>
+    public async Task<bool> CanAccessPoolAsync(string userId, string poolId, CancellationToken ct = default)
+    {
+        var direct = await _db.VdiPoolAssignments
+            .AnyAsync(a => a.PoolId == poolId && a.UserId == userId, ct);
+        if (direct) return true;
+
+        var groupIds = GroupIdsFor(userId);
+        return await _db.VdiPoolAssignments
+            .AnyAsync(a => a.PoolId == poolId && a.GroupId != null && groupIds.Contains(a.GroupId), ct);
+    }
+
+    /// <summary>The VDI pools the user is entitled to (direct ∪ group), de-duplicated.</summary>
+    public async Task<IReadOnlyList<VdiPool>> AccessiblePoolsAsync(string userId, CancellationToken ct = default)
+    {
+        var groupIds = GroupIdsFor(userId);
+        var poolIds = await _db.VdiPoolAssignments
+            .Where(a => a.UserId == userId || (a.GroupId != null && groupIds.Contains(a.GroupId)))
+            .Select(a => a.PoolId)
+            .Distinct()
+            .ToListAsync(ct);
+
+        return await _db.VdiPools
+            .Where(p => poolIds.Contains(p.Id))
+            .ToListAsync(ct);
     }
 
     /// <summary>
@@ -49,7 +89,26 @@ public sealed class ResourceAccessService
     public async Task<RDPResource?> GetAuthorizedResourceAsync(string userId, string resourceId, CancellationToken ct = default)
     {
         if (!await CanAccessAsync(userId, resourceId, ct)) return null;
-        return await _db.RDPResources.FirstOrDefaultAsync(r => r.Id == resourceId, ct);
+
+        var resource = await _db.RDPResources.FirstOrDefaultAsync(r => r.Id == resourceId, ct);
+        if (resource != null) return resource;
+
+        // No concrete resource: the id is a VDI pool entry point. Return a SYNTHETIC, non-tracked
+        // RDPResource standing in for the pool so the console/connect gates render and the readiness
+        // pre-step (VdiResourceResolver) provisions the real clone, keyed by this same pool id. It is
+        // never persisted — Source=VdiClone keeps it on the Proxmox connect path.
+        var pool = await _db.VdiPools.AsNoTracking().FirstOrDefaultAsync(p => p.Id == resourceId, ct);
+        if (pool == null) return null;
+        return new RDPResource
+        {
+            Id = pool.Id,
+            Name = pool.Name,
+            Description = pool.Description,
+            Source = ResourceSource.VdiClone,
+            Port = pool.Port,
+            OsType = pool.OsType,
+            DefaultConnectionDefaults = pool.ConnectionDefaults,
+        };
     }
 
     /// <summary>
@@ -68,8 +127,16 @@ public sealed class ResourceAccessService
             .Select(g => g.RDPResourceId)
             .ToListAsync(ct);
 
+        // The user's own provisioned VDI clones (a dedicated pool desktop, once it exists).
+        var ownClones = await _db.VdiInstances
+            .Where(i => i.OwnerUserId == userId && i.RDPResourceId != null
+                && i.State != VdiInstanceState.Deprovisioning && i.State != VdiInstanceState.Failed)
+            .Select(i => i.RDPResourceId!)
+            .ToListAsync(ct);
+
         var set = new HashSet<string>(direct);
         set.UnionWith(viaGroups);
+        set.UnionWith(ownClones);
         return set;
     }
 
@@ -126,6 +193,46 @@ public sealed class ResourceAccessService
                 DirectAuth: directAuth));
         }
         return entries.OrderBy(e => e.Resource.Name).ToList();
+    }
+
+    /// <summary>
+    /// Every VDI pool a user is entitled to, each tagged Direct (a direct user assignment) and/or via
+    /// which group(s). The single source for the user page's "Desktop pools" tab and the pool page's
+    /// assignment view, so provenance can't drift — the pool analogue of <see cref="GetUserAccessAsync"/>.
+    /// </summary>
+    public async Task<IReadOnlyList<PoolAccessEntry>> GetUserPoolAccessAsync(string userId, CancellationToken ct = default)
+    {
+        var directPoolIds = await _db.VdiPoolAssignments
+            .Where(a => a.UserId == userId)
+            .Select(a => a.PoolId)
+            .ToListAsync(ct);
+
+        var viaGroups = await _db.UserGroupMemberships
+            .Where(m => m.UserId == userId)
+            .Join(_db.VdiPoolAssignments.Where(a => a.GroupId != null), m => m.GroupId, a => a.GroupId,
+                (m, a) => new { a.PoolId, a.Group!.Id, a.Group.Name })
+            .ToListAsync(ct);
+
+        var poolIds = directPoolIds.Concat(viaGroups.Select(g => g.PoolId)).ToHashSet();
+        var poolsById = await _db.VdiPools
+            .Where(p => poolIds.Contains(p.Id))
+            .ToDictionaryAsync(p => p.Id, ct);
+
+        var groupsByPool = viaGroups
+            .GroupBy(g => g.PoolId)
+            .ToDictionary(g => g.Key, g => g.Select(x => (x.Id, x.Name)).Distinct().ToList());
+        var directSet = directPoolIds.ToHashSet();
+
+        var entries = new List<PoolAccessEntry>();
+        foreach (var pid in poolIds)
+        {
+            if (!poolsById.TryGetValue(pid, out var pool)) continue;
+            entries.Add(new PoolAccessEntry(
+                pool,
+                Direct: directSet.Contains(pid),
+                ViaGroups: groupsByPool.TryGetValue(pid, out var gs) ? gs : new()));
+        }
+        return entries.OrderBy(e => e.Pool.Name).ToList();
     }
 
     /// <summary>
@@ -190,3 +297,9 @@ public sealed record UserAccessEntry(
     bool Direct,
     List<(string Id, string Name)> ViaGroups,
     RDPResourceUserAuthorization? DirectAuth);
+
+/// <summary>One VDI pool a user is entitled to, with the provenance of that entitlement.</summary>
+public sealed record PoolAccessEntry(
+    VdiPool Pool,
+    bool Direct,
+    List<(string Id, string Name)> ViaGroups);

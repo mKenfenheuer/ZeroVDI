@@ -94,6 +94,14 @@ public class ProxmoxSyncService : BackgroundService
 
             var id = ProxmoxNotes.ReadId(notes);
 
+            // VDI clones are owned by the provisioner, not by discovery: their VMs ARE in the cluster
+            // inventory and carry a stamped gateway id, but the row is ResourceSource.VdiClone (or is
+            // tracked by a VdiInstance). Skip them entirely here so sync never adopts a clone as a
+            // Proxmox resource, rewrites its fields, or prunes it. The provisioner/reconcile loop owns
+            // their whole lifecycle.
+            if (await IsVdiCloneAsync(db, id, backend.Id, vm.VmId, ct))
+                continue;
+
             // Find every existing row that represents this VM: the one bound by the notes id, plus
             // any rows matching backend+VMID (these arise if a previous notes stamp failed and the
             // VM was re-discovered as a fresh row). Keep one and collapse the rest so duplicates from
@@ -189,6 +197,23 @@ public class ProxmoxSyncService : BackgroundService
         await db.SaveChangesAsync(ct);
         _logger.LogInformation("Proxmox sync[{Backend}]: processed {Count} VMs", backend.Name, vms.Count);
         return vms.Count;
+    }
+
+    /// <summary>
+    /// True if this VM belongs to a VDI clone the provisioner owns: either the notes-id resolves to a
+    /// <see cref="ResourceSource.VdiClone"/> resource, or a <see cref="VdiInstance"/> tracks this
+    /// backend+VMID. Such VMs are skipped by discovery so sync never fights the provisioner.
+    /// </summary>
+    private static async Task<bool> IsVdiCloneAsync(
+        ApplicationDbContext db, string? notesId, int backendId, int vmid, CancellationToken ct)
+    {
+        if (notesId != null && await db.RDPResources
+                .AnyAsync(r => r.Id == notesId && r.Source == ResourceSource.VdiClone, ct))
+            return true;
+
+        return await db.VdiInstances
+            .Include(i => i.Pool)
+            .AnyAsync(i => i.ProxmoxVmId == vmid && i.Pool!.ProxmoxBackendId == backendId, ct);
     }
 
     /// <summary>Deletes every resource row for the given backend+VMID and their authorizations.</summary>

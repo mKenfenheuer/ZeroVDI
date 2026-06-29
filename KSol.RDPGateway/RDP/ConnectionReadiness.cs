@@ -7,6 +7,7 @@ namespace KSol.RDPGateway.RDP;
 public enum ReadinessPhase
 {
     Checking,      // inspecting the resource / current power state
+    Provisioning,  // cloning a VDI desktop from its pool template (first connect / floating lease)
     Starting,      // VM is being started or resumed
     GuestAgent,    // waiting for the QEMU guest agent to respond
     WaitingIp,     // waiting for the guest agent to report an IP

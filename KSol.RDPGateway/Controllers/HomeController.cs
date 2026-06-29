@@ -57,7 +57,38 @@ public class HomeController : Controller
                 : new RDPResourceUserAuthorization { UserId = userId, RDPResourceId = r.Id, RDPResource = r },
         }).ToList();
 
-        return View(items);
+        // VDI pool entry points the user is entitled to (direct ∪ group). A pool clones a desktop on
+        // first connect; its card uses the pool id as the connect target — the readiness pre-step
+        // (VdiResourceResolver) swaps in the provisioned clone. Per-user creds/settings don't apply
+        // pre-provision, so pool cards carry a placeholder auth and the view hides the settings gear.
+        // Pools whose clone already exists are shown via that concrete resource (already in resourceIds
+        // above), so skip the pool entry to avoid a duplicate card.
+        var poolsWithOwnClone = await _context.VdiInstances
+            .Where(i => i.OwnerUserId == userId
+                && i.State != VdiInstanceState.Deprovisioning && i.State != VdiInstanceState.Failed)
+            .Select(i => i.PoolId)
+            .ToListAsync();
+
+        foreach (var pool in await _access.AccessiblePoolsAsync(userId))
+        {
+            if (poolsWithOwnClone.Contains(pool.Id)) continue; // already provisioned → shown as its resource
+            items.Add(new DashboardResourceViewModel
+            {
+                Resource = new RDPResource
+                {
+                    Id = pool.Id,
+                    Name = pool.Name,
+                    Description = pool.Description,
+                    Source = ResourceSource.VdiClone,
+                    Port = pool.Port,
+                    OsType = pool.OsType,
+                },
+                Auth = new RDPResourceUserAuthorization { UserId = userId, RDPResourceId = pool.Id },
+                IsPool = true,
+            });
+        }
+
+        return View(items.OrderBy(i => i.Resource.Name).ToList());
     }
 
     /// <summary>
@@ -135,4 +166,8 @@ public class DashboardResourceViewModel
 {
     public RDPResource Resource { get; set; } = null!;
     public RDPResourceUserAuthorization Auth { get; set; } = null!;
+
+    /// <summary>True when this card is a VDI pool entry point (clones a desktop on first connect),
+    /// not a concrete resource. The view shows a "pool" badge and hides per-user settings.</summary>
+    public bool IsPool { get; set; }
 }

@@ -71,9 +71,23 @@ public class UserGroupsController : Controller
         ViewBag.NonMembers = await _context.Users
             .Where(u => !memberIds.Contains(u.Id))
             .OrderBy(u => u.UserName).ToListAsync();
+        // VDI clones are not independently grantable (access flows through pool assignment), so keep
+        // them out of the resource-grant picker.
         ViewBag.UngrantedResources = await _context.RDPResources
-            .Where(r => !grantedResourceIds.Contains(r.Id))
+            .Where(r => r.Source != ResourceSource.VdiClone && !grantedResourceIds.Contains(r.Id))
             .OrderBy(r => r.Name).ToListAsync();
+
+        // Group → VDI pool assignments (every member is entitled to the pool).
+        ViewBag.AssignedPools = await _context.VdiPoolAssignments
+            .Where(a => a.GroupId == id)
+            .Include(a => a.Pool)
+            .Select(a => a.Pool!)
+            .OrderBy(p => p.Name).ToListAsync();
+        var assignedPoolIds = await _context.VdiPoolAssignments
+            .Where(a => a.GroupId == id).Select(a => a.PoolId).ToListAsync();
+        ViewBag.UnassignedPools = await _context.VdiPools
+            .Where(p => !assignedPoolIds.Contains(p.Id))
+            .OrderBy(p => p.Name).ToListAsync();
         return View(group);
     }
 
@@ -190,6 +204,44 @@ public class UserGroupsController : Controller
             await _context.SaveChangesAsync();
             await _audit.LogAsync(AuditCategory.Authorization, "GroupAccessRevoked",
                 targetType: nameof(RDPResource), targetId: resourceId,
+                detail: new { groupId = id, groupName = group.Name });
+        }
+        return RedirectToAction(nameof(Manage), new { id });
+    }
+
+    // --- VDI pool assignments (every member is entitled to the pool) ---
+
+    [HttpPost("{id}/pools/add")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> AddPool(string id, string poolId)
+    {
+        var group = await _context.UserGroups.FindAsync(id);
+        if (group == null) return NotFound();
+        var exists = await _context.VdiPoolAssignments.AnyAsync(a => a.PoolId == poolId && a.GroupId == id);
+        if (!exists && await _context.VdiPools.AnyAsync(p => p.Id == poolId))
+        {
+            _context.VdiPoolAssignments.Add(new VdiPoolAssignment { PoolId = poolId, GroupId = id });
+            await _context.SaveChangesAsync();
+            await _audit.LogAsync(AuditCategory.Authorization, "VdiPoolAssignmentGranted",
+                targetType: nameof(VdiPool), targetId: poolId,
+                detail: new { groupId = id, groupName = group.Name });
+        }
+        return RedirectToAction(nameof(Manage), new { id });
+    }
+
+    [HttpPost("{id}/pools/remove")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> RemovePool(string id, string poolId)
+    {
+        var group = await _context.UserGroups.FindAsync(id);
+        if (group == null) return NotFound();
+        var a = await _context.VdiPoolAssignments.FirstOrDefaultAsync(x => x.PoolId == poolId && x.GroupId == id);
+        if (a != null)
+        {
+            _context.VdiPoolAssignments.Remove(a);
+            await _context.SaveChangesAsync();
+            await _audit.LogAsync(AuditCategory.Authorization, "VdiPoolAssignmentRevoked",
+                targetType: nameof(VdiPool), targetId: poolId,
                 detail: new { groupId = id, groupName = group.Name });
         }
         return RedirectToAction(nameof(Manage), new { id });

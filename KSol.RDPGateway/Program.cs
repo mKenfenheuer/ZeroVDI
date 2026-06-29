@@ -171,6 +171,7 @@ public class Program
         builder.Services.AddSingleton<RDP.ProxmoxBackendProvider>();
         builder.Services.AddSingleton<RDP.ProxmoxClient>();
         builder.Services.AddSingleton<RDP.SessionTracker>();
+        builder.Services.AddSingleton<RDP.VdiProvisioningService>();
         builder.Services.AddSingleton<RDP.VdiResourceResolver>();
         // Tracks the per-(user, resource) connect-readiness sequence so the browser preflight can poll
         // progress (start VM → guest agent → IP → RDP probe → ready) before launching the console.

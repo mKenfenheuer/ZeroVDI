@@ -76,9 +76,18 @@ namespace KSol.RDPGateway.Controllers
 
             var access = await _access.GetUserAccessAsync(user.Id);
             var accessibleIds = access.Select(a => a.Resource.Id).ToHashSet();
+            // VDI clones are provisioned per-pool, not independently grantable — keep them out of the
+            // direct-grant picker (access flows through pool assignment + ownership).
             var grantableResources = await _context.RDPResources
-                .Where(r => !accessibleIds.Contains(r.Id))
+                .Where(r => r.Source != ResourceSource.VdiClone && !accessibleIds.Contains(r.Id))
                 .OrderBy(r => r.Name)
+                .ToListAsync();
+
+            var pools = await _access.GetUserPoolAccessAsync(user.Id);
+            var assignedPoolIds = pools.Select(p => p.Pool.Id).ToHashSet();
+            var assignablePools = await _context.VdiPools
+                .Where(p => !assignedPoolIds.Contains(p.Id))
+                .OrderBy(p => p.Name)
                 .ToListAsync();
 
             return new UserManageViewModel
@@ -90,6 +99,8 @@ namespace KSol.RDPGateway.Controllers
                 AvailableGroups = availableGroups,
                 Access = access,
                 GrantableResources = grantableResources,
+                Pools = pools,
+                AssignablePools = assignablePools,
             };
         }
 
@@ -385,6 +396,54 @@ namespace KSol.RDPGateway.Controllers
             }
             return RedirectToAction(nameof(Manage), new { id });
         }
+
+        // POST: /admin/users/{id}/pools/assign — give this user a DIRECT assignment to a VDI pool.
+        [HttpPost("{id}/pools/assign")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> AssignPool(string id, string poolId)
+        {
+            var user = await _userManager.FindByIdAsync(id);
+            if (user == null) return NotFound();
+
+            var pool = await _context.VdiPools.FirstOrDefaultAsync(p => p.Id == poolId);
+            if (pool == null)
+            {
+                TempData["Error"] = "Select a pool to assign.";
+                return RedirectToAction(nameof(Manage), new { id });
+            }
+
+            var exists = await _context.VdiPoolAssignments.AnyAsync(a => a.PoolId == poolId && a.UserId == id);
+            if (!exists)
+            {
+                _context.VdiPoolAssignments.Add(new VdiPoolAssignment { PoolId = poolId, UserId = id });
+                await _context.SaveChangesAsync();
+                await _audit.LogAsync(AuditCategory.Authorization, "VdiPoolAssignmentGranted",
+                    targetType: nameof(VdiPool), targetId: poolId, targetName: pool.Name,
+                    detail: new { userId = id });
+                TempData["Status"] = $"Assigned to pool “{pool.Name}”.";
+            }
+            return RedirectToAction(nameof(Manage), new { id });
+        }
+
+        // POST: /admin/users/{id}/pools/unassign — remove this user's DIRECT pool assignment.
+        [HttpPost("{id}/pools/unassign")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> UnassignPool(string id, string poolId)
+        {
+            var a = await _context.VdiPoolAssignments
+                .Include(x => x.Pool)
+                .FirstOrDefaultAsync(x => x.PoolId == poolId && x.UserId == id);
+            if (a != null)
+            {
+                _context.VdiPoolAssignments.Remove(a);
+                await _context.SaveChangesAsync();
+                await _audit.LogAsync(AuditCategory.Authorization, "VdiPoolAssignmentRevoked",
+                    targetType: nameof(VdiPool), targetId: poolId, targetName: a.Pool?.Name,
+                    detail: new { userId = id });
+                TempData["Status"] = "Direct pool assignment removed.";
+            }
+            return RedirectToAction(nameof(Manage), new { id });
+        }
     }
 
     /// <summary>Backing model for the tabbed user editor (account/roles/groups/resource access).</summary>
@@ -397,5 +456,7 @@ namespace KSol.RDPGateway.Controllers
         public List<UserGroup> AvailableGroups { get; set; } = new();
         public IReadOnlyList<ResourceAccessEntry> Access { get; set; } = new List<ResourceAccessEntry>();
         public List<RDPResource> GrantableResources { get; set; } = new();
+        public IReadOnlyList<PoolAccessEntry> Pools { get; set; } = new List<PoolAccessEntry>();
+        public List<VdiPool> AssignablePools { get; set; } = new();
     }
 }

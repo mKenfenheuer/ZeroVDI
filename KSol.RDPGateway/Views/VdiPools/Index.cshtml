@@ -1,0 +1,62 @@
+@model IEnumerable<KSol.RDPGateway.Models.VdiPool>
+@{
+    ViewData["Title"] = "VDI Pools";
+    ViewData["Subtitle"] = "Clone desktops from a template and assign them to users and groups.";
+}
+
+@section PageActions {
+    <a asp-action="Create" class="btn-primary w-fit"><i class="ri-add-line"></i> New pool</a>
+}
+
+@if (!Model.Any())
+{
+    <div class="flex flex-col items-center justify-center text-center py-16 px-4 card-surface border-dashed">
+        <div class="w-14 h-14 rounded-full bg-muted flex items-center justify-center mb-4">
+            <i class="ri-stack-line text-2xl text-muted-foreground"></i>
+        </div>
+        <h3 class="text-lg font-semibold">No pools yet</h3>
+        <p class="text-sm text-muted-foreground mt-1">Create a pool to automatically clone desktops from a template for assigned users.</p>
+        <a asp-action="Create" class="btn-primary mt-4"><i class="ri-add-line"></i> New pool</a>
+    </div>
+}
+else
+{
+    <table class="table-surface">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Backend</th>
+                <th>Template</th>
+                <th>Kind</th>
+                <th>Assignments</th>
+                <th>Desktops</th>
+                <th class="text-right">Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        @foreach (var p in Model)
+        {
+            <tr>
+                <td class="font-medium">@p.Name</td>
+                <td class="text-muted-foreground">@(p.ProxmoxBackend?.Name ?? "—")</td>
+                <td class="text-muted-foreground">@p.TemplateVmId</td>
+                <td>
+                    <span class="badge bg-muted text-muted-foreground">@p.Kind</span>
+                </td>
+                <td><span class="badge bg-muted text-muted-foreground">@p.Assignments.Count</span></td>
+                <td><span class="badge bg-muted text-muted-foreground">@p.Instances.Count</span></td>
+                <td>
+                    <div class="flex items-center justify-end gap-2">
+                        <a asp-action="Manage" asp-route-id="@p.Id" class="btn-secondary btn-sm">Manage</a>
+                        <form asp-action="Delete" asp-route-id="@p.Id" method="post" class="inline"
+                              onsubmit="return confirm('Delete pool “@p.Name”? Assigned users lose access; deprovision desktops first.');">
+                            @Html.AntiForgeryToken()
+                            <button type="submit" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Delete</button>
+                        </form>
+                    </div>
+                </td>
+            </tr>
+        }
+        </tbody>
+    </table>
+}
