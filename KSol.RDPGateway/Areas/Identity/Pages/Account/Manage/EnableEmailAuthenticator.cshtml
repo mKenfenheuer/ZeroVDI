@@ -1,0 +1,44 @@
+@page
+@model EnableEmailAuthenticatorModel
+@{
+    ViewData["Title"] = "Set up email authentication";
+    ViewData["ActivePage"] = ManageNavPages.TwoFactorAuthentication;
+}
+
+<partial name="_StatusMessage" for="StatusMessage" />
+@if (Model.Request.Query["mfaRequired"] == "1")
+{
+    <div class="alert-warning mb-4">
+        <i class="ri-shield-keyhole-line text-lg"></i>
+        <div class="text-sm">Multi-factor authentication is required for your account. Set up an authentication method to continue.</div>
+    </div>
+}
+<h2 class="text-lg font-semibold mb-4">Set up email authentication</h2>
+
+<p class="text-sm text-muted-foreground max-w-xl mb-4">
+    We'll send a one-time code to <span class="font-medium text-foreground">@Model.MaskedEmail</span> each time you sign in.
+    Send a code now and enter it below to enable email authentication.
+</p>
+
+<div class="max-w-xs space-y-4">
+    <form method="post" asp-page-handler="SendCode">
+        <button type="submit" class="@(Model.CodeSent ? "btn-secondary" : "btn-primary")">
+            <i class="ri-mail-send-line"></i> @(Model.CodeSent ? "Resend code" : "Send code")
+        </button>
+    </form>
+
+    @if (Model.CodeSent)
+    {
+        <form method="post" asp-page-handler="Verify" class="space-y-3">
+            <div>
+                <label asp-for="Input.Code" class="form-label">Verification code</label>
+                <input asp-for="Input.Code" class="form-input tracking-widest" autocomplete="off" inputmode="numeric" placeholder="000000" />
+                <span asp-validation-for="Input.Code" class="form-error"></span>
+            </div>
+            <div asp-validation-summary="ModelOnly" role="alert"></div>
+            <button type="submit" class="btn-primary">Verify &amp; enable</button>
+        </form>
+    }
+</div>
+
+@section Scripts { <partial name="_ValidationScripts" /> }

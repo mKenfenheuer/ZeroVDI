@@ -2,14 +2,24 @@
 @model LoginWith2faModel
 @{
     ViewData["Title"] = "Two-factor authentication";
+    var isEmail = Model.Method == LoginWith2faModel.EmailMethod;
 }
 <h2 class="text-xl font-semibold text-center mb-1">@ViewData["Title"]</h2>
-<p class="text-sm text-muted-foreground text-center mb-6">Enter the code from your authenticator app.</p>
-<form method="post" asp-route-returnUrl="@Model.ReturnUrl" class="space-y-4">
+<p class="text-sm text-muted-foreground text-center mb-6">
+    @if (isEmail)
+    {
+        <span>We sent a code to <span class="font-medium text-foreground">@Model.MaskedEmail</span>. Enter it below.</span>
+    }
+    else
+    {
+        <span>Enter the code from your authenticator app.</span>
+    }
+</p>
+<form method="post" asp-route-returnUrl="@Model.ReturnUrl" asp-route-method="@Model.Method" asp-route-rememberMe="@Model.RememberMe" class="space-y-4">
     <input asp-for="RememberMe" type="hidden" />
     <div asp-validation-summary="ModelOnly" role="alert"></div>
     <div>
-        <label asp-for="Input.TwoFactorCode" class="form-label">Authenticator code</label>
+        <label asp-for="Input.TwoFactorCode" class="form-label">Verification code</label>
         <input asp-for="Input.TwoFactorCode" class="form-input tracking-widest text-center" autocomplete="off" inputmode="numeric" />
         <span asp-validation-for="Input.TwoFactorCode" class="form-error"></span>
     </div>
@@ -19,9 +29,28 @@
     </label>
     <button type="submit" class="btn-primary w-full">Sign in</button>
 </form>
-<p class="text-sm text-muted-foreground text-center mt-4">
-    No access to your device?
-    <a id="recovery-code-login" asp-page="./LoginWithRecoveryCode" asp-route-returnUrl="@Model.ReturnUrl" class="text-primary hover:underline">Use a recovery code</a>.
-</p>
+
+@if (isEmail)
+{
+    <form method="post" asp-page-handler="Resend" asp-route-returnUrl="@Model.ReturnUrl" asp-route-rememberMe="@Model.RememberMe" class="mt-3 text-center">
+        <button type="submit" class="text-sm text-primary hover:underline">Resend code</button>
+    </form>
+}
+
+<div class="text-sm text-muted-foreground text-center mt-4 space-y-1">
+    @* Offer the alternate enrolled method. *@
+    @if (isEmail && Model.HasAuthenticator)
+    {
+        <p><a asp-route-method="@LoginWith2faModel.AuthenticatorMethod" asp-route-returnUrl="@Model.ReturnUrl" asp-route-rememberMe="@Model.RememberMe" class="text-primary hover:underline">Use your authenticator app instead</a></p>
+    }
+    else if (!isEmail && Model.HasEmail)
+    {
+        <p><a asp-route-method="@LoginWith2faModel.EmailMethod" asp-route-returnUrl="@Model.ReturnUrl" asp-route-rememberMe="@Model.RememberMe" class="text-primary hover:underline">Email me a code instead</a></p>
+    }
+    <p>
+        No access to your device?
+        <a id="recovery-code-login" asp-page="./LoginWithRecoveryCode" asp-route-returnUrl="@Model.ReturnUrl" class="text-primary hover:underline">Use a recovery code</a>.
+    </p>
+</div>
 
 @section Scripts { <partial name="_ValidationScripts" /> }

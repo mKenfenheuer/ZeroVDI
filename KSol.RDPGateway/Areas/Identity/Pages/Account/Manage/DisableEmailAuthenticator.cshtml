@@ -1,0 +1,16 @@
+@page
+@model DisableEmailAuthenticatorModel
+@{
+    ViewData["Title"] = "Disable email authentication";
+    ViewData["ActivePage"] = ManageNavPages.TwoFactorAuthentication;
+}
+
+<h2 class="text-lg font-semibold mb-3">Disable email authentication</h2>
+<div class="alert-warning mb-4 max-w-xl">
+    <i class="ri-alert-line text-warning text-lg"></i>
+    <div class="text-sm">This removes email codes as a sign-in method. If it's your only method, two-factor authentication will be turned off for your account.</div>
+</div>
+<form method="post">
+    <button type="submit" class="btn-destructive">Disable email authentication</button>
+    <a asp-page="./TwoFactorAuthentication" class="btn-secondary">Cancel</a>
+</form>

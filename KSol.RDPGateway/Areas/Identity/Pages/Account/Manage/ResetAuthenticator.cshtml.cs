@@ -16,15 +16,18 @@ namespace KSol.RDPGateway.Areas.Identity.Pages.Account.Manage
         private readonly UserManager<ApplicationUser> _userManager;
         private readonly SignInManager<ApplicationUser> _signInManager;
         private readonly ILogger<ResetAuthenticatorModel> _logger;
+        private readonly KSol.RDPGateway.RDP.IAuditLogger _audit;
 
         public ResetAuthenticatorModel(
             UserManager<ApplicationUser> userManager,
             SignInManager<ApplicationUser> signInManager,
-            ILogger<ResetAuthenticatorModel> logger)
+            ILogger<ResetAuthenticatorModel> logger,
+            KSol.RDPGateway.RDP.IAuditLogger audit)
         {
             _userManager = userManager;
             _signInManager = signInManager;
             _logger = logger;
+            _audit = audit;
         }
 
         /// <summary>
@@ -57,6 +60,8 @@ namespace KSol.RDPGateway.Areas.Identity.Pages.Account.Manage
             await _userManager.ResetAuthenticatorKeyAsync(user);
             var userId = await _userManager.GetUserIdAsync(user);
             _logger.LogInformation("User with ID '{UserId}' has reset their authentication app key.", user.Id);
+            await _audit.LogAsync(Models.AuditCategory.Authentication, "MfaReset",
+                actorUserId: userId, actorName: user.UserName);
 
             await _signInManager.RefreshSignInAsync(user);
             StatusMessage = "Your authenticator app key has been reset, you will need to configure your authenticator app using the new key.";

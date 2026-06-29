@@ -31,6 +31,9 @@ namespace KSol.RDPGateway.Areas.Identity.Pages.Account.Manage
         /// </summary>
         public bool HasAuthenticator { get; set; }
 
+        /// <summary>Whether the user has enrolled the standalone email-code MFA method.</summary>
+        public bool HasEmailAuthenticator { get; set; }
+
         /// <summary>
         ///     This API supports the ASP.NET Core Identity default UI infrastructure and is not intended to be used
         ///     directly from your code. This API may change or be removed in future releases.
@@ -66,6 +69,7 @@ namespace KSol.RDPGateway.Areas.Identity.Pages.Account.Manage
             }
 
             HasAuthenticator = await _userManager.GetAuthenticatorKeyAsync(user) != null;
+            HasEmailAuthenticator = user.EmailTwoFactorEnabled;
             Is2faEnabled = await _userManager.GetTwoFactorEnabledAsync(user);
             IsMachineRemembered = await _signInManager.IsTwoFactorClientRememberedAsync(user);
             RecoveryCodesLeft = await _userManager.CountRecoveryCodesAsync(user);

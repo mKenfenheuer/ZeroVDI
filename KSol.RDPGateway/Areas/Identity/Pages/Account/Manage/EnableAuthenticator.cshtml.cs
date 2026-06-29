@@ -21,17 +21,20 @@ namespace KSol.RDPGateway.Areas.Identity.Pages.Account.Manage
         private readonly UserManager<ApplicationUser> _userManager;
         private readonly ILogger<EnableAuthenticatorModel> _logger;
         private readonly UrlEncoder _urlEncoder;
+        private readonly KSol.RDPGateway.RDP.IAuditLogger _audit;
 
         private const string AuthenticatorUriFormat = "otpauth://totp/{0}:{1}?secret={2}&issuer={0}&digits=6";
 
         public EnableAuthenticatorModel(
             UserManager<ApplicationUser> userManager,
             ILogger<EnableAuthenticatorModel> logger,
-            UrlEncoder urlEncoder)
+            UrlEncoder urlEncoder,
+            KSol.RDPGateway.RDP.IAuditLogger audit)
         {
             _userManager = userManager;
             _logger = logger;
             _urlEncoder = urlEncoder;
+            _audit = audit;
         }
 
         /// <summary>
@@ -127,6 +130,8 @@ namespace KSol.RDPGateway.Areas.Identity.Pages.Account.Manage
             await _userManager.SetTwoFactorEnabledAsync(user, true);
             var userId = await _userManager.GetUserIdAsync(user);
             _logger.LogInformation("User with ID '{UserId}' has enabled 2FA with an authenticator app.", userId);
+            await _audit.LogAsync(Models.AuditCategory.Authentication, "MfaEnabled",
+                actorUserId: userId, actorName: user.UserName);
 
             StatusMessage = "Your authenticator app has been verified.";
 

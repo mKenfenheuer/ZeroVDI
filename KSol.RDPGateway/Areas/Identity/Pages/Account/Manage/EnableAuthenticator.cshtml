@@ -6,6 +6,13 @@
 }
 
 <partial name="_StatusMessage" for="StatusMessage" />
+@if (Model.Request.Query["mfaRequired"] == "1")
+{
+    <div class="alert-warning mb-4">
+        <i class="ri-shield-keyhole-line text-lg"></i>
+        <div class="text-sm">Multi-factor authentication is required for your account. Set up an authenticator app below to continue.</div>
+    </div>
+}
 <h2 class="text-lg font-semibold mb-4">Configure authenticator app</h2>
 
 <ol class="space-y-5 text-sm max-w-xl list-decimal list-inside marker:text-muted-foreground">

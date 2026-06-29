@@ -35,7 +35,17 @@ public class Program
 
         builder.Services.AddDefaultIdentity<ApplicationUser>(options => options.SignIn.RequireConfirmedAccount = true)
             .AddRoles<IdentityRole>()
-            .AddEntityFrameworkStores<ApplicationDbContext>();
+            .AddEntityFrameworkStores<ApplicationDbContext>()
+            // Registers the built-in token providers, including "Email" — used to issue the one-time codes
+            // for email-based MFA (the authenticator app uses its own dedicated provider). The default
+            // Email/Phone codes live in the default DataProtector token provider; their lifetime is the
+            // global TokenOptions lifespan (default 1 day) unless overridden below.
+            .AddDefaultTokenProviders();
+
+        // Email MFA codes should be short-lived. Scope the email-confirmation/2FA token lifespan down from
+        // the 1-day default so an intercepted code can't be replayed long after it was sent.
+        builder.Services.Configure<DataProtectionTokenProviderOptions>(o =>
+            o.TokenLifespan = TimeSpan.FromMinutes(5));
 
         // Replace the default password hasher with one that also derives the Digest HA1 and NTLM
         // NT hash on every password set, enabling Digest and NTLM/Negotiate gateway auth without
@@ -99,6 +109,11 @@ public class Program
         // HttpContextAccessor lets the scoped logger resolve the actor + client IP off the request.
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddScoped<RDP.IAuditLogger, RDP.AuditLogger>();
+
+        // MFA enforcement: Identity already runs the 2FA challenge for enrolled users at login; this
+        // policy decides who is REQUIRED to enroll (Mfa section). The middleware (added below) forces
+        // required-but-unenrolled users to the authenticator setup page.
+        builder.Services.AddSingleton<RDP.MfaPolicy>();
 
         // Rate limiting (brute-force / abuse protection). Two policies:
         //  - "auth": IP-based fixed window on the login/register/password endpoints.
@@ -335,6 +350,10 @@ public class Program
         app.UseRateLimiter();
 
         app.UseAuthorization();
+
+        // After authorization (so User is populated and role-gated): force users who are required to use
+        // MFA but have not enrolled to the authenticator setup page before they can use the app.
+        app.UseMiddleware<RDP.MfaEnforcementMiddleware>();
 
         app.MapStaticAssets();
         app.MapControllerRoute(

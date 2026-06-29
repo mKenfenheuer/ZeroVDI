@@ -51,7 +51,12 @@
         </div>
     }
 
-    <h3 class="font-medium mb-2">Authenticator app</h3>
+    <h3 class="font-medium mb-2">Authenticator app
+        @if (Model.HasAuthenticator)
+        {
+            <span class="badge bg-success/10 text-success ml-1"><i class="ri-check-line"></i> Enabled</span>
+        }
+    </h3>
     <div class="flex flex-wrap gap-2">
         @if (!Model.HasAuthenticator)
         {
@@ -61,6 +66,24 @@
         {
             <a id="enable-authenticator" asp-page="./EnableAuthenticator" class="btn-secondary">Set up authenticator app</a>
             <a id="reset-authenticator" asp-page="./ResetAuthenticator" class="btn-secondary">Reset authenticator app</a>
+        }
+    </div>
+
+    <h3 class="font-medium mb-2 mt-6">Email authentication
+        @if (Model.HasEmailAuthenticator)
+        {
+            <span class="badge bg-success/10 text-success ml-1"><i class="ri-check-line"></i> Enabled</span>
+        }
+    </h3>
+    <p class="text-sm text-muted-foreground mb-2">Receive a one-time code by email when you sign in.</p>
+    <div class="flex flex-wrap gap-2">
+        @if (!Model.HasEmailAuthenticator)
+        {
+            <a asp-page="./EnableEmailAuthenticator" class="btn-primary">Enable email authentication</a>
+        }
+        else
+        {
+            <a asp-page="./DisableEmailAuthenticator" class="btn-secondary">Disable email authentication</a>
         }
     </div>
 }

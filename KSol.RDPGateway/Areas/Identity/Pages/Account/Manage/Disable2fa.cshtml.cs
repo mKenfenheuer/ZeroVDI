@@ -15,13 +15,16 @@ namespace KSol.RDPGateway.Areas.Identity.Pages.Account.Manage
     {
         private readonly UserManager<ApplicationUser> _userManager;
         private readonly ILogger<Disable2faModel> _logger;
+        private readonly KSol.RDPGateway.RDP.IAuditLogger _audit;
 
         public Disable2faModel(
             UserManager<ApplicationUser> userManager,
-            ILogger<Disable2faModel> logger)
+            ILogger<Disable2faModel> logger,
+            KSol.RDPGateway.RDP.IAuditLogger audit)
         {
             _userManager = userManager;
             _logger = logger;
+            _audit = audit;
         }
 
         /// <summary>
@@ -62,6 +65,8 @@ namespace KSol.RDPGateway.Areas.Identity.Pages.Account.Manage
             }
 
             _logger.LogInformation("User with ID '{UserId}' has disabled 2fa.", _userManager.GetUserId(User));
+            await _audit.LogAsync(Models.AuditCategory.Authentication, "MfaDisabled",
+                actorUserId: user.Id, actorName: user.UserName);
             StatusMessage = "2fa has been disabled. You can reenable 2fa when you setup an authenticator app";
             return RedirectToPage("./TwoFactorAuthentication");
         }

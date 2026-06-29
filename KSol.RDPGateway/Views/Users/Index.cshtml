@@ -27,6 +27,7 @@ else
                 <th>Username</th>
                 <th>Email</th>
                 <th>Status</th>
+                <th>MFA</th>
                 <th class="text-right">Actions</th>
             </tr>
         </thead>
@@ -44,6 +45,16 @@ else
                     else
                     {
                         <span class="badge bg-warning/10 text-warning">Not confirmed</span>
+                    }
+                </td>
+                <td>
+                    @if (item.TwoFactorEnabled)
+                    {
+                        <span class="badge bg-success/10 text-success"><i class="ri-shield-check-line"></i> Enabled</span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-muted text-muted-foreground">Off</span>
                     }
                 </td>
                 <td>
