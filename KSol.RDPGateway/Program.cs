@@ -48,8 +48,40 @@ public class Program
         var dpKeysDir = builder.Configuration["DataProtection:KeysDir"]
             ?? Path.Combine(builder.Environment.ContentRootPath, "Data", "dp-keys");
         Directory.CreateDirectory(dpKeysDir);
+
+        // The keyring decrypts every stored VM/IPMI/SSH credential, so the on-disk key material is itself
+        // encrypted at rest (AES-256-GCM) with a passphrase held only in configuration — never on disk in
+        // plaintext, never in source control. Provide it via the DataProtection:MasterKeyPassphrase
+        // env var / secret. In Production a missing passphrase is fatal (we refuse to write plaintext
+        // keys); in Development we fall back to an ephemeral dev passphrase so first-run is frictionless.
+        var keyringPassphrase = builder.Configuration["DataProtection:MasterKeyPassphrase"];
+        if (string.IsNullOrWhiteSpace(keyringPassphrase))
+        {
+            if (!builder.Environment.IsDevelopment())
+                throw new InvalidOperationException(
+                    "DataProtection:MasterKeyPassphrase is not configured. Set it (e.g. the " +
+                    "DataProtection__MasterKeyPassphrase environment variable) to a strong secret so the " +
+                    "credential-encryption keyring can be stored encrypted at rest. Refusing to start with " +
+                    "an unprotected keyring.");
+            keyringPassphrase = RDP.KeyringEncryptor.DevFallbackPassphrase;
+        }
+
+        // Guard: refuse to boot if a keyring file is tracked in git — a committed key (even encrypted) is
+        // a credential-exposure footgun and almost always a mistake.
+        EnsureKeyringNotInSourceControl(dpKeysDir, builder.Environment);
+
+        var keyringEncryptor = new RDP.KeyringEncryptor(keyringPassphrase);
+        // Register the encryptor so DataProtection can resolve the matching IXmlDecryptor (referenced by
+        // type name inside each encrypted key) when unsealing the keyring at startup.
+        builder.Services.AddSingleton(keyringEncryptor);
+        builder.Services.AddSingleton<Microsoft.AspNetCore.DataProtection.XmlEncryption.IXmlDecryptor>(keyringEncryptor);
         builder.Services.AddDataProtection()
             .PersistKeysToFileSystem(new DirectoryInfo(dpKeysDir));
+        // Encrypt the keyring at rest with our AES-GCM encryptor. We set it directly on KeyManagementOptions
+        // (the public UseXmlEncryptor extension only accepts framework-provided encryptor types), so newly
+        // written keys are sealed and existing encrypted keys are unsealed with the same component.
+        builder.Services.Configure<Microsoft.AspNetCore.DataProtection.KeyManagement.KeyManagementOptions>(o =>
+            o.XmlEncryptor = keyringEncryptor);
         builder.Services.AddSingleton<RDP.CredentialProtector>();
 
         // SMTP email sender for Identity (password reset, confirmation, 2FA codes).
@@ -98,10 +130,45 @@ public class Program
             options.ForwardedHeaders = ForwardedHeaders.XForwardedFor
                 | ForwardedHeaders.XForwardedProto
                 | ForwardedHeaders.XForwardedHost;
-            // The app is only reachable through the trusted proxy, so accept its forwarded headers.
-            // (Tighten KnownProxies/KnownNetworks if the app is ever exposed directly.)
+
+            // Only trust X-Forwarded-* from explicitly configured proxies. Without this, ANY client can
+            // spoof X-Forwarded-Proto/Host/For — enabling host-header poisoning of the generated .rdp /
+            // feed URLs and forged client IPs in logs. Configure the reverse proxy's address(es) via
+            // ForwardedHeaders:KnownProxies (IPs) and/or ForwardedHeaders:KnownNetworks ("cidr/prefix").
             options.KnownNetworks.Clear();
             options.KnownProxies.Clear();
+
+            var knownProxies = builder.Configuration.GetSection("ForwardedHeaders:KnownProxies").Get<string[]>();
+            foreach (var ip in knownProxies ?? Array.Empty<string>())
+                if (System.Net.IPAddress.TryParse(ip.Trim(), out var parsed))
+                    options.KnownProxies.Add(parsed);
+
+            var knownNetworks = builder.Configuration.GetSection("ForwardedHeaders:KnownNetworks").Get<string[]>();
+            foreach (var cidr in knownNetworks ?? Array.Empty<string>())
+            {
+                var parts = cidr.Split('/', 2);
+                if (parts.Length == 2 && System.Net.IPAddress.TryParse(parts[0].Trim(), out var prefix)
+                    && int.TryParse(parts[1].Trim(), out var len))
+                    options.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(prefix, len));
+            }
+
+            // Backwards-compatible / containerized default: if nothing is configured, trust the loopback
+            // proxy only (the common "reverse proxy on the same host/pod" case) rather than every client.
+            // Set ForwardedHeaders:TrustAllProxies=true to opt back into trusting any hop (only safe when
+            // the app is unreachable except through the proxy).
+            if ((knownProxies == null || knownProxies.Length == 0)
+                && (knownNetworks == null || knownNetworks.Length == 0))
+            {
+                if (builder.Configuration.GetValue<bool>("ForwardedHeaders:TrustAllProxies"))
+                {
+                    options.ForwardLimit = null; // trust the whole chain
+                }
+                else
+                {
+                    options.KnownProxies.Add(System.Net.IPAddress.IPv6Loopback);
+                    options.KnownProxies.Add(System.Net.IPAddress.Loopback);
+                }
+            }
         });
 
         var app = builder.Build();
@@ -120,6 +187,25 @@ public class Program
             {
                 context.Database.Migrate();
             }
+
+            // One-time, idempotent: encrypt any legacy plaintext secrets (NtHash, Proxmox API token) now
+            // that those columns are encrypted at rest. Safe to run every startup — already-encrypted
+            // values are detected and skipped.
+            if (context != null)
+            {
+                try
+                {
+                    var protector = scope.ServiceProvider.GetRequiredService<RDP.CredentialProtector>();
+                    var migrator = new Data.SecretEncryptionMigrator(context, protector,
+                        scope.ServiceProvider.GetRequiredService<ILogger<Data.SecretEncryptionMigrator>>());
+                    migrator.EncryptPlaintextSecrets();
+                }
+                catch (Exception ex)
+                {
+                    scope.ServiceProvider.GetRequiredService<ILogger<Program>>()
+                        .LogError(ex, "Failed to encrypt legacy plaintext secrets at startup.");
+                }
+            }
             
             // Create roles if they don't exist. "Auditor" may review session recordings (read-only
             // access to the Recordings area) without full Admin rights; ordinary users never see them.
@@ -134,27 +220,52 @@ public class Program
             
             if (userManager?.Users.Count() == 0)
             {
+                // Bootstrap the first admin. The email and password may be supplied out-of-band via
+                // Bootstrap:AdminEmail / Bootstrap:AdminPassword (env: Bootstrap__AdminPassword). If no
+                // password is configured we generate a cryptographically-random one and log it ONCE — we
+                // never ship a known default password (the previous hardcoded "rdpgateway" let anyone log
+                // into a fresh deployment as Admin). Lockout is left ENABLED so the account is brute-force
+                // protected like any other.
+                var bootstrapEmail = builder.Configuration["Bootstrap:AdminEmail"] ?? "admin@example.com";
+                var configuredPassword = builder.Configuration["Bootstrap:AdminPassword"];
+                var generated = string.IsNullOrEmpty(configuredPassword);
+                var bootstrapPassword = configuredPassword ?? GenerateStrongPassword();
+
                 ApplicationUser user = new ApplicationUser()
                 {
-                    UserName = "admin@example.com",
-                    NormalizedEmail = "admin@example.com".ToUpper(),
-                    NormalizedUserName = "admin@example.com".ToUpper(),
-                    Email = "admin@example.com",
+                    UserName = bootstrapEmail,
+                    NormalizedEmail = bootstrapEmail.ToUpperInvariant(),
+                    NormalizedUserName = bootstrapEmail.ToUpperInvariant(),
+                    Email = bootstrapEmail,
                     EmailConfirmed = true,
-                    LockoutEnabled = false,
                 };
-                userManager.CreateAsync(user).Wait();
-                user.PasswordHash = userManager.PasswordHasher.HashPassword(user, "rdpgateway");
-                context?.Users.Update(user);
-                context?.SaveChanges();
-                
-                // Assign Admin role to admin@example.com
-                userManager.AddToRoleAsync(user, "Admin").Wait();
+                var createResult = userManager.CreateAsync(user, bootstrapPassword).Result;
+                if (createResult.Succeeded)
+                {
+                    userManager.AddToRoleAsync(user, "Admin").Wait();
+                    var startupLogger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+                    if (generated)
+                        startupLogger.LogWarning(
+                            "Bootstrapped initial admin account '{Email}' with a generated password: {Password}\n" +
+                            "Sign in and change it immediately; this is the only time it is shown.",
+                            bootstrapEmail, bootstrapPassword);
+                    else
+                        startupLogger.LogInformation(
+                            "Bootstrapped initial admin account '{Email}' with the configured Bootstrap:AdminPassword.",
+                            bootstrapEmail);
+                }
+                else
+                {
+                    var startupLogger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+                    startupLogger.LogError("Failed to bootstrap initial admin account: {Errors}",
+                        string.Join("; ", createResult.Errors.Select(e => e.Description)));
+                }
             }
             else if (userManager != null)
             {
-                // If admin@example.com exists but doesn't have Admin role, add it
-                var adminUser = userManager.FindByNameAsync("admin@example.com").Result;
+                // If the configured/default bootstrap admin exists but lacks the Admin role, grant it.
+                var bootstrapEmail = builder.Configuration["Bootstrap:AdminEmail"] ?? "admin@example.com";
+                var adminUser = userManager.FindByNameAsync(bootstrapEmail).Result;
                 if (adminUser != null && !userManager.IsInRoleAsync(adminUser, "Admin").Result)
                 {
                     userManager.AddToRoleAsync(adminUser, "Admin").Wait();
@@ -194,5 +305,82 @@ public class Program
            .WithStaticAssets();
 
         app.Run();
+    }
+
+    /// <summary>
+    /// Generates a cryptographically-random password that satisfies the default Identity complexity
+    /// rules (upper, lower, digit, symbol, length). Used only to bootstrap the first admin when no
+    /// Bootstrap:AdminPassword is configured; the value is logged once and never persisted in plaintext.
+    /// </summary>
+    private static string GenerateStrongPassword()
+    {
+        const string upper = "ABCDEFGHJKLMNPQRSTUVWXYZ";   // no I/O to avoid ambiguity
+        const string lower = "abcdefghijkmnpqrstuvwxyz";
+        const string digits = "23456789";
+        const string symbols = "!@#$%^&*-_=+";
+        const string all = upper + lower + digits + symbols;
+
+        var chars = new char[20];
+        // Guarantee one of each required class, then fill the rest from the full alphabet.
+        chars[0] = upper[System.Security.Cryptography.RandomNumberGenerator.GetInt32(upper.Length)];
+        chars[1] = lower[System.Security.Cryptography.RandomNumberGenerator.GetInt32(lower.Length)];
+        chars[2] = digits[System.Security.Cryptography.RandomNumberGenerator.GetInt32(digits.Length)];
+        chars[3] = symbols[System.Security.Cryptography.RandomNumberGenerator.GetInt32(symbols.Length)];
+        for (int i = 4; i < chars.Length; i++)
+            chars[i] = all[System.Security.Cryptography.RandomNumberGenerator.GetInt32(all.Length)];
+
+        // Fisher–Yates shuffle so the guaranteed-class characters aren't always in the first positions.
+        for (int i = chars.Length - 1; i > 0; i--)
+        {
+            int j = System.Security.Cryptography.RandomNumberGenerator.GetInt32(i + 1);
+            (chars[i], chars[j]) = (chars[j], chars[i]);
+        }
+        return new string(chars);
+    }
+
+    /// <summary>
+    /// Refuses to start if any DataProtection key file is tracked by git. A committed keyring exposes the
+    /// key that decrypts every stored credential; even though we now encrypt the keyring at rest, a
+    /// committed file plus a leaked passphrase is a full compromise, and committing it is virtually always
+    /// an accident. This catches the mistake at boot instead of in an audit. Best-effort: if git is not
+    /// available the check is skipped (e.g. in a published container with no repo).
+    /// </summary>
+    private static void EnsureKeyringNotInSourceControl(string keysDir, IWebHostEnvironment env)
+    {
+        try
+        {
+            var gitDir = Path.Combine(env.ContentRootPath, ".git");
+            if (!Directory.Exists(gitDir) && !Directory.Exists(Path.Combine(Directory.GetParent(env.ContentRootPath)?.FullName ?? "", ".git")))
+                return; // not a git working tree — nothing to check
+
+            if (!Directory.Exists(keysDir)) return;
+
+            var psi = new System.Diagnostics.ProcessStartInfo("git")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = env.ContentRootPath,
+            };
+            psi.ArgumentList.Add("ls-files");
+            psi.ArgumentList.Add("--error-unmatch");
+            psi.ArgumentList.Add(Path.Combine(keysDir, "*.xml"));
+
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc == null) return;
+            var tracked = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(5000);
+            if (proc.ExitCode == 0 && !string.IsNullOrWhiteSpace(tracked))
+                throw new InvalidOperationException(
+                    "A DataProtection keyring file is tracked in git:\n" + tracked.Trim() +
+                    "\nRemove it from source control (git rm --cached), add Data/dp-keys/** to .gitignore, " +
+                    "and ROTATE the key (the committed key must be treated as compromised). Refusing to start.");
+        }
+        catch (InvalidOperationException) { throw; }
+        catch
+        {
+            // git missing or any other probe failure: don't block startup on the guard itself.
+        }
     }
 }

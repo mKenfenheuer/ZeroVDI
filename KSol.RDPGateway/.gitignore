@@ -402,3 +402,10 @@ FodyWeavers.xsd
 app_db.sqlite
 app_db.sqlite*
 Data/recordings/**
+
+# DataProtection keyring — encrypts stored VM/IPMI/SSH credentials at rest. NEVER commit:
+# anyone with this key can decrypt every stored credential. Each deployment must keep its own.
+Data/dp-keys/**
+
+# Server certificate used for the NLA MITM front-end.
+Data/*.pfx
