@@ -47,6 +47,12 @@ public sealed class KeyringEncryptor : IXmlEncryptor, IXmlDecryptor
     }
 
     /// <summary>
+    /// The raw master passphrase bytes, for deriving sibling keys (e.g. <see cref="RecordingCryptor"/>)
+    /// from the same secret. Returns a copy so callers can't mutate the internal key material.
+    /// </summary>
+    public byte[] PassphraseBytes => (byte[])_passphrase.Clone();
+
+    /// <summary>
     /// Parameterless constructor used by DataProtection's <c>TypeForwardingActivator</c> when it unseals
     /// an existing key whose decryptor is named in the XML. Resolves the passphrase from the environment.
     /// </summary>

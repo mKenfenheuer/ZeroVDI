@@ -104,6 +104,12 @@ public class Program
         // Background job that muxes captured raw streams into MP4 after sessions end (and picks up any
         // recordings left Processing by a previous run — crash-resilient).
         builder.Services.AddHostedService<RDP.RecordingMuxService>();
+        // Recording-at-rest encryption: AES-256-CTR keyed off the master keyring passphrase (seekable so
+        // the player's range requests still work). Registered as a singleton; the mux/serve paths use it
+        // only when Recording:EncryptAtRest is true.
+        builder.Services.AddSingleton<RDP.RecordingCryptor>();
+        // Recording retention / auto-purge (age + total-size cap). No-op until configured.
+        builder.Services.AddHostedService<RDP.RecordingRetentionService>();
 
         // Audit trail: immutable record of authentication, session, credential and admin actions.
         // HttpContextAccessor lets the scoped logger resolve the actor + client IP off the request.

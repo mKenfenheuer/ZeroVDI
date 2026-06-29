@@ -13,14 +13,31 @@
 }
 
 @section PageActions {
-    <a asp-action="Index" class="btn-secondary w-fit"><i class="ri-arrow-left-line"></i> Back to list</a>
+    <div class="flex items-center gap-2">
+        @if (!string.IsNullOrEmpty(Model.ChainHash))
+        {
+            <form asp-action="Verify" asp-route-id="@Model.Id" method="post" class="inline">
+                @Html.AntiForgeryToken()
+                <button type="submit" class="btn-secondary w-fit"><i class="ri-shield-check-line"></i> Verify integrity</button>
+            </form>
+        }
+        <a asp-action="Index" class="btn-secondary w-fit"><i class="ri-arrow-left-line"></i> Back to list</a>
+    </div>
 }
 
-<div class="mb-4">
+<div class="mb-4 flex flex-wrap items-center gap-2">
     <p class="text-sm text-muted-foreground">
         @(Model.RDPResource?.Name ?? Model.RDPResourceId) — @(Model.User?.UserName ?? Model.UserId)
         — @Model.StartedUtc.ToString("yyyy-MM-dd HH:mm:ss") UTC
     </p>
+    @if (Model.Encrypted)
+    {
+        <span class="badge bg-info/10 text-info"><i class="ri-lock-2-line"></i> Encrypted at rest</span>
+    }
+    @if (!string.IsNullOrEmpty(Model.ChainHash))
+    {
+        <span class="badge bg-muted text-muted-foreground" title="@Model.ChainHash"><i class="ri-fingerprint-line"></i> Tamper-evident</span>
+    }
 </div>
 
 @if (Model.Status == RecordingStatus.UnsupportedCodec)

@@ -21,10 +21,15 @@ namespace KSol.RDPGateway.Controllers;
 public class RecordingsController : Controller
 {
     private readonly ApplicationDbContext _context;
+    private readonly KSol.RDPGateway.RDP.RecordingCryptor _cryptor;
+    private readonly KSol.RDPGateway.RDP.IAuditLogger _audit;
 
-    public RecordingsController(ApplicationDbContext context)
+    public RecordingsController(ApplicationDbContext context,
+        KSol.RDPGateway.RDP.RecordingCryptor cryptor, KSol.RDPGateway.RDP.IAuditLogger audit)
     {
         _context = context;
+        _cryptor = cryptor;
+        _audit = audit;
     }
 
     [HttpGet("")]
@@ -65,8 +70,32 @@ public class RecordingsController : Controller
         };
         if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) return NotFound();
 
-        var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        // Encrypted recordings are decrypted on the fly with a SEEKABLE stream, so HTTP range requests
+        // (the player seeking) still map onto a partial decrypt. Plaintext recordings stream directly.
+        Stream stream = rec.Encrypted
+            ? _cryptor.OpenDecryptingStream(path)
+            : new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
         return File(stream, contentType, enableRangeProcessing: true);
+    }
+
+    // POST /admin/recordings/verify/{id} — re-hash the on-disk tracks and compare with the stored
+    // tamper-evidence hashes. Reports per-track intact/tampered/missing and audits the outcome.
+    [HttpPost("verify/{id}")]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> Verify(string id)
+    {
+        var rec = await LoadAuthorizedAsync(id);
+        if (rec == null) return NotFound();
+
+        var result = KSol.RDPGateway.RDP.RecordingIntegrity.Verify(rec);
+        await _audit.LogAsync(AuditCategory.Recording, "RecordingVerified",
+            success: result.AllIntact, targetType: nameof(Recording), targetId: rec.Id,
+            detail: new { result.AllIntact, tracks = result.Tracks.Select(t => new { t.Track, state = t.State.ToString() }) });
+
+        TempData[result.AllIntact ? "Status" : "Error"] = result.AllIntact
+            ? "Integrity verified — all recorded tracks match their stored hashes."
+            : "Integrity check FAILED — one or more tracks were altered or are missing.";
+        return RedirectToAction(nameof(Play), new { id });
     }
 
     // POST /admin/recordings/delete/{id} — removes the DB row and the recording's files/base directory.
@@ -100,6 +129,9 @@ public class RecordingsController : Controller
 
         _context.Recordings.Remove(rec);
         await _context.SaveChangesAsync();
+        await _audit.LogAsync(AuditCategory.Recording, "RecordingDeleted",
+            targetType: nameof(Recording), targetId: rec.Id,
+            targetName: rec.RDPResource?.Name);
         return RedirectToAction(nameof(Index));
     }
 

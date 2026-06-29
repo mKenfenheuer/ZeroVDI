@@ -60,4 +60,34 @@ public class Recording
 
     /// <summary>The desktop video codec observed (e.g. "AVC420", "AVC444v2", or "none").</summary>
     public string? VideoCodec { get; set; }
+
+    // --- Lifecycle: tamper-evidence (roadmap #11) -------------------------------------------------
+    // Computed once when muxing completes (over the FINAL on-disk track files, i.e. the ciphertext when
+    // encryption-at-rest is on, so a verify reads bytes directly without needing the key). Lets an
+    // auditor prove a stored recording has not been altered or swapped after capture.
+
+    /// <summary>SHA-256 (hex) of the on-disk desktop track, or null if no desktop track.</summary>
+    public string? DesktopSha256 { get; set; }
+    /// <summary>SHA-256 (hex) of the on-disk camera track.</summary>
+    public string? CameraSha256 { get; set; }
+    /// <summary>SHA-256 (hex) of the on-disk remote-audio track.</summary>
+    public string? AudioSha256 { get; set; }
+    /// <summary>SHA-256 (hex) of the on-disk mic track.</summary>
+    public string? MicSha256 { get; set; }
+
+    /// <summary>
+    /// Chained tamper-evidence hash: SHA-256 over (previous completed recording's ChainHash + this
+    /// recording's Id + per-track hashes). Forms an append-only hash chain so deleting or editing a
+    /// recording in the middle is detectable — re-computing the chain from any later row will diverge.
+    /// </summary>
+    public string? ChainHash { get; set; }
+
+    // --- Lifecycle: encryption-at-rest (roadmap #11) ----------------------------------------------
+
+    /// <summary>
+    /// Whether the on-disk track files are AES-256-CTR encrypted (decrypted on the fly when served). Set
+    /// at mux time from the Recording:EncryptAtRest config so individual recordings remember how they
+    /// were written even if the global setting changes later.
+    /// </summary>
+    public bool Encrypted { get; set; }
 }

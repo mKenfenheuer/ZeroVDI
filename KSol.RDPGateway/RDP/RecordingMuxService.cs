@@ -24,15 +24,20 @@ public sealed class RecordingMuxService : BackgroundService
     private readonly IServiceScopeFactory _scopes;
     private readonly IConfiguration _config;
     private readonly ILogger<RecordingMuxService> _logger;
+    private readonly RecordingCryptor? _cryptor;
+    private readonly bool _encryptAtRest;
     private readonly string _ffmpeg;
     private readonly string _mkvmerge;
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
-    public RecordingMuxService(IServiceScopeFactory scopes, IConfiguration config, ILogger<RecordingMuxService> logger)
+    public RecordingMuxService(IServiceScopeFactory scopes, IConfiguration config,
+        ILogger<RecordingMuxService> logger, RecordingCryptor? cryptor = null)
     {
         _scopes = scopes;
         _config = config;
         _logger = logger;
+        _cryptor = cryptor;
+        _encryptAtRest = config.GetValue("Recording:EncryptAtRest", false) && cryptor != null;
         _ffmpeg = config["Recording:FfmpegPath"] ?? "ffmpeg";
         _mkvmerge = config["Recording:MkvmergePath"] ?? "mkvmerge";
     }
@@ -221,6 +226,32 @@ public sealed class RecordingMuxService : BackgroundService
         rec.Status = anyFailed || nothingProduced ? RecordingStatus.Failed
             : manifest.UnsupportedVideoCodec ? RecordingStatus.UnsupportedCodec
             : RecordingStatus.Completed;
+
+        // On a successful mux, finalize the lifecycle: (1) encrypt the track files at rest if configured,
+        // then (2) stamp per-track SHA-256 + the tamper-evidence chain over the FINAL on-disk bytes. Both
+        // run only when we actually produced playable output (Completed / UnsupportedCodec).
+        if (!anyFailed && !nothingProduced)
+        {
+            if (_encryptAtRest)
+            {
+                try
+                {
+                    foreach (var f in new[] { desktopOut, cameraOut, audioOut, micOut })
+                        if (f != null && File.Exists(f)) _cryptor!.EncryptFileInPlace(f);
+                    rec.Encrypted = true;
+                }
+                catch (Exception ex)
+                {
+                    // Don't lose the recording if encryption fails — keep it plaintext and log loudly.
+                    _logger.LogError(ex, "RecordingMuxService: encrypting recording {Id} failed; stored unencrypted", rec.Id);
+                    rec.Encrypted = false;
+                }
+            }
+
+            try { await RecordingIntegrity.StampAsync(db, rec, ct); }
+            catch (Exception ex) { _logger.LogWarning(ex, "RecordingMuxService: hashing recording {Id} failed", rec.Id); }
+        }
+
         await db.SaveChangesAsync(ct);
 
         // Intermediates (encoded camera h264, VFR mkvs) are always removed. Raws are removed only on
