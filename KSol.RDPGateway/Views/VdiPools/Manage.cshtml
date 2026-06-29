@@ -106,6 +106,13 @@
                         <input class="form-input" asp-for="HostnamePattern" autocomplete="off" />
                     </div>
                 </div>
+                <div>
+                    <label class="form-label inline-flex items-center gap-2">
+                        <input type="checkbox" asp-for="GenerateCredentials" value="true" />
+                        Generate a unique user &amp; password per clone
+                    </label>
+                    <p class="form-hint">CloudInit mode. Derives a random local account from each owner's user data and stores it as their SSO login. When on, the shared cloud-init user/password below are ignored.</p>
+                </div>
                 <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
                     <div>
                         <label class="form-label" asp-for="CiUser">Cloud-init user</label>

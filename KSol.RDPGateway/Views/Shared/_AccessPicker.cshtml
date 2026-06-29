@@ -2,10 +2,17 @@
 @{
     // Unique id so several pickers can coexist on one page (e.g. add-to-group + grant-resource).
     var uid = "ap-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+    // These controllers are attribute-routed (e.g. [Route("admin/groups")]). Link generation for the
+    // POST action therefore needs an explicit controller; falling back to an empty asp-controller makes
+    // the tag helper resolve against the conventional {controller}/{action}/{id} route and post to the
+    // wrong place (e.g. /Home/AddResource → 405). Default to the ambient controller when unset.
+    var formController = string.IsNullOrEmpty(Model.FormController)
+        ? (string?)ViewContext.RouteData.Values["controller"]
+        : Model.FormController;
 }
 @if (Model.Candidates.Any())
 {
-    <form asp-action="@Model.FormAction" asp-controller="@Model.FormController" asp-route-id="@Model.RouteId"
+    <form asp-action="@Model.FormAction" asp-controller="@formController" asp-route-id="@Model.RouteId"
           method="post" class="flex gap-2" data-access-picker="@uid">
         @Html.AntiForgeryToken()
         <div class="relative flex-1">

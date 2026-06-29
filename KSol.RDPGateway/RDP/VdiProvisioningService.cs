@@ -165,9 +165,10 @@ public class VdiProvisioningService
         await _proxmox.SetNotesAsync(backend, resource.ProxmoxNode!, newVmId.Value,
             ProxmoxNotes.WriteId(null, resource.Id), ct);
 
-        // Per-pool identity customization (cloud-init / guest-agent rename+join) is applied here in a
-        // later slice (step 3b). For VdiIdentityMode.None the template self-customizes on first boot.
-        await ApplyIdentityAsync(backend, pool, resource, userName, ct);
+        // Per-pool identity customization (cloud-init / guest-agent rename+join). For VdiIdentityMode.None
+        // the template self-customizes on first boot. Applied while the clone is still stopped (before the
+        // resolver powers it on), so cloud-init lands on first boot.
+        await ApplyIdentityAsync(db, backend, pool, resource, userId, userName, ct);
 
         instance.State = VdiInstanceState.Ready;
         await db.SaveChangesAsync(ct);
@@ -178,14 +179,67 @@ public class VdiProvisioningService
     }
 
     /// <summary>
-    /// Applies the pool's per-clone identity customization. Filled in by step 3b; a no-op for
-    /// <see cref="VdiIdentityMode.None"/>. Best-effort: logged, never fatal to provisioning.
+    /// Applies the pool's per-clone identity customization. A no-op for <see cref="VdiIdentityMode.None"/>.
+    /// Best-effort: logged, never fatal to provisioning.
+    ///
+    /// <see cref="VdiIdentityMode.CloudInit"/> injects ciuser/cipassword/sshkeys via Proxmox cloud-init,
+    /// which cloudbase-init applies on a Windows clone's first boot (and cloud-init on Linux). When the
+    /// pool has <see cref="VdiPool.GenerateCredentials"/> set, a unique random username/password is derived
+    /// from the owner's account data instead of the static pool credentials, and the same pair is stored as
+    /// the owner's per-resource SSO so the gateway logs them straight in.
     /// </summary>
-    private Task ApplyIdentityAsync(ProxmoxBackend backend, VdiPool pool, RDPResource resource, string userName, CancellationToken ct)
+    private async Task ApplyIdentityAsync(
+        ApplicationDbContext db, ProxmoxBackend backend, VdiPool pool, RDPResource resource,
+        string userId, string userName, CancellationToken ct)
     {
-        if (pool.IdentityMode == VdiIdentityMode.None) return Task.CompletedTask;
-        _logger.LogDebug("VDI: identity mode {Mode} for {Pool} not yet applied (step 3b)", pool.IdentityMode, pool.Name);
-        return Task.CompletedTask;
+        if (pool.IdentityMode != VdiIdentityMode.CloudInit)
+        {
+            if (pool.IdentityMode == VdiIdentityMode.GuestAgent)
+                _logger.LogDebug("VDI: guest-agent identity for {Pool} not yet applied", pool.Name);
+            return;
+        }
+
+        string? ciUser;
+        string? ciPassword;
+        if (pool.GenerateCredentials)
+        {
+            var gen = VdiCredentialGenerator.Create(userName, userId);
+            ciUser = gen.Username;
+            ciPassword = gen.Password;
+
+            // Persist the generated pair as the owner's SSO credentials so the console/relay can inject
+            // them at connect time (same envelope format as manually stored VM credentials).
+            await StoreSsoCredentialsAsync(db, resource.Id, userId, ciUser, ciPassword, ct);
+        }
+        else
+        {
+            ciUser = pool.CiUser;
+            ciPassword = _credentials.Unprotect(pool.ProtectedCiPassword);
+        }
+
+        var ok = await _proxmox.SetCloudInitAsync(
+            backend, resource.ProxmoxNode!, resource.ProxmoxVmId!.Value,
+            ciUser, ciPassword, pool.CiSshKeys, ct);
+        if (!ok)
+            _logger.LogWarning("VDI: cloud-init customization failed for {Pool} clone {VmId}; clone may boot uncustomized",
+                pool.Name, resource.ProxmoxVmId);
+    }
+
+    /// <summary>Stores (or replaces) the owner's encrypted SSO credentials for a freshly provisioned clone.</summary>
+    private async Task StoreSsoCredentialsAsync(
+        ApplicationDbContext db, string resourceId, string userId, string username, string password, CancellationToken ct)
+    {
+        var auth = await db.RDPResourceUserAuthorizations
+            .FirstOrDefaultAsync(a => a.RDPResourceId == resourceId && a.UserId == userId, ct);
+        if (auth == null)
+        {
+            auth = new RDPResourceUserAuthorization { RDPResourceId = resourceId, UserId = userId };
+            db.RDPResourceUserAuthorizations.Add(auth);
+        }
+        auth.ProtectedUsername = _credentials.Protect(username);
+        auth.ProtectedPassword = _credentials.Protect(password);
+        auth.ProtectedDomain = null;
+        await db.SaveChangesAsync(ct);
     }
 
     private async Task<ProvisionResult> FailAsync(ApplicationDbContext db, VdiInstance instance, string error, CancellationToken ct)

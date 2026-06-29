@@ -120,6 +120,7 @@
                     var groupPicker = new AccessPickerModel
                     {
                         FormAction = "AddToGroup",
+                        FormController = "Users",
                         RouteId = u.Id,
                         FieldName = "groupId",
                         Placeholder = "Add to a group…",
@@ -169,6 +170,7 @@
                     var resourcePicker = new AccessPickerModel
                     {
                         FormAction = "GrantResource",
+                        FormController = "Users",
                         RouteId = u.Id,
                         FieldName = "resourceId",
                         Placeholder = "Grant a resource…",
@@ -228,7 +230,13 @@
                                     }
                                     else
                                     {
-                                        <span class="text-xs text-muted-foreground">Manage on group</span>
+                                        @foreach (var (gid, gname) in a.ViaGroups)
+                                        {
+                                            <a asp-controller="UserGroups" asp-action="Manage" asp-route-id="@gid"
+                                               class="btn-outline btn-sm" title="Access granted via this group — manage it there">
+                                                <i class="ri-group-line"></i> @gname
+                                            </a>
+                                        }
                                     }
                                 </div>
                             </td>
@@ -253,6 +261,7 @@
                     var poolPicker = new AccessPickerModel
                     {
                         FormAction = "AssignPool",
+                        FormController = "Users",
                         RouteId = u.Id,
                         FieldName = "poolId",
                         Placeholder = "Assign a desktop pool…",
@@ -299,7 +308,13 @@
                                     }
                                     else
                                     {
-                                        <span class="text-xs text-muted-foreground">Manage on group</span>
+                                        @foreach (var (gid, gname) in p.ViaGroups)
+                                        {
+                                            <a asp-controller="UserGroups" asp-action="Manage" asp-route-id="@gid"
+                                               class="btn-outline btn-sm" title="Assigned via this group — manage it there">
+                                                <i class="ri-group-line"></i> @gname
+                                            </a>
+                                        }
                                     }
                                 </div>
                             </td>

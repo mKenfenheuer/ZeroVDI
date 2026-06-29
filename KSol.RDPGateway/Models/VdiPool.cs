@@ -103,12 +103,20 @@ public class VdiPool
     /// <summary>Hostname pattern applied to each clone. Tokens: <c>{pool}</c>, <c>{user}</c>, <c>{n}</c>.</summary>
     public string? HostnamePattern { get; set; } = "{pool}-{user}";
 
-    /// <summary>Cloud-init user account (CloudInit mode).</summary>
+    /// <summary>Cloud-init user account (CloudInit mode). Ignored when <see cref="GenerateCredentials"/>.</summary>
     public string? CiUser { get; set; }
-    /// <summary>Cloud-init password, encrypted via CredentialProtector (CloudInit mode).</summary>
+    /// <summary>Cloud-init password, encrypted via CredentialProtector (CloudInit mode). Ignored when <see cref="GenerateCredentials"/>.</summary>
     public string? ProtectedCiPassword { get; set; }
     /// <summary>Cloud-init SSH public keys (CloudInit mode, Linux).</summary>
     public string? CiSshKeys { get; set; }
+
+    /// <summary>
+    /// CloudInit mode only: instead of injecting a single shared <see cref="CiUser"/>/<see cref="ProtectedCiPassword"/>
+    /// into every clone, derive a unique random username and password per owner from their account data
+    /// (cloudbase-init on Windows / cloud-init on Linux creates the account). The generated credentials are
+    /// also stored as the owner's per-resource SSO so the gateway logs them in automatically.
+    /// </summary>
+    public bool GenerateCredentials { get; set; }
 
     /// <summary>Windows domain to join (GuestAgent mode); null = no domain join.</summary>
     public string? DomainName { get; set; }

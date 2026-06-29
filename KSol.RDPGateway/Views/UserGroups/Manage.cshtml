@@ -39,6 +39,7 @@
                 var memberPicker = new AccessPickerModel
                 {
                     FormAction = "AddMember",
+                    FormController = "UserGroups",
                     RouteId = Model.Id,
                     FieldName = "userId",
                     Placeholder = "Add a user…",
@@ -57,9 +58,9 @@
             <ul class="space-y-1">
             @foreach (var m in Model.Memberships.OrderBy(x => x.User?.UserName))
             {
-                <li class="flex items-center justify-between text-sm py-1 border-b border-border last:border-0">
-                    <span>@(m.User?.UserName ?? m.UserId)</span>
-                    <form asp-action="RemoveMember" asp-route-id="@Model.Id" method="post" class="inline">
+                <li class="flex items-center justify-between gap-2 text-sm py-1 border-b border-border last:border-0">
+                    <span class="min-w-0 truncate">@(m.User?.UserName ?? m.UserId)</span>
+                    <form asp-action="RemoveMember" asp-route-id="@Model.Id" method="post" class="inline shrink-0">
                         @Html.AntiForgeryToken()
                         <input type="hidden" name="userId" value="@m.UserId" />
                         <button type="submit" class="text-destructive hover:underline text-xs">Remove</button>
@@ -78,6 +79,7 @@
                 var resourcePicker = new AccessPickerModel
                 {
                     FormAction = "AddResource",
+                    FormController = "UserGroups",
                     RouteId = Model.Id,
                     FieldName = "resourceId",
                     Placeholder = "Grant a resource…",
@@ -96,9 +98,9 @@
             <ul class="space-y-1">
             @foreach (var a in Model.ResourceAuthorizations.OrderBy(x => x.RDPResource?.Name))
             {
-                <li class="flex items-center justify-between text-sm py-1 border-b border-border last:border-0">
-                    <span>@(a.RDPResource?.Name ?? a.RDPResourceId)</span>
-                    <form asp-action="RemoveResource" asp-route-id="@Model.Id" method="post" class="inline">
+                <li class="flex items-center justify-between gap-2 text-sm py-1 border-b border-border last:border-0">
+                    <span class="min-w-0 truncate">@(a.RDPResource?.Name ?? a.RDPResourceId)</span>
+                    <form asp-action="RemoveResource" asp-route-id="@Model.Id" method="post" class="inline shrink-0">
                         @Html.AntiForgeryToken()
                         <input type="hidden" name="resourceId" value="@a.RDPResourceId" />
                         <button type="submit" class="text-destructive hover:underline text-xs">Revoke</button>
@@ -117,6 +119,7 @@
                 var poolPicker = new AccessPickerModel
                 {
                     FormAction = "AddPool",
+                    FormController = "UserGroups",
                     RouteId = Model.Id,
                     FieldName = "poolId",
                     Placeholder = "Assign a desktop pool…",
@@ -135,9 +138,9 @@
             <ul class="space-y-1">
             @foreach (var p in assignedPools)
             {
-                <li class="flex items-center justify-between text-sm py-1 border-b border-border last:border-0">
-                    <a asp-controller="VdiPools" asp-action="Manage" asp-route-id="@p.Id" class="hover:underline">@p.Name</a>
-                    <form asp-action="RemovePool" asp-route-id="@Model.Id" method="post" class="inline">
+                <li class="flex items-center justify-between gap-2 text-sm py-1 border-b border-border last:border-0">
+                    <a asp-controller="VdiPools" asp-action="Manage" asp-route-id="@p.Id" class="min-w-0 truncate hover:underline">@p.Name</a>
+                    <form asp-action="RemovePool" asp-route-id="@Model.Id" method="post" class="inline shrink-0">
                         @Html.AntiForgeryToken()
                         <input type="hidden" name="poolId" value="@p.Id" />
                         <button type="submit" class="text-destructive hover:underline text-xs">Remove</button>

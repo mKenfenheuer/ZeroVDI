@@ -144,6 +144,7 @@ public class VdiPoolsController : Controller
         // Identity / customization.
         pool.IdentityMode = form.IdentityMode;
         pool.HostnamePattern = string.IsNullOrWhiteSpace(form.HostnamePattern) ? null : form.HostnamePattern.Trim();
+        pool.GenerateCredentials = form.GenerateCredentials;
         pool.CiUser = string.IsNullOrWhiteSpace(form.CiUser) ? null : form.CiUser.Trim();
         pool.CiSshKeys = string.IsNullOrWhiteSpace(form.CiSshKeys) ? null : form.CiSshKeys;
         pool.DomainName = string.IsNullOrWhiteSpace(form.DomainName) ? null : form.DomainName.Trim();
