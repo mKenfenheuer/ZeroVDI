@@ -1,0 +1,103 @@
+@model KSol.RDPGateway.Models.UserGroup
+@using KSol.RDPGateway.Models
+@{
+    ViewData["Title"] = $"Group: {Model.Name}";
+    ViewData["Subtitle"] = "Members and granted resources. Every member can connect to every granted resource.";
+    var nonMembers = ViewBag.NonMembers as List<ApplicationUser> ?? new();
+    var ungranted = ViewBag.UngrantedResources as List<RDPResource> ?? new();
+}
+
+@section PageActions {
+    <a asp-action="Index" class="btn-secondary w-fit"><i class="ri-arrow-left-line"></i> Back to groups</a>
+}
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <!-- Group details -->
+    <div class="card-surface p-5">
+        <h3 class="font-medium mb-3">Group details</h3>
+        <form asp-action="Rename" asp-route-id="@Model.Id" method="post" class="space-y-3">
+            @Html.AntiForgeryToken()
+            <div>
+                <label class="form-label">Name</label>
+                <input name="name" class="form-input" value="@Model.Name" />
+            </div>
+            <div>
+                <label class="form-label">Description</label>
+                <input name="description" class="form-input" value="@Model.Description" />
+            </div>
+            <button type="submit" class="btn-primary btn-sm">Save</button>
+        </form>
+    </div>
+
+    <!-- Members -->
+    <div class="card-surface p-5">
+        <h3 class="font-medium mb-3">Members <span class="badge bg-muted text-muted-foreground">@Model.Memberships.Count</span></h3>
+        <form asp-action="AddMember" asp-route-id="@Model.Id" method="post" class="flex gap-2 mb-3">
+            @Html.AntiForgeryToken()
+            <select name="userId" class="form-select flex-1" required>
+                <option value="">Add a user…</option>
+                @foreach (var u in nonMembers)
+                {
+                    <option value="@u.Id">@u.UserName</option>
+                }
+            </select>
+            <button type="submit" class="btn-secondary btn-sm">Add</button>
+        </form>
+        @if (!Model.Memberships.Any())
+        {
+            <p class="text-sm text-muted-foreground">No members yet.</p>
+        }
+        else
+        {
+            <ul class="space-y-1">
+            @foreach (var m in Model.Memberships.OrderBy(x => x.User?.UserName))
+            {
+                <li class="flex items-center justify-between text-sm py-1 border-b border-border last:border-0">
+                    <span>@(m.User?.UserName ?? m.UserId)</span>
+                    <form asp-action="RemoveMember" asp-route-id="@Model.Id" method="post" class="inline">
+                        @Html.AntiForgeryToken()
+                        <input type="hidden" name="userId" value="@m.UserId" />
+                        <button type="submit" class="text-destructive hover:underline text-xs">Remove</button>
+                    </form>
+                </li>
+            }
+            </ul>
+        }
+    </div>
+
+    <!-- Granted resources -->
+    <div class="card-surface p-5">
+        <h3 class="font-medium mb-3">Granted resources <span class="badge bg-muted text-muted-foreground">@Model.ResourceAuthorizations.Count</span></h3>
+        <form asp-action="AddResource" asp-route-id="@Model.Id" method="post" class="flex gap-2 mb-3">
+            @Html.AntiForgeryToken()
+            <select name="resourceId" class="form-select flex-1" required>
+                <option value="">Grant a resource…</option>
+                @foreach (var r in ungranted)
+                {
+                    <option value="@r.Id">@r.Name</option>
+                }
+            </select>
+            <button type="submit" class="btn-secondary btn-sm">Grant</button>
+        </form>
+        @if (!Model.ResourceAuthorizations.Any())
+        {
+            <p class="text-sm text-muted-foreground">No resources granted.</p>
+        }
+        else
+        {
+            <ul class="space-y-1">
+            @foreach (var a in Model.ResourceAuthorizations.OrderBy(x => x.RDPResource?.Name))
+            {
+                <li class="flex items-center justify-between text-sm py-1 border-b border-border last:border-0">
+                    <span>@(a.RDPResource?.Name ?? a.RDPResourceId)</span>
+                    <form asp-action="RemoveResource" asp-route-id="@Model.Id" method="post" class="inline">
+                        @Html.AntiForgeryToken()
+                        <input type="hidden" name="resourceId" value="@a.RDPResourceId" />
+                        <button type="submit" class="text-destructive hover:underline text-xs">Revoke</button>
+                    </form>
+                </li>
+            }
+            </ul>
+        }
+    </div>
+</div>

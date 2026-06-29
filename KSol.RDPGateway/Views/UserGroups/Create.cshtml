@@ -1,0 +1,28 @@
+@model KSol.RDPGateway.Models.UserGroup
+@{
+    ViewData["Title"] = "New group";
+}
+
+@section PageActions {
+    <a asp-action="Index" class="btn-secondary w-fit"><i class="ri-arrow-left-line"></i> Back to groups</a>
+}
+
+<form asp-action="Create" method="post" class="card-surface p-6 max-w-lg space-y-4">
+    <div asp-validation-summary="ModelOnly"></div>
+    <div>
+        <label asp-for="Name" class="form-label">Name</label>
+        <input asp-for="Name" class="form-input" placeholder="e.g. Finance, Helpdesk" />
+        <span asp-validation-for="Name" class="form-error"></span>
+    </div>
+    <div>
+        <label asp-for="Description" class="form-label">Description (optional)</label>
+        <input asp-for="Description" class="form-input" />
+        <span asp-validation-for="Description" class="form-error"></span>
+    </div>
+    <div class="flex items-center gap-2 pt-2 border-t border-border">
+        <button type="submit" class="btn-primary">Create group</button>
+        <a asp-action="Index" class="btn-ghost">Cancel</a>
+    </div>
+</form>
+
+@section Scripts { <partial name="_ValidationScripts" /> }

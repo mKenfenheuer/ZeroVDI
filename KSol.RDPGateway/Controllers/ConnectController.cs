@@ -28,6 +28,7 @@ public class ConnectController : Controller
     private readonly CredentialProtector _credentials;
     private readonly IAuditLogger _audit;
     private readonly DevicePolicyService _devicePolicy;
+    private readonly ResourceAccessService _access;
 
     public ConnectController(
         ApplicationDbContext context,
@@ -35,7 +36,8 @@ public class ConnectController : Controller
         ConnectionReadinessService readiness,
         CredentialProtector credentials,
         IAuditLogger audit,
-        DevicePolicyService devicePolicy)
+        DevicePolicyService devicePolicy,
+        ResourceAccessService access)
     {
         _context = context;
         _userManager = userManager;
@@ -43,16 +45,15 @@ public class ConnectController : Controller
         _credentials = credentials;
         _audit = audit;
         _devicePolicy = devicePolicy;
+        _access = access;
     }
 
     private async Task<RDPResource?> AuthorizeResourceAsync(string id)
     {
         var userId = _userManager.GetUserId(User);
         if (userId == null) return null;
-        var auth = await _context.RDPResourceUserAuthorizations
-            .Include(a => a.RDPResource)
-            .FirstOrDefaultAsync(a => a.UserId == userId && a.RDPResourceId == id);
-        return auth?.RDPResource;
+        // Direct grant OR group grant.
+        return await _access.GetAuthorizedResourceAsync(userId, id);
     }
 
     // POST /connect/{id}/begin — kick off (or attach to) the readiness sequence.
@@ -93,7 +94,14 @@ public class ConnectController : Controller
 
         var auth = await _context.RDPResourceUserAuthorizations
             .FirstOrDefaultAsync(a => a.UserId == userId && a.RDPResourceId == id);
-        if (auth == null) return NotFound();
+        if (auth == null)
+        {
+            // No direct row yet (e.g. access is via a group). Only create one to hold this user's personal
+            // SSO creds / console defaults, and only if they are actually authorized for the resource.
+            if (!await _access.CanAccessAsync(userId, id)) return NotFound();
+            auth = new RDPResourceUserAuthorization { UserId = userId, RDPResourceId = id };
+            _context.RDPResourceUserAuthorizations.Add(auth);
+        }
 
         if (req.StoreCredentials)
         {

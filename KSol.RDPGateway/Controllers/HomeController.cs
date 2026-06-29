@@ -18,8 +18,9 @@ public class HomeController : Controller
     private readonly RDP.CredentialProtector _credentials;
     private readonly RDP.RecordingPolicy _recordingPolicy;
     private readonly RDP.DevicePolicyService _devicePolicy;
+    private readonly RDP.ResourceAccessService _access;
 
-    public HomeController(ILogger<HomeController> logger, ApplicationDbContext context, UserManager<ApplicationUser> userManager, RDP.CredentialProtector credentials, RDP.RecordingPolicy recordingPolicy, RDP.DevicePolicyService devicePolicy)
+    public HomeController(ILogger<HomeController> logger, ApplicationDbContext context, UserManager<ApplicationUser> userManager, RDP.CredentialProtector credentials, RDP.RecordingPolicy recordingPolicy, RDP.DevicePolicyService devicePolicy, RDP.ResourceAccessService access)
     {
         _logger = logger;
         _context = context;
@@ -27,6 +28,7 @@ public class HomeController : Controller
         _credentials = credentials;
         _recordingPolicy = recordingPolicy;
         _devicePolicy = devicePolicy;
+        _access = access;
     }
 
     public async Task<IActionResult> Index()
@@ -37,15 +39,22 @@ public class HomeController : Controller
             return View(new List<DashboardResourceViewModel>());
         }
 
-        var auths = await _context.RDPResourceUserAuthorizations
-            .Include(a => a.RDPResource)
-            .Where(a => a.UserId == userId && a.RDPResource != null)
+        // Effective access = direct grants ∪ group grants. Direct rows carry the per-user SSO/defaults
+        // state; group-only resources have no per-user row (Auth stays a bare placeholder → login overlay).
+        var resourceIds = await _access.AccessibleResourceIdsAsync(userId);
+        var resources = await _context.RDPResources
+            .Where(r => resourceIds.Contains(r.Id))
             .ToListAsync();
+        var directAuths = await _context.RDPResourceUserAuthorizations
+            .Where(a => a.UserId == userId && a.RDPResourceId != null)
+            .ToDictionaryAsync(a => a.RDPResourceId!);
 
-        var items = auths.Select(a => new DashboardResourceViewModel
+        var items = resources.Select(r => new DashboardResourceViewModel
         {
-            Resource = a.RDPResource!,
-            Auth = a,
+            Resource = r,
+            Auth = directAuths.TryGetValue(r.Id, out var a)
+                ? a
+                : new RDPResourceUserAuthorization { UserId = userId, RDPResourceId = r.Id, RDPResource = r },
         }).ToList();
 
         return View(items);
@@ -64,22 +73,24 @@ public class HomeController : Controller
             return Unauthorized();
         }
 
-        var authorization = await _context.RDPResourceUserAuthorizations
-            .Include(r => r.RDPResource)
-            .FirstOrDefaultAsync(r => r.UserId == userId && r.RDPResourceId == id);
-
-        if (authorization?.RDPResource == null)
+        // Access may be direct OR via a group. Resolve the resource through the access service; the
+        // per-user authorization row (carrying SSO creds / personal defaults) is loaded separately and
+        // may be null for a group-only grant — in which case the console just shows the login overlay.
+        var resource = await _access.GetAuthorizedResourceAsync(userId, id);
+        if (resource == null)
         {
             return NotFound();
         }
+        var authorization = await _context.RDPResourceUserAuthorizations
+            .FirstOrDefaultAsync(r => r.UserId == userId && r.RDPResourceId == id);
 
         ViewData["ResourceId"] = id;
-        ViewData["ResourceName"] = authorization.RDPResource.Name ?? id;
+        ViewData["ResourceName"] = resource.Name ?? id;
 
         // Recording disclosure: if the rules engine would record this session AND the matched rule asks
         // to notify, the console shows a "this session is recorded" banner. Mirrors the decision made in
         // RdpWebSocketController.Connect (same user/resource/roles), so the notice matches what's captured.
-        var roles = await _userManager.GetRolesAsync(authorization.User ?? (await _userManager.FindByIdAsync(userId))!);
+        var roles = await _userManager.GetRolesAsync((await _userManager.FindByIdAsync(userId))!);
         ViewData["RecordingNotice"] = (await _recordingPolicy.EvaluateAsync(userId, id, roles)).Notify;
 
         // Device/channel redirection policy: pass the policy to the view so locked features render as
@@ -95,7 +106,7 @@ public class HomeController : Controller
         // MitmRdpStream._hostCreds; the client's delegated creds are terminated at the gateway and
         // discarded). The browser uses harmless placeholders so its handshake frames are well-formed;
         // those placeholders never reach the host.
-        if (authorization.HasStoredCredentials)
+        if (authorization?.HasStoredCredentials == true)
         {
             // Confirm the stored credentials are decryptable (keyring intact) before offering
             // auto-connect, surfacing only a boolean - never the plaintext. If not usable, fall through

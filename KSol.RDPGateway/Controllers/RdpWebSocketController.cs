@@ -28,6 +28,7 @@ public class RdpWebSocketController : Controller
     private readonly SessionTracker _sessions;
     private readonly IConfiguration _config;
     private readonly IAuditLogger _audit;
+    private readonly ResourceAccessService _access;
     private readonly ILogger<RdpWebSocketController> _logger;
 
     public RdpWebSocketController(
@@ -41,6 +42,7 @@ public class RdpWebSocketController : Controller
         SessionTracker sessions,
         IConfiguration config,
         IAuditLogger audit,
+        ResourceAccessService access,
         ILogger<RdpWebSocketController> logger)
     {
         _context = context;
@@ -53,6 +55,7 @@ public class RdpWebSocketController : Controller
         _sessions = sessions;
         _config = config;
         _audit = audit;
+        _access = access;
         _logger = logger;
     }
 
@@ -74,17 +77,17 @@ public class RdpWebSocketController : Controller
             return;
         }
 
-        // Authorize the user for this resource (same check as HomeController.DownloadRdpFile).
-        var authorization = await _context.RDPResourceUserAuthorizations
-            .Include(a => a.RDPResource)
-            .FirstOrDefaultAsync(a => a.UserId == userId && a.RDPResourceId == id);
-        if (authorization?.RDPResource == null)
+        // Authorize the user for this resource — direct grant OR group grant (same resolver every gate
+        // uses). The per-user authorization row (for stored SSO creds) is loaded separately and may be
+        // null when access is group-only, in which case the browser supplies credentials itself.
+        var resource = await _access.GetAuthorizedResourceAsync(userId, id);
+        if (resource == null)
         {
             HttpContext.Response.StatusCode = StatusCodes.Status404NotFound;
             return;
         }
-
-        var resource = authorization.RDPResource;
+        var authorization = await _context.RDPResourceUserAuthorizations
+            .FirstOrDefaultAsync(a => a.UserId == userId && a.RDPResourceId == id);
         var requestedPort = (ushort)(resource.Port > 0 ? resource.Port : 3389);
 
         // Resolve the resource to a live host/port — starts/resumes a Proxmox VM and waits for it.
@@ -107,7 +110,7 @@ public class RdpWebSocketController : Controller
         // the relay so the browser never sends a credentials frame. Decryption returning null (empty
         // store, or keyring lost) falls back to the browser-supplied first-frame credentials.
         RdpRelaySession.VmCredentials? presupplied = null;
-        if (authorization.HasStoredCredentials)
+        if (authorization?.HasStoredCredentials == true)
         {
             var user = _credentials.Unprotect(authorization.ProtectedUsername);
             var password = _credentials.Unprotect(authorization.ProtectedPassword);
@@ -163,7 +166,7 @@ public class RdpWebSocketController : Controller
             }
             else
             {
-                var roles = await _userManager.GetRolesAsync(authorization.User ?? (await _userManager.FindByIdAsync(userId))!);
+                var roles = await _userManager.GetRolesAsync((await _userManager.FindByIdAsync(userId))!);
                 record = (await _recordingPolicy.EvaluateAsync(userId, id, roles)).Record;
             }
             if (record)

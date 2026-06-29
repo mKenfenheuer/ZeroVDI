@@ -29,6 +29,9 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
     public DbSet<RecordingRule> RecordingRules { get; set; }
     public DbSet<AuditEvent> AuditEvents { get; set; }
     public DbSet<DevicePolicy> DevicePolicies { get; set; }
+    public DbSet<UserGroup> UserGroups { get; set; }
+    public DbSet<UserGroupMembership> UserGroupMemberships { get; set; }
+    public DbSet<RDPResourceGroupAuthorization> RDPResourceGroupAuthorizations { get; set; }
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -52,6 +55,29 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
             e.HasIndex(a => a.Category);
             e.HasIndex(a => a.ActorUserId);
             e.Property(a => a.Action).HasMaxLength(64);
+        });
+
+        // User groups: an authorization grouping layer. Unique membership per (group, user) and unique
+        // group-grant per (group, resource); cascade-delete the join rows when a group/user/resource goes.
+        builder.Entity<UserGroup>(e =>
+        {
+            e.HasIndex(g => g.Name).IsUnique();
+        });
+        builder.Entity<UserGroupMembership>(e =>
+        {
+            e.HasIndex(m => new { m.GroupId, m.UserId }).IsUnique();
+            e.HasOne(m => m.Group).WithMany(g => g.Memberships).HasForeignKey(m => m.GroupId)
+                .OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(m => m.User).WithMany().HasForeignKey(m => m.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+        builder.Entity<RDPResourceGroupAuthorization>(e =>
+        {
+            e.HasIndex(g => new { g.GroupId, g.RDPResourceId }).IsUnique();
+            e.HasOne(g => g.Group).WithMany(ug => ug.ResourceAuthorizations).HasForeignKey(g => g.GroupId)
+                .OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(g => g.RDPResource).WithMany().HasForeignKey(g => g.RDPResourceId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         // Encrypt sensitive columns at rest. These hold secrets that must never be plaintext in the DB:

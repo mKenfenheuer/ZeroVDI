@@ -116,6 +116,10 @@ public class Program
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddScoped<RDP.IAuditLogger, RDP.AuditLogger>();
 
+        // Resource authorization resolver: unifies direct per-user grants with group grants so every
+        // access gate (dashboard, console, readiness, WS relay) shares one rule. Scoped (uses DbContext).
+        builder.Services.AddScoped<RDP.ResourceAccessService>();
+
         // Tenant-wide admin-enforced device/channel redirection policy (clipboard, audio, mic, camera).
         // Cached singleton; clamps the effective console ConnectionDefaults at every enforcement point.
         builder.Services.AddSingleton<RDP.DevicePolicyService>();
