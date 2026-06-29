@@ -40,8 +40,8 @@ build_amd64_image:
     # Supplied as a PROTECTED, MASKED GitLab CI/CD variable per environment; never committed. Exported
     # so the compose file passes it through to the container as DataProtection__MasterKeyPassphrase.
     # The app refuses to start in Production if it is unset.
-    - 'if [ -z "$DATAPROTECTION_MASTERKEYPASSPHRASE" ]; then echo "ERROR: DATAPROTECTION_MASTERKEYPASSPHRASE CI/CD variable is not set"; exit 1; fi'
-    - export DataProtection__MasterKeyPassphrase="$DATAPROTECTION_MASTERKEYPASSPHRASE"
+    - 'if [ -z "$DataProtection__MasterKeyPassphrase" ]; then echo "ERROR: DataProtection__MasterKeyPassphrase CI/CD variable is not set"; exit 1; fi'
+    - export DataProtection__MasterKeyPassphrase="$DataProtection__MasterKeyPassphrase"
     - docker compose -p $COMPOSE_PROJECT pull api || true
     - docker compose -p $COMPOSE_PROJECT up -d --remove-orphans
     - docker image prune -af

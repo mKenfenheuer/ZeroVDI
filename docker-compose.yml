@@ -10,7 +10,7 @@ services:
       - "ASPNET_VERSION=9.0.3"
       - "ASPNETCORE_ENVIRONMENT=Production"
       # Encrypts the credential keyring at rest (stored VM/IPMI/SSH secrets + the NTLM NtHash). Sourced
-      # from the DATAPROTECTION_MASTERKEYPASSPHRASE GitLab CI/CD variable, exported by the deploy job.
+      # from the DataProtection__MasterKeyPassphrase GitLab CI/CD variable, exported by the deploy job.
       # The app refuses to start in Production if this is empty.
       - "DataProtection__MasterKeyPassphrase=${DataProtection__MasterKeyPassphrase}"
     hostname: "rdpgw.ksol.it"
