@@ -6,6 +6,9 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using KSol.RDPGateway.Data;
+using KSol.RDPGateway.Models;
+using KSol.RDPGateway.RDP;
 
 namespace KSol.RDPGateway.Controllers
 {
@@ -15,13 +18,17 @@ namespace KSol.RDPGateway.Controllers
     {
         private readonly UserManager<ApplicationUser> _userManager;
         private readonly RoleManager<IdentityRole> _roleManager;
+        private readonly ApplicationDbContext _context;
+        private readonly ResourceAccessService _access;
         private readonly KSol.RDPGateway.RDP.IAuditLogger _audit;
 
         public UsersController(UserManager<ApplicationUser> userManager, RoleManager<IdentityRole> roleManager,
-            KSol.RDPGateway.RDP.IAuditLogger audit)
+            ApplicationDbContext context, ResourceAccessService access, KSol.RDPGateway.RDP.IAuditLogger audit)
         {
             _userManager = userManager;
             _roleManager = roleManager;
+            _context = context;
+            _access = access;
             _audit = audit;
         }
 
@@ -34,23 +41,56 @@ namespace KSol.RDPGateway.Controllers
         }
 
         // GET: /admin/users/details/5
+        // The standalone Details/AssignRoles views were merged into the tabbed Manage page.
+        // Kept as a redirect so old links keep working.
         [HttpGet("details/{id}")]
-        public async Task<IActionResult> Details(string id)
+        public IActionResult Details(string id) => RedirectToAction(nameof(Manage), new { id });
+
+        // GET: /admin/users/manage/5
+        // The user editor is the single management surface for a person: account, roles, group
+        // memberships and effective resource access (direct ∪ group, with provenance) — all in one
+        // tabbed page, mirroring the resource editor. Granting/revoking access lives here and on the
+        // resource page; group-derived access is read-only here (revoke it on the group page).
+        [HttpGet("manage/{id}")]
+        public async Task<IActionResult> Manage(string id)
         {
-            if (id == null)
-            {
-                return NotFound();
-            }
-
             var user = await _userManager.FindByIdAsync(id);
-            if (user == null)
-            {
-                return NotFound();
-            }
+            if (user == null) return NotFound();
+            return View(await BuildManageViewModelAsync(user));
+        }
 
-            var roles = await _userManager.GetRolesAsync(user);
-            ViewBag.UserRoles = roles;
-            return View(user);
+        private async Task<UserManageViewModel> BuildManageViewModelAsync(ApplicationUser user)
+        {
+            var allRoles = await _roleManager.Roles.OrderBy(r => r.Name).ToListAsync();
+            var userRoles = await _userManager.GetRolesAsync(user);
+
+            var memberships = await _context.UserGroupMemberships
+                .Include(m => m.Group)
+                .Where(m => m.UserId == user.Id)
+                .ToListAsync();
+            var memberGroupIds = memberships.Select(m => m.GroupId).ToHashSet();
+            var availableGroups = await _context.UserGroups
+                .Where(g => !memberGroupIds.Contains(g.Id))
+                .OrderBy(g => g.Name)
+                .ToListAsync();
+
+            var access = await _access.GetUserAccessAsync(user.Id);
+            var accessibleIds = access.Select(a => a.Resource.Id).ToHashSet();
+            var grantableResources = await _context.RDPResources
+                .Where(r => !accessibleIds.Contains(r.Id))
+                .OrderBy(r => r.Name)
+                .ToListAsync();
+
+            return new UserManageViewModel
+            {
+                User = user,
+                AllRoles = allRoles,
+                UserRoles = userRoles.ToList(),
+                Memberships = memberships,
+                AvailableGroups = availableGroups,
+                Access = access,
+                GrantableResources = grantableResources,
+            };
         }
 
         // GET: /admin/users/create
@@ -93,21 +133,9 @@ namespace KSol.RDPGateway.Controllers
         }
 
         // GET: /admin/users/edit/5
+        // The account fields are edited inline on the Manage page's Account tab; this GET just lands there.
         [HttpGet("edit/{id}")]
-        public async Task<IActionResult> Edit(string id)
-        {
-            if (id == null)
-            {
-                return NotFound();
-            }
-
-            var user = await _userManager.FindByIdAsync(id);
-            if (user == null)
-            {
-                return NotFound();
-            }
-            return View(user);
-        }
+        public IActionResult Edit(string id) => RedirectToAction(nameof(Manage), new { id });
 
         // POST: /admin/users/edit/5
         [HttpPost("edit/{id}")]
@@ -137,7 +165,8 @@ namespace KSol.RDPGateway.Controllers
                     var result = await _userManager.UpdateAsync(existingUser);
                     if (result.Succeeded)
                     {
-                        return RedirectToAction(nameof(Index));
+                        TempData["Status"] = "Account saved.";
+                        return RedirectToAction(nameof(Manage), new { id });
                     }
                     foreach (var error in result.Errors)
                     {
@@ -149,7 +178,8 @@ namespace KSol.RDPGateway.Controllers
                     ModelState.AddModelError("", $"Error updating user: {ex.Message}");
                 }
             }
-            return View(user);
+            var reload = await _userManager.FindByIdAsync(id) ?? user;
+            return View(nameof(Manage), await BuildManageViewModelAsync(reload));
         }
 
         // GET: /admin/users/delete/5
@@ -195,28 +225,9 @@ namespace KSol.RDPGateway.Controllers
             return RedirectToAction(nameof(Index));
         }
 
-        // GET: /admin/users/assignroles/5
+        // GET: /admin/users/assignroles/5 — roles are edited on the Manage page's Roles tab.
         [HttpGet("assignroles/{id}")]
-        public async Task<IActionResult> AssignRoles(string id)
-        {
-            if (id == null)
-            {
-                return NotFound();
-            }
-
-            var user = await _userManager.FindByIdAsync(id);
-            if (user == null)
-            {
-                return NotFound();
-            }
-
-            var roles = await _roleManager.Roles.ToListAsync();
-            var userRoles = await _userManager.GetRolesAsync(user);
-
-            ViewBag.AllRoles = roles;
-            ViewBag.UserRoles = userRoles;
-            return View(user);
-        }
+        public IActionResult AssignRoles(string id) => RedirectToAction(nameof(Manage), new { id });
 
         // POST: /admin/users/assignroles/5
         [HttpPost("assignroles/{id}")]
@@ -252,16 +263,139 @@ namespace KSol.RDPGateway.Controllers
                         detail: new { added = rolesToAdd, removed = rolesToRemove });
                 }
 
-                return RedirectToAction(nameof(Details), new { id = user.Id });
+                TempData["Status"] = "Roles updated.";
+                return RedirectToAction(nameof(Manage), new { id = user.Id });
             }
             catch (Exception ex)
             {
                 ModelState.AddModelError("", $"Error assigning roles: {ex.Message}");
-                var roles = await _roleManager.Roles.ToListAsync();
-                ViewBag.AllRoles = roles;
-                ViewBag.UserRoles = await _userManager.GetRolesAsync(user);
-                return View(user);
+                return View(nameof(Manage), await BuildManageViewModelAsync(user));
             }
         }
+
+        // --- Group membership (mirrors UserGroupsController; here keyed by the user) ---
+
+        // POST: /admin/users/{id}/groups/add
+        [HttpPost("{id}/groups/add")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> AddToGroup(string id, string groupId)
+        {
+            var user = await _userManager.FindByIdAsync(id);
+            if (user == null) return NotFound();
+
+            var group = await _context.UserGroups.FindAsync(groupId);
+            if (group == null)
+            {
+                TempData["Error"] = "Select a group.";
+                return RedirectToAction(nameof(Manage), new { id });
+            }
+
+            var exists = await _context.UserGroupMemberships.AnyAsync(m => m.GroupId == groupId && m.UserId == id);
+            if (!exists)
+            {
+                _context.UserGroupMemberships.Add(new UserGroupMembership { GroupId = groupId, UserId = id });
+                await _context.SaveChangesAsync();
+                await _audit.LogAsync(AuditCategory.Authorization, "GroupMemberAdded",
+                    targetType: nameof(UserGroup), targetId: groupId, targetName: group.Name,
+                    detail: new { userId = id });
+                TempData["Status"] = $"Added to “{group.Name}”.";
+            }
+            return RedirectToAction(nameof(Manage), new { id });
+        }
+
+        // POST: /admin/users/{id}/groups/remove
+        [HttpPost("{id}/groups/remove")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> RemoveFromGroup(string id, string groupId)
+        {
+            var m = await _context.UserGroupMemberships
+                .Include(x => x.Group)
+                .FirstOrDefaultAsync(x => x.GroupId == groupId && x.UserId == id);
+            if (m != null)
+            {
+                _context.UserGroupMemberships.Remove(m);
+                await _context.SaveChangesAsync();
+                await _audit.LogAsync(AuditCategory.Authorization, "GroupMemberRemoved",
+                    targetType: nameof(UserGroup), targetId: groupId, targetName: m.Group?.Name,
+                    detail: new { userId = id });
+                TempData["Status"] = $"Removed from “{m.Group?.Name}”.";
+            }
+            return RedirectToAction(nameof(Manage), new { id });
+        }
+
+        // --- Direct resource access (the per-(user, resource) grant). Group-derived access is NOT
+        // mutable here — it is owned by the group page. ---
+
+        // POST: /admin/users/{id}/access/grant — grant this user direct access to a resource.
+        [HttpPost("{id}/access/grant")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> GrantResource(string id, string resourceId)
+        {
+            var user = await _userManager.FindByIdAsync(id);
+            if (user == null) return NotFound();
+
+            var resource = await _context.RDPResources.FirstOrDefaultAsync(r => r.Id == resourceId);
+            if (resource == null)
+            {
+                TempData["Error"] = "Select a resource to grant.";
+                return RedirectToAction(nameof(Manage), new { id });
+            }
+
+            var exists = await _context.RDPResourceUserAuthorizations
+                .AnyAsync(a => a.RDPResourceId == resourceId && a.UserId == id);
+            if (!exists)
+            {
+                var auth = new RDPResourceUserAuthorization { RDPResourceId = resourceId, UserId = id };
+                // Seed per-user console defaults from the resource-wide defaults, matching the
+                // resource page's Grant behaviour so both entry points behave identically.
+                if (resource.DefaultConnectionDefaults is { } d)
+                {
+                    auth.ConnectionDefaults = new ConnectionDefaults
+                    {
+                        Audio = d.Audio, Clipboard = d.Clipboard, Microphone = d.Microphone,
+                        Camera = d.Camera, GfxMode = d.GfxMode, PerformanceFlags = d.PerformanceFlags,
+                    };
+                }
+                _context.RDPResourceUserAuthorizations.Add(auth);
+                await _context.SaveChangesAsync();
+                await _audit.LogAsync(AuditCategory.Authorization, "AccessGranted",
+                    targetType: nameof(RDPResource), targetId: resourceId, targetName: resource.Name,
+                    detail: new { userId = id });
+                TempData["Status"] = $"Granted access to “{resource.Name}”.";
+            }
+            return RedirectToAction(nameof(Manage), new { id });
+        }
+
+        // POST: /admin/users/{id}/access/revoke — remove this user's DIRECT access to a resource.
+        [HttpPost("{id}/access/revoke")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> RevokeResource(string id, string resourceId)
+        {
+            var auth = await _context.RDPResourceUserAuthorizations
+                .Include(a => a.RDPResource)
+                .FirstOrDefaultAsync(a => a.RDPResourceId == resourceId && a.UserId == id);
+            if (auth != null)
+            {
+                _context.RDPResourceUserAuthorizations.Remove(auth);
+                await _context.SaveChangesAsync();
+                await _audit.LogAsync(AuditCategory.Authorization, "AccessRevoked",
+                    targetType: nameof(RDPResource), targetId: resourceId, targetName: auth.RDPResource?.Name,
+                    detail: new { userId = id });
+                TempData["Status"] = "Direct access revoked.";
+            }
+            return RedirectToAction(nameof(Manage), new { id });
+        }
+    }
+
+    /// <summary>Backing model for the tabbed user editor (account/roles/groups/resource access).</summary>
+    public class UserManageViewModel
+    {
+        public ApplicationUser User { get; set; } = null!;
+        public List<IdentityRole> AllRoles { get; set; } = new();
+        public List<string> UserRoles { get; set; } = new();
+        public List<UserGroupMembership> Memberships { get; set; } = new();
+        public List<UserGroup> AvailableGroups { get; set; } = new();
+        public IReadOnlyList<ResourceAccessEntry> Access { get; set; } = new List<ResourceAccessEntry>();
+        public List<RDPResource> GrantableResources { get; set; } = new();
     }
 }

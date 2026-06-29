@@ -25,7 +25,7 @@
         @if (r.PowerState == ResourcePowerState.Running || r.PowerState == ResourcePowerState.Starting)
         {
             <form asp-action="Stop" asp-route-id="@r.Id" method="post"
-                  onsubmit="return confirm('Shut down this resource now?');">
+                  data-confirm="Shut down this resource now?">
                 @Html.AntiForgeryToken()
                 <button type="submit" class="btn-outline text-destructive border-destructive/40 hover:bg-destructive/10">
                     <i class="ri-shut-down-line"></i> Shut down
@@ -229,9 +229,80 @@
 
     <!-- Users & access -->
     <section data-panel="access" class="hidden space-y-4">
+        <!-- Group grants -->
         <div class="card-surface p-6">
             <div class="flex items-center justify-between mb-4">
-                <h2 class="font-medium">Assigned users</h2>
+                <h2 class="font-medium">Granted groups</h2>
+                <span class="text-sm text-muted-foreground">@Model.GrantedGroups.Count granted</span>
+            </div>
+            <p class="text-sm text-muted-foreground mb-4">Every member of a granted group can connect to this resource. Personal SSO credentials stay per-user.</p>
+            <div class="mb-4">
+                @{
+                    var groupPicker = new AccessPickerModel
+                    {
+                        FormAction = "GrantGroup",
+                        RouteId = r.Id,
+                        FieldName = "groupId",
+                        Placeholder = "Grant a group…",
+                        ButtonLabel = "Grant",
+                        Candidates = Model.AvailableGroups.Select(g => (g.Id, g.Name)),
+                    };
+                }
+                <partial name="_AccessPicker" model="groupPicker" />
+            </div>
+            @if (!Model.GrantedGroups.Any())
+            {
+                <p class="text-sm text-muted-foreground">No groups granted.</p>
+            }
+            else
+            {
+                <ul class="space-y-1">
+                    @foreach (var g in Model.GrantedGroups)
+                    {
+                        <li class="flex items-center justify-between text-sm py-2 border-b border-border last:border-0">
+                            <a asp-controller="UserGroups" asp-action="Manage" asp-route-id="@g.Id" class="hover:underline">
+                                <i class="ri-group-line text-muted-foreground"></i> @g.Name
+                            </a>
+                            <form asp-action="RevokeGroup" asp-route-id="@r.Id" method="post" class="inline"
+                                  data-confirm="Revoke group “@g.Name” from this resource? Members lose access granted only through this group.">
+                                @Html.AntiForgeryToken()
+                                <input type="hidden" name="groupId" value="@g.Id" />
+                                <button type="submit" class="text-destructive hover:underline text-xs">Revoke</button>
+                            </form>
+                        </li>
+                    }
+                </ul>
+            }
+        </div>
+
+        <!-- Users with access via a group (read-only; revoke on the group) -->
+        @{ var viaGroupUsers = Model.Access.Where(a => !a.Direct && a.ViaGroups.Any()).ToList(); }
+        @if (viaGroupUsers.Any())
+        {
+            <div class="card-surface p-6">
+                <h2 class="font-medium mb-1">Users via group</h2>
+                <p class="text-sm text-muted-foreground mb-4">These users inherit access through a group. Manage them on the group, not here.</p>
+                <ul class="space-y-1">
+                    @foreach (var a in viaGroupUsers)
+                    {
+                        <li class="flex items-center justify-between text-sm py-2 border-b border-border last:border-0">
+                            <span class="flex items-center gap-2">
+                                <span class="w-7 h-7 rounded-full bg-muted text-muted-foreground text-xs font-semibold flex items-center justify-center">
+                                    @((a.User.UserName ?? "?").Substring(0, 1).ToUpper())
+                                </span>
+                                @a.User.UserName
+                            </span>
+                            <partial name="_AccessBadges" model="new AccessBadgesModel(a.Direct, a.ViaGroups)" />
+                        </li>
+                    }
+                </ul>
+            </div>
+        }
+
+        <!-- Direct grants (with per-user credentials & connection defaults) -->
+        <div class="card-surface p-6">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="font-medium">Directly assigned users</h2>
                 <span class="text-sm text-muted-foreground">@Model.Authorizations.Count assigned</span>
             </div>
 
@@ -285,7 +356,7 @@
                                     <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Connection defaults</h4>
                                     <form asp-action="SetConnectionDefaults" asp-route-id="@r.Id" asp-route-authId="@a.Id" method="post">
                                         @Html.AntiForgeryToken()
-                                        @{ await Html.RenderPartialAsync("~/Views/RDPResourceUserAuthorizations/_ConnectionDefaultsEditor.cshtml", a.ConnectionDefaults ?? new ConnectionDefaults()); }
+                                        @{ await Html.RenderPartialAsync("_ConnectionDefaultsEditor", a.ConnectionDefaults ?? new ConnectionDefaults()); }
                                         <div class="mt-3">
                                             <button type="submit" class="btn-primary btn-sm">Save defaults</button>
                                         </div>
@@ -317,7 +388,7 @@
                                 <!-- Revoke -->
                                 <div class="pt-3 border-t border-border">
                                     <form asp-action="Revoke" asp-route-id="@r.Id" asp-route-authId="@a.Id" method="post"
-                                          onsubmit="return confirm('Revoke this user\'s access?');">
+                                          data-confirm="Revoke this user's access?">
                                         @Html.AntiForgeryToken()
                                         <button type="submit" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10"><i class="ri-shield-cross-line"></i> Revoke access</button>
                                     </form>
@@ -337,7 +408,7 @@
             <p class="text-sm text-muted-foreground mb-4">These defaults are inherited by newly granted users. Per-user overrides are configured in the "Users &amp; access" tab.</p>
             <form asp-action="SetResourceDefaults" asp-route-id="@r.Id" method="post">
                 @Html.AntiForgeryToken()
-                @{ await Html.RenderPartialAsync("~/Views/RDPResourceUserAuthorizations/_ConnectionDefaultsEditor.cshtml", r.DefaultConnectionDefaults ?? new ConnectionDefaults()); }
+                @{ await Html.RenderPartialAsync("_ConnectionDefaultsEditor", r.DefaultConnectionDefaults ?? new ConnectionDefaults()); }
                 <div class="flex items-center gap-2 pt-4 border-t border-border mt-4">
                     <button type="submit" class="btn-primary">Save defaults</button>
                 </div>
@@ -381,6 +452,8 @@
 
 @section Scripts {
     <partial name="_ValidationScripts" />
+    <partial name="_ConfirmModal" />
+    <script src="~/js/access-picker.js" asp-append-version="true"></script>
     <script>
         (function () {
             // Tab logic

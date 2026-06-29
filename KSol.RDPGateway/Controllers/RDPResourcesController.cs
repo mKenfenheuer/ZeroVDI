@@ -21,6 +21,8 @@ namespace KSol.RDPGateway.Controllers
         private readonly ProxmoxBackendProvider _backends;
         private readonly CredentialProtector _credentials;
         private readonly ResourceShutdownService _shutdown;
+        private readonly ResourceAccessService _access;
+        private readonly IAuditLogger _audit;
         private readonly Microsoft.AspNetCore.Identity.UserManager<ApplicationUser> _userManager;
 
         public RDPResourcesController(
@@ -29,6 +31,8 @@ namespace KSol.RDPGateway.Controllers
             ProxmoxBackendProvider backends,
             CredentialProtector credentials,
             ResourceShutdownService shutdown,
+            ResourceAccessService access,
+            IAuditLogger audit,
             Microsoft.AspNetCore.Identity.UserManager<ApplicationUser> userManager)
         {
             _context = context;
@@ -36,6 +40,8 @@ namespace KSol.RDPGateway.Controllers
             _backends = backends;
             _credentials = credentials;
             _shutdown = shutdown;
+            _access = access;
+            _audit = audit;
             _userManager = userManager;
         }
 
@@ -126,6 +132,21 @@ namespace KSol.RDPGateway.Controllers
                 ? await _backends.GetAsync(bid)
                 : null;
 
+            // Full provenance (direct ∪ group) for the access tab, plus the group-grant controls.
+            var access = await _access.GetResourceAccessAsync(resource.Id);
+
+            var grantedGroups = await _context.RDPResourceGroupAuthorizations
+                .Include(g => g.Group)
+                .Where(g => g.RDPResourceId == resource.Id)
+                .Select(g => g.Group!)
+                .OrderBy(g => g.Name)
+                .ToListAsync();
+            var grantedGroupIds = grantedGroups.Select(g => g.Id).ToHashSet();
+            var availableGroups = await _context.UserGroups
+                .Where(g => !grantedGroupIds.Contains(g.Id))
+                .OrderBy(g => g.Name)
+                .ToListAsync();
+
             return new ResourceEditViewModel
             {
                 Resource = resource,
@@ -133,6 +154,9 @@ namespace KSol.RDPGateway.Controllers
                 AvailableUsers = availableUsers,
                 Recordings = recordings,
                 Backend = backend,
+                Access = access,
+                GrantedGroups = grantedGroups,
+                AvailableGroups = availableGroups,
             };
         }
 
@@ -278,6 +302,59 @@ namespace KSol.RDPGateway.Controllers
                 _context.RDPResourceUserAuthorizations.Remove(auth);
                 await _context.SaveChangesAsync();
                 TempData["Status"] = "Access revoked.";
+            }
+            return RedirectToAction(nameof(Edit), new { id });
+        }
+
+        // POST: /admin/resources/{id}/grant-group — grant a whole group access to this resource.
+        [HttpPost("{id}/grant-group")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> GrantGroup(string id, string groupId)
+        {
+            var resource = await _context.RDPResources.FirstOrDefaultAsync(r => r.Id == id);
+            if (resource == null) return NotFound();
+
+            var group = await _context.UserGroups.FindAsync(groupId);
+            if (group == null)
+            {
+                TempData["Error"] = "Select a group to grant.";
+                return RedirectToAction(nameof(Edit), new { id });
+            }
+
+            var exists = await _context.RDPResourceGroupAuthorizations
+                .AnyAsync(a => a.RDPResourceId == id && a.GroupId == groupId);
+            if (!exists)
+            {
+                _context.RDPResourceGroupAuthorizations.Add(
+                    new RDPResourceGroupAuthorization { RDPResourceId = id, GroupId = groupId });
+                await _context.SaveChangesAsync();
+                await _audit.LogAsync(AuditCategory.Authorization, "GroupAccessGranted",
+                    targetType: nameof(RDPResource), targetId: id, targetName: resource.Name,
+                    detail: new { groupId, groupName = group.Name });
+                TempData["Status"] = $"Granted access to group “{group.Name}”.";
+            }
+            return RedirectToAction(nameof(Edit), new { id });
+        }
+
+        // POST: /admin/resources/{id}/revoke-group — revoke a group's access to this resource.
+        [HttpPost("{id}/revoke-group")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> RevokeGroup(string id, string groupId)
+        {
+            var resource = await _context.RDPResources.FirstOrDefaultAsync(r => r.Id == id);
+            if (resource == null) return NotFound();
+
+            var a = await _context.RDPResourceGroupAuthorizations
+                .Include(x => x.Group)
+                .FirstOrDefaultAsync(x => x.RDPResourceId == id && x.GroupId == groupId);
+            if (a != null)
+            {
+                _context.RDPResourceGroupAuthorizations.Remove(a);
+                await _context.SaveChangesAsync();
+                await _audit.LogAsync(AuditCategory.Authorization, "GroupAccessRevoked",
+                    targetType: nameof(RDPResource), targetId: id, targetName: resource.Name,
+                    detail: new { groupId, groupName = a.Group?.Name });
+                TempData["Status"] = "Group access revoked.";
             }
             return RedirectToAction(nameof(Edit), new { id });
         }
@@ -481,5 +558,12 @@ namespace KSol.RDPGateway.Controllers
         public List<ApplicationUser> AvailableUsers { get; set; } = new();
         public List<Recording> Recordings { get; set; } = new();
         public ProxmoxBackend? Backend { get; set; }
+
+        /// <summary>Every user who can reach this resource, with Direct/via-Group provenance.</summary>
+        public IReadOnlyList<UserAccessEntry> Access { get; set; } = new List<UserAccessEntry>();
+        /// <summary>Groups currently granted this resource.</summary>
+        public List<UserGroup> GrantedGroups { get; set; } = new();
+        /// <summary>Groups that could be granted this resource.</summary>
+        public List<UserGroup> AvailableGroups { get; set; } = new();
     }
 }

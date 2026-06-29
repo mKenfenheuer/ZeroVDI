@@ -32,17 +32,20 @@
     <!-- Members -->
     <div class="card-surface p-5">
         <h3 class="font-medium mb-3">Members <span class="badge bg-muted text-muted-foreground">@Model.Memberships.Count</span></h3>
-        <form asp-action="AddMember" asp-route-id="@Model.Id" method="post" class="flex gap-2 mb-3">
-            @Html.AntiForgeryToken()
-            <select name="userId" class="form-select flex-1" required>
-                <option value="">Add a user…</option>
-                @foreach (var u in nonMembers)
+        <div class="mb-3">
+            @{
+                var memberPicker = new AccessPickerModel
                 {
-                    <option value="@u.Id">@u.UserName</option>
-                }
-            </select>
-            <button type="submit" class="btn-secondary btn-sm">Add</button>
-        </form>
+                    FormAction = "AddMember",
+                    RouteId = Model.Id,
+                    FieldName = "userId",
+                    Placeholder = "Add a user…",
+                    ButtonLabel = "Add",
+                    Candidates = nonMembers.Select(u => (u.Id, u.UserName ?? u.Id)),
+                };
+            }
+            <partial name="_AccessPicker" model="memberPicker" />
+        </div>
         @if (!Model.Memberships.Any())
         {
             <p class="text-sm text-muted-foreground">No members yet.</p>
@@ -68,17 +71,20 @@
     <!-- Granted resources -->
     <div class="card-surface p-5">
         <h3 class="font-medium mb-3">Granted resources <span class="badge bg-muted text-muted-foreground">@Model.ResourceAuthorizations.Count</span></h3>
-        <form asp-action="AddResource" asp-route-id="@Model.Id" method="post" class="flex gap-2 mb-3">
-            @Html.AntiForgeryToken()
-            <select name="resourceId" class="form-select flex-1" required>
-                <option value="">Grant a resource…</option>
-                @foreach (var r in ungranted)
+        <div class="mb-3">
+            @{
+                var resourcePicker = new AccessPickerModel
                 {
-                    <option value="@r.Id">@r.Name</option>
-                }
-            </select>
-            <button type="submit" class="btn-secondary btn-sm">Grant</button>
-        </form>
+                    FormAction = "AddResource",
+                    RouteId = Model.Id,
+                    FieldName = "resourceId",
+                    Placeholder = "Grant a resource…",
+                    ButtonLabel = "Grant",
+                    Candidates = ungranted.Select(r => (r.Id, r.Name ?? r.Id)),
+                };
+            }
+            <partial name="_AccessPicker" model="resourcePicker" />
+        </div>
         @if (!Model.ResourceAuthorizations.Any())
         {
             <p class="text-sm text-muted-foreground">No resources granted.</p>
@@ -101,3 +107,8 @@
         }
     </div>
 </div>
+
+@section Scripts {
+    <partial name="_ConfirmModal" />
+    <script src="~/js/access-picker.js" asp-append-version="true"></script>
+}

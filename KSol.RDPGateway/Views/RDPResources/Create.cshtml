@@ -50,7 +50,7 @@
         @{
             // Resource-wide connection defaults inherited by newly granted users. Same editor the
             // console "Session options" popup uses; bound under DefaultConnectionDefaults.
-            await Html.RenderPartialAsync("~/Views/RDPResourceUserAuthorizations/_ConnectionDefaultsEditor.cshtml",
+            await Html.RenderPartialAsync("_ConnectionDefaultsEditor",
                 Model.DefaultConnectionDefaults ?? new ConnectionDefaults(),
                 new ViewDataDictionary(ViewData) { TemplateInfo = { HtmlFieldPrefix = "DefaultConnectionDefaults" } });
         }

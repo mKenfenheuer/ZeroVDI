@@ -1,12 +1,8 @@
 @model IEnumerable<KSol.RDPGateway.Models.RDPResourceUserAuthorization>
 
 @{
-    ViewData["Title"] = "Authorizations";
-    ViewData["Subtitle"] = "Which users may connect to which resources.";
-}
-
-@section PageActions {
-    <a asp-action="Create" class="btn-primary w-fit"><i class="ri-add-line"></i> Grant access</a>
+    ViewData["Title"] = "Access grants";
+    ViewData["Subtitle"] = "Read-only overview of every direct user → resource grant. Manage access on the user or resource page.";
 }
 
 @if (!Model.Any())
@@ -15,9 +11,8 @@
         <div class="w-14 h-14 rounded-full bg-muted flex items-center justify-center mb-4">
             <i class="ri-shield-user-line text-2xl text-muted-foreground"></i>
         </div>
-        <h3 class="text-lg font-semibold">No authorizations yet</h3>
-        <p class="text-sm text-muted-foreground mt-1">Grant a user access to a resource to let them connect.</p>
-        <a asp-action="Create" class="btn-primary mt-4"><i class="ri-add-line"></i> Grant access</a>
+        <h3 class="text-lg font-semibold">No direct grants</h3>
+        <p class="text-sm text-muted-foreground mt-1">Grant a user a resource from their <a asp-controller="Users" asp-action="Index" class="text-primary hover:underline">user page</a>, or grant a group from a resource.</p>
     </div>
 }
 else
@@ -27,16 +22,20 @@ else
             <tr>
                 <th>User</th>
                 <th>Resource</th>
-                <th>Credentials</th>
-                <th class="text-right">Actions</th>
+                <th>SSO credentials</th>
+                <th class="text-right">Manage</th>
             </tr>
         </thead>
         <tbody>
         @foreach (var item in Model)
         {
             <tr>
-                <td class="font-medium">@item.User?.UserName</td>
-                <td>@(item.RDPResource?.Name ?? item.RDPResourceId)</td>
+                <td class="font-medium">
+                    <a asp-controller="Users" asp-action="Manage" asp-route-id="@item.UserId" asp-fragment="access" class="hover:underline">@item.User?.UserName</a>
+                </td>
+                <td>
+                    <a asp-controller="RDPResources" asp-action="Edit" asp-route-id="@item.RDPResourceId" asp-fragment="access" class="hover:underline">@(item.RDPResource?.Name ?? item.RDPResourceId)</a>
+                </td>
                 <td>
                     @if (item.HasStoredCredentials)
                     {
@@ -49,8 +48,8 @@ else
                 </td>
                 <td>
                     <div class="flex items-center justify-end gap-2">
-                        <a asp-action="Edit" asp-route-id="@item.Id" class="btn-secondary btn-sm">Edit</a>
-                        <a asp-action="Delete" asp-route-id="@item.Id" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Revoke</a>
+                        <a asp-controller="RDPResources" asp-action="Edit" asp-route-id="@item.RDPResourceId" asp-fragment="access" class="btn-ghost btn-sm">On resource</a>
+                        <a asp-controller="Users" asp-action="Manage" asp-route-id="@item.UserId" asp-fragment="access" class="btn-ghost btn-sm">On user</a>
                     </div>
                 </td>
             </tr>

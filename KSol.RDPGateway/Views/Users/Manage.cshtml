@@ -1,0 +1,268 @@
+@model KSol.RDPGateway.Controllers.UserManageViewModel
+@using KSol.RDPGateway.Models
+@{
+    var u = Model.User;
+    ViewData["Title"] = u.UserName;
+    ViewData["Subtitle"] = "Manage user";
+
+    var tabs = new (string Id, string Label, string Icon)[]
+    {
+        ("account", "Account", "ri-user-line"),
+        ("roles", "Roles", "ri-shield-keyhole-line"),
+        ("groups", "Groups", "ri-group-line"),
+        ("access", "Resource access", "ri-computer-line"),
+    };
+}
+
+@section PageActions {
+    <div class="flex items-center gap-2">
+        @if (u.TwoFactorEnabled)
+        {
+            <span class="badge bg-success/10 text-success"><i class="ri-shield-check-line"></i> MFA</span>
+        }
+        <a asp-action="Delete" asp-route-id="@u.Id" class="btn-outline text-destructive border-destructive/40 hover:bg-destructive/10"><i class="ri-delete-bin-line"></i> Delete</a>
+        <a asp-action="Index" class="btn-secondary"><i class="ri-arrow-left-line"></i> Back</a>
+    </div>
+}
+
+<div class="max-w-4xl" x-tabs>
+    <div class="flex flex-wrap gap-1 border-b border-border mb-6" role="tablist">
+        @foreach (var (id, label, icon) in tabs)
+        {
+            <button type="button" data-tab="@id" role="tab"
+                    class="tab-btn flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-muted-foreground hover:text-foreground transition-colors -mb-px">
+                <i class="@icon"></i> @label
+            </button>
+        }
+    </div>
+
+    <!-- Account -->
+    <section data-panel="account" class="space-y-6">
+        <form asp-action="Edit" asp-route-id="@u.Id" method="post" class="card-surface p-6 max-w-lg space-y-4">
+            @Html.AntiForgeryToken()
+            <div asp-validation-summary="ModelOnly"></div>
+            <input type="hidden" name="Id" value="@u.Id" />
+            <div>
+                <label class="form-label" for="UserName">Username</label>
+                <input class="form-input" id="UserName" name="UserName" value="@u.UserName" />
+            </div>
+            <div>
+                <label class="form-label" for="Email">Email</label>
+                <input class="form-input" id="Email" name="Email" type="email" value="@u.Email" />
+            </div>
+            <dl class="grid grid-cols-2 gap-3 text-sm pt-2">
+                <div class="flex items-center gap-2">
+                    <dt class="text-muted-foreground">Email confirmed</dt>
+                    <dd>
+                        @if (u.EmailConfirmed)
+                        {
+                            <span class="badge bg-success/10 text-success">Yes</span>
+                        }
+                        else
+                        {
+                            <span class="badge bg-warning/10 text-warning">No</span>
+                        }
+                    </dd>
+                </div>
+                <div class="flex items-center gap-2">
+                    <dt class="text-muted-foreground">MFA</dt>
+                    <dd>
+                        @if (u.TwoFactorEnabled)
+                        {
+                            <span class="badge bg-success/10 text-success">Enabled</span>
+                        }
+                        else
+                        {
+                            <span class="badge bg-muted text-muted-foreground">Off</span>
+                        }
+                    </dd>
+                </div>
+            </dl>
+            <div class="flex items-center gap-2 pt-2 border-t border-border">
+                <button type="submit" class="btn-primary">Save changes</button>
+            </div>
+        </form>
+    </section>
+
+    <!-- Roles -->
+    <section data-panel="roles" class="hidden">
+        <form asp-action="AssignRoles" asp-route-id="@u.Id" method="post" class="card-surface p-6 max-w-lg space-y-5">
+            @Html.AntiForgeryToken()
+            <input type="hidden" name="id" value="@u.Id" />
+            <p class="text-sm text-muted-foreground">A user with no admin role can still connect to the resources granted to them.</p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                @foreach (var role in Model.AllRoles)
+                {
+                    <label class="flex items-center gap-2 text-sm cursor-pointer p-2 rounded-lg hover:bg-muted">
+                        <input class="form-check" type="checkbox" name="selectedRoles" value="@role.Name"
+                               @(Model.UserRoles.Contains(role.Name!) ? "checked" : "") />
+                        <span>@role.Name</span>
+                    </label>
+                }
+            </div>
+            <div class="flex items-center gap-2 pt-2 border-t border-border">
+                <button type="submit" class="btn-primary">Save roles</button>
+            </div>
+        </form>
+    </section>
+
+    <!-- Groups -->
+    <section data-panel="groups" class="hidden">
+        <div class="card-surface p-6 max-w-lg">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="font-medium">Group memberships</h2>
+                <span class="text-sm text-muted-foreground">@Model.Memberships.Count</span>
+            </div>
+
+            <div class="mb-4">
+                @{
+                    var groupPicker = new AccessPickerModel
+                    {
+                        FormAction = "AddToGroup",
+                        RouteId = u.Id,
+                        FieldName = "groupId",
+                        Placeholder = "Add to a group…",
+                        ButtonLabel = "Add",
+                        Candidates = Model.AvailableGroups.Select(g => (g.Id, g.Name)),
+                    };
+                }
+                <partial name="_AccessPicker" model="groupPicker" />
+            </div>
+
+            @if (!Model.Memberships.Any())
+            {
+                <p class="text-sm text-muted-foreground">Not a member of any group.</p>
+            }
+            else
+            {
+                <ul class="space-y-1">
+                    @foreach (var m in Model.Memberships.OrderBy(x => x.Group?.Name))
+                    {
+                        <li class="flex items-center justify-between text-sm py-2 border-b border-border last:border-0">
+                            <a asp-controller="UserGroups" asp-action="Manage" asp-route-id="@m.GroupId" class="hover:underline">
+                                <i class="ri-group-line text-muted-foreground"></i> @m.Group?.Name
+                            </a>
+                            <form asp-action="RemoveFromGroup" asp-route-id="@u.Id" method="post" class="inline"
+                                  data-confirm="Remove @u.UserName from “@(m.Group?.Name)”? They lose any access granted only through this group.">
+                                @Html.AntiForgeryToken()
+                                <input type="hidden" name="groupId" value="@m.GroupId" />
+                                <button type="submit" class="text-destructive hover:underline text-xs">Remove</button>
+                            </form>
+                        </li>
+                    }
+                </ul>
+            }
+        </div>
+    </section>
+
+    <!-- Resource access -->
+    <section data-panel="access" class="hidden">
+        <div class="card-surface p-6">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="font-medium">Effective resource access</h2>
+                <span class="text-sm text-muted-foreground">@Model.Access.Count resource@(Model.Access.Count == 1 ? "" : "s")</span>
+            </div>
+
+            <div class="mb-5">
+                @{
+                    var resourcePicker = new AccessPickerModel
+                    {
+                        FormAction = "GrantResource",
+                        RouteId = u.Id,
+                        FieldName = "resourceId",
+                        Placeholder = "Grant a resource…",
+                        ButtonLabel = "Grant",
+                        Candidates = Model.GrantableResources.Select(r => (r.Id, r.Name ?? r.Id)),
+                    };
+                }
+                <partial name="_AccessPicker" model="resourcePicker" />
+                <p class="form-hint mt-1">Grants direct access. To grant via a group, add the user to a group on the Groups tab.</p>
+            </div>
+
+            @if (!Model.Access.Any())
+            {
+                <p class="text-sm text-muted-foreground">No resource access yet.</p>
+            }
+            else
+            {
+                <table class="table-surface">
+                    <thead>
+                        <tr>
+                            <th>Resource</th>
+                            <th>Access</th>
+                            <th>SSO</th>
+                            <th class="text-right">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    @foreach (var a in Model.Access)
+                    {
+                        <tr>
+                            <td>
+                                <a asp-controller="RDPResources" asp-action="Edit" asp-route-id="@a.Resource.Id" class="font-medium hover:underline">@a.Resource.Name</a>
+                            </td>
+                            <td><partial name="_AccessBadges" model="new AccessBadgesModel(a.Direct, a.ViaGroups)" /></td>
+                            <td>
+                                @if (a.DirectAuth?.HasStoredCredentials == true)
+                                {
+                                    <span class="badge bg-success/10 text-success"><i class="ri-key-2-line"></i> Stored</span>
+                                }
+                                else
+                                {
+                                    <span class="badge-muted">—</span>
+                                }
+                            </td>
+                            <td>
+                                <div class="flex items-center justify-end gap-2">
+                                    @if (a.Direct)
+                                    {
+                                        <a asp-controller="RDPResources" asp-action="Edit" asp-route-id="@a.Resource.Id" asp-fragment="access"
+                                           class="btn-ghost btn-sm" title="Edit stored credentials & connection defaults on the resource page">Credentials</a>
+                                        <form asp-action="RevokeResource" asp-route-id="@u.Id" method="post" class="inline"
+                                              data-confirm="Revoke @u.UserName's direct access to “@a.Resource.Name”?">
+                                            @Html.AntiForgeryToken()
+                                            <input type="hidden" name="resourceId" value="@a.Resource.Id" />
+                                            <button type="submit" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Revoke</button>
+                                        </form>
+                                    }
+                                    else
+                                    {
+                                        <span class="text-xs text-muted-foreground">Manage on group</span>
+                                    }
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            }
+        </div>
+    </section>
+</div>
+
+@section Scripts {
+    <partial name="_ValidationScripts" />
+    <partial name="_ConfirmModal" />
+    <script src="~/js/access-picker.js" asp-append-version="true"></script>
+    <script>
+        (function () {
+            var root = document.querySelector('[x-tabs]');
+            if (!root) return;
+            var btns = root.querySelectorAll('.tab-btn');
+            var panels = root.querySelectorAll('[data-panel]');
+            function activate(id) {
+                btns.forEach(function (b) {
+                    var on = b.dataset.tab === id;
+                    b.classList.toggle('border-primary', on);
+                    b.classList.toggle('text-foreground', on);
+                    b.classList.toggle('text-muted-foreground', !on);
+                });
+                panels.forEach(function (p) { p.classList.toggle('hidden', p.dataset.panel !== id); });
+                history.replaceState(null, '', '#' + id);
+            }
+            btns.forEach(function (b) { b.addEventListener('click', function () { activate(b.dataset.tab); }); });
+            var initial = (location.hash || '').replace('#', '') || 'account';
+            activate([].some.call(btns, function (b) { return b.dataset.tab === initial; }) ? initial : 'account');
+        })();
+    </script>
+}

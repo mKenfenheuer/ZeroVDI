@@ -29,13 +29,28 @@ public class AdminController : Controller
     [HttpGet("")]
     public async Task<IActionResult> Index()
     {
+        // Effective access edges = distinct (user, resource) pairs reachable directly OR via a group.
+        // A flat COUNT of direct authorization rows would undercount resources granted only via groups.
+        var directEdges = await _context.RDPResourceUserAuthorizations
+            .Where(a => a.UserId != null && a.RDPResourceId != null)
+            .Select(a => new { a.UserId, a.RDPResourceId })
+            .ToListAsync();
+        var groupEdges = await _context.UserGroupMemberships
+            .Join(_context.RDPResourceGroupAuthorizations, m => m.GroupId, g => g.GroupId,
+                (m, g) => new { UserId = (string?)m.UserId, RDPResourceId = (string?)g.RDPResourceId })
+            .ToListAsync();
+        var accessEdgeCount = directEdges.Concat(groupEdges)
+            .Select(e => (e.UserId, e.RDPResourceId))
+            .Distinct()
+            .Count();
+
         var vm = new AdminDashboardViewModel
         {
             ResourceCount = await _context.RDPResources.CountAsync(),
             RunningCount = await _context.RDPResources.CountAsync(r => r.PowerState == ResourcePowerState.Running),
             BackendCount = await _context.ProxmoxBackends.CountAsync(),
             UserCount = await _userManager.Users.CountAsync(),
-            AuthorizationCount = await _context.RDPResourceUserAuthorizations.CountAsync(),
+            AuthorizationCount = accessEdgeCount,
             RecordingCount = await _context.Recordings.CountAsync(),
             RecentResources = await _context.RDPResources
                 .OrderByDescending(r => r.LastActivityUtc)
@@ -49,16 +64,17 @@ public class AdminController : Controller
     public async Task<IActionResult> BackendStatus()
     {
         var allBackends = await _backends.GetAllAsync();
-        var result = new List<BackendInfoViewModel>();
 
-        foreach (var b in allBackends)
+        // Probe every backend concurrently — a serial loop made the dashboard tile as slow as the sum
+        // of all backends, and one unreachable backend stalled the rest. WhenAll bounds it to the
+        // slowest single probe; each task swallows its own error into the per-backend view model.
+        var result = await Task.WhenAll(allBackends.Select(async b =>
         {
             var info = new BackendInfoViewModel { Id = b.Id, Name = b.Name, HostUrl = b.Host };
             if (!b.IsConfigured)
             {
                 info.Error = "Not configured";
-                result.Add(info);
-                continue;
+                return info;
             }
             try
             {
@@ -71,8 +87,8 @@ public class AdminController : Controller
             {
                 info.Error = ex.Message;
             }
-            result.Add(info);
-        }
+            return info;
+        }));
 
         return Json(result);
     }

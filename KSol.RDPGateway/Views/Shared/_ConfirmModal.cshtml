@@ -1,0 +1,62 @@
+@*
+    Shared confirmation modal. Any form with a data-confirm="message" attribute is intercepted: instead
+    of submitting immediately it opens this styled dialog, and only submits once the user confirms —
+    replacing native confirm() with markup that matches the design language. Drop a <partial> of this
+    once per page in the Scripts section. Progressive enhancement: with JS off the form just submits.
+*@
+<div id="confirm-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 p-4">
+    <div class="card-surface w-full max-w-md p-6">
+        <div class="flex items-start gap-3">
+            <div class="w-10 h-10 rounded-full bg-destructive/10 text-destructive flex items-center justify-center flex-shrink-0">
+                <i class="ri-error-warning-line text-xl"></i>
+            </div>
+            <div class="min-w-0">
+                <h3 class="font-semibold">Are you sure?</h3>
+                <p id="confirm-modal-message" class="text-sm text-muted-foreground mt-1"></p>
+            </div>
+        </div>
+        <div class="flex items-center justify-end gap-2 mt-6">
+            <button type="button" id="confirm-modal-cancel" class="btn-ghost">Cancel</button>
+            <button type="button" id="confirm-modal-ok" class="btn-destructive">Confirm</button>
+        </div>
+    </div>
+</div>
+<script>
+(function () {
+    var modal = document.getElementById('confirm-modal');
+    if (!modal || modal.dataset.wired) return;
+    modal.dataset.wired = '1';
+    var msg = document.getElementById('confirm-modal-message');
+    var okBtn = document.getElementById('confirm-modal-ok');
+    var cancelBtn = document.getElementById('confirm-modal-cancel');
+    var pending = null;
+
+    function open(message, onConfirm) {
+        msg.textContent = message;
+        pending = onConfirm;
+        modal.classList.remove('hidden');
+        modal.classList.add('flex');
+        okBtn.focus();
+    }
+    function close() {
+        modal.classList.add('hidden');
+        modal.classList.remove('flex');
+        pending = null;
+    }
+    okBtn.addEventListener('click', function () { var fn = pending; close(); if (fn) fn(); });
+    cancelBtn.addEventListener('click', close);
+    modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !modal.classList.contains('hidden')) close(); });
+
+    // Intercept any form (or link) carrying data-confirm.
+    document.addEventListener('submit', function (e) {
+        var form = e.target.closest('form[data-confirm]');
+        if (!form || form.dataset.confirmed) return;
+        e.preventDefault();
+        open(form.getAttribute('data-confirm'), function () {
+            form.dataset.confirmed = '1';
+            if (form.requestSubmit) form.requestSubmit(); else form.submit();
+        });
+    }, true);
+})();
+</script>

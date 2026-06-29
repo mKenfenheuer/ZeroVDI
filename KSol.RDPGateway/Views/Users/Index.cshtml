@@ -59,9 +59,7 @@ else
                 </td>
                 <td>
                     <div class="flex items-center justify-end gap-2">
-                        <a asp-action="Details" asp-route-id="@item.Id" class="btn-ghost btn-sm">Details</a>
-                        <a asp-action="Edit" asp-route-id="@item.Id" class="btn-secondary btn-sm">Edit</a>
-                        <a asp-action="AssignRoles" asp-route-id="@item.Id" class="btn-secondary btn-sm">Roles</a>
+                        <a asp-action="Manage" asp-route-id="@item.Id" class="btn-secondary btn-sm">Manage</a>
                         <a asp-action="Delete" asp-route-id="@item.Id" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Delete</a>
                     </div>
                 </td>

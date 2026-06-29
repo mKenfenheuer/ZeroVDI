@@ -92,7 +92,7 @@ else
             @* The same editor the console popup and resource editor use, so the option set stays
                identical everywhere. JS below loads/saves it via the partial's fields. *@
             <div id="settings-editor">
-                <partial name="~/Views/RDPResourceUserAuthorizations/_ConnectionDefaultsEditor.cshtml" model="new ConnectionDefaults()" />
+                <partial name="_ConnectionDefaultsEditor" model="new ConnectionDefaults()" />
             </div>
 
             <!-- Stored VM credentials (single sign-on) -->

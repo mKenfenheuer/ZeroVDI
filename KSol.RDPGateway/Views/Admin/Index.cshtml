@@ -10,7 +10,7 @@
         ("Running now", Model.RunningCount, "ri-play-circle-line", "text-success", "RDPResources"),
         ("Backends", Model.BackendCount, "ri-server-line", "text-chart-2", "ProxmoxBackends"),
         ("Users", Model.UserCount, "ri-team-line", "text-chart-3", "Users"),
-        ("Authorizations", Model.AuthorizationCount, "ri-shield-user-line", "text-chart-4", "RDPResourceUserAuthorizations"),
+        ("Access grants", Model.AuthorizationCount, "ri-shield-user-line", "text-chart-4", "RDPResourceUserAuthorizations"),
         ("Recordings", Model.RecordingCount, "ri-film-line", "text-chart-5", "Recordings"),
     };
 }
@@ -67,7 +67,7 @@
             <a asp-controller="RDPResources" asp-action="Create" class="btn-secondary justify-start"><i class="ri-add-line"></i> New resource</a>
             <a asp-controller="ProxmoxBackends" asp-action="Create" class="btn-secondary justify-start"><i class="ri-server-line"></i> Add backend</a>
             <a asp-controller="Users" asp-action="Create" class="btn-secondary justify-start"><i class="ri-user-add-line"></i> Add user</a>
-            <a asp-controller="RDPResourceUserAuthorizations" asp-action="Create" class="btn-secondary justify-start"><i class="ri-shield-user-line"></i> Grant access</a>
+            <a asp-controller="Users" asp-action="Index" class="btn-secondary justify-start"><i class="ri-shield-user-line"></i> Grant access</a>
         </div>
     </div>
 </div>
