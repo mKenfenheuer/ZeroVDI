@@ -110,6 +110,10 @@ public class Program
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddScoped<RDP.IAuditLogger, RDP.AuditLogger>();
 
+        // Tenant-wide admin-enforced device/channel redirection policy (clipboard, audio, mic, camera).
+        // Cached singleton; clamps the effective console ConnectionDefaults at every enforcement point.
+        builder.Services.AddSingleton<RDP.DevicePolicyService>();
+
         // MFA enforcement: Identity already runs the 2FA challenge for enrolled users at login; this
         // policy decides who is REQUIRED to enroll (Mfa section). The middleware (added below) forces
         // required-but-unenrolled users to the authenticator setup page.

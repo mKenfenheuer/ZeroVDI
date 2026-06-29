@@ -15,6 +15,19 @@
     // drive the popup when this (user, resource) has nothing stored yet.
     var defaults = ViewData["Defaults"] as ConnectionDefaults ?? new ConnectionDefaults();
     var recordingNotice = ViewData["RecordingNotice"] is true;
+
+    // Admin-enforced device policy: clamp the starting values and lock the corresponding checkboxes so a
+    // disabled feature can't be (re-)enabled here. The relay clamps too, so this is purely UX.
+    var devicePolicy = ViewData["DevicePolicy"] as DevicePolicy ?? new DevicePolicy();
+    defaults = new ConnectionDefaults
+    {
+        Audio = DevicePolicy.Clamp(devicePolicy.Audio, defaults.Audio),
+        Clipboard = DevicePolicy.Clamp(devicePolicy.Clipboard, defaults.Clipboard),
+        Microphone = DevicePolicy.Clamp(devicePolicy.Microphone, defaults.Microphone),
+        Camera = DevicePolicy.Clamp(devicePolicy.Camera, defaults.Camera),
+        GfxMode = defaults.GfxMode,
+        PerformanceFlags = defaults.PerformanceFlags,
+    };
 }
 <!DOCTYPE html>
 <html lang="en">
@@ -356,21 +369,31 @@
                 <details class="rounded-lg border border-border">
                     <summary class="cursor-pointer select-none px-3 py-2 text-sm font-medium text-foreground">Session options</summary>
                     <div class="px-3 pb-3 space-y-2">
-                        <label class="flex items-center gap-2 text-sm cursor-pointer">
-                            <input class="form-check" type="checkbox" id="opt-audio" checked="@(defaults?.Audio ?? true)" />
+                        @{
+                            var audioLocked = DevicePolicy.IsLocked(devicePolicy.Audio);
+                            var clipLocked = DevicePolicy.IsLocked(devicePolicy.Clipboard);
+                            var micLocked = DevicePolicy.IsLocked(devicePolicy.Microphone);
+                            var camLocked = DevicePolicy.IsLocked(devicePolicy.Camera);
+                        }
+                        <label class="flex items-center gap-2 text-sm @(audioLocked ? "opacity-60 cursor-not-allowed" : "cursor-pointer")">
+                            <input class="form-check" type="checkbox" id="opt-audio" checked="@defaults.Audio" disabled="@audioLocked" />
                             <span>Remote sound</span>
+                            @if (audioLocked) { <i class="fa-solid fa-lock text-xs text-muted-foreground" title="Locked by administrator policy"></i> }
                         </label>
-                        <label class="flex items-center gap-2 text-sm cursor-pointer">
-                            <input class="form-check" type="checkbox" id="opt-clipboard" checked="@(defaults?.Clipboard ?? true)" />
+                        <label class="flex items-center gap-2 text-sm @(clipLocked ? "opacity-60 cursor-not-allowed" : "cursor-pointer")">
+                            <input class="form-check" type="checkbox" id="opt-clipboard" checked="@defaults.Clipboard" disabled="@clipLocked" />
                             <span>Clipboard sync</span>
+                            @if (clipLocked) { <i class="fa-solid fa-lock text-xs text-muted-foreground" title="Locked by administrator policy"></i> }
                         </label>
-                        <label class="flex items-center gap-2 text-sm cursor-pointer">
-                            <input class="form-check" type="checkbox" id="opt-microphone" checked="@(defaults?.Microphone ?? true)"/>
+                        <label class="flex items-center gap-2 text-sm @(micLocked ? "opacity-60 cursor-not-allowed" : "cursor-pointer")">
+                            <input class="form-check" type="checkbox" id="opt-microphone" checked="@defaults.Microphone" disabled="@micLocked"/>
                             <span>Microphone (prompts for permission)</span>
+                            @if (micLocked) { <i class="fa-solid fa-lock text-xs text-muted-foreground" title="Locked by administrator policy"></i> }
                         </label>
-                        <label class="flex items-center gap-2 text-sm cursor-pointer">
-                            <input class="form-check" type="checkbox" id="opt-camera" checked="@(defaults?.Camera ?? true)"/>
+                        <label class="flex items-center gap-2 text-sm @(camLocked ? "opacity-60 cursor-not-allowed" : "cursor-pointer")">
+                            <input class="form-check" type="checkbox" id="opt-camera" checked="@defaults.Camera" disabled="@camLocked"/>
                             <span>Camera (prompts for permission)</span>
+                            @if (camLocked) { <i class="fa-solid fa-lock text-xs text-muted-foreground" title="Locked by administrator policy"></i> }
                         </label>
 
                         <div class="pt-1">

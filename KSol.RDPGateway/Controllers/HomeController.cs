@@ -17,14 +17,16 @@ public class HomeController : Controller
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly RDP.CredentialProtector _credentials;
     private readonly RDP.RecordingPolicy _recordingPolicy;
+    private readonly RDP.DevicePolicyService _devicePolicy;
 
-    public HomeController(ILogger<HomeController> logger, ApplicationDbContext context, UserManager<ApplicationUser> userManager, RDP.CredentialProtector credentials, RDP.RecordingPolicy recordingPolicy)
+    public HomeController(ILogger<HomeController> logger, ApplicationDbContext context, UserManager<ApplicationUser> userManager, RDP.CredentialProtector credentials, RDP.RecordingPolicy recordingPolicy, RDP.DevicePolicyService devicePolicy)
     {
         _logger = logger;
         _context = context;
         _userManager = userManager;
         _credentials = credentials;
         _recordingPolicy = recordingPolicy;
+        _devicePolicy = devicePolicy;
     }
 
     public async Task<IActionResult> Index()
@@ -80,6 +82,12 @@ public class HomeController : Controller
         var roles = await _userManager.GetRolesAsync(authorization.User ?? (await _userManager.FindByIdAsync(userId))!);
         ViewData["RecordingNotice"] = (await _recordingPolicy.EvaluateAsync(userId, id, roles)).Notify;
 
+        // Device/channel redirection policy: pass the policy to the view so locked features render as
+        // disabled checkboxes, and clamp the defaults the form starts from so a locked-off feature is
+        // never pre-ticked. (The relay also clamps at connect; this is the UI half.)
+        var devicePolicy = _devicePolicy.Get();
+        ViewData["DevicePolicy"] = devicePolicy;
+
         // SSO: when VM credentials are stored for this (user, resource), the console auto-connects
         // without the login overlay. NO stored credential (username, password or domain) is EVER sent
         // to the browser. The gateway injects the real credentials entirely server-side for both the
@@ -97,7 +105,7 @@ public class HomeController : Controller
             if (usable)
             {
                 ViewData["AutoConnect"] = true;
-                ViewData["Defaults"] = authorization.ConnectionDefaults ?? new ConnectionDefaults();
+                ViewData["Defaults"] = _devicePolicy.Apply(authorization.ConnectionDefaults ?? new ConnectionDefaults());
                 // StoredUser/StoredPassword/StoredDomain intentionally NOT set.
             }
         }

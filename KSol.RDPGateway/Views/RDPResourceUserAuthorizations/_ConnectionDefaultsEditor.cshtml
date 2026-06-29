@@ -32,6 +32,9 @@
     bool Keep(int bit) => (mask & bit) == 0;      // DISABLE_* eye-candy kept when its bit is NOT set
 }
 
+@* These are starting preferences only. The tenant Device policy (Admin → Device policy) can force any
+   of the device/channel features off or on; a locked feature is clamped to the policy value at connect
+   regardless of what is saved here. *@
 <div class="@uid grid grid-cols-1 md:grid-cols-2 gap-6">
     <div class="space-y-2">
         <label class="flex items-center gap-2 text-sm cursor-pointer">

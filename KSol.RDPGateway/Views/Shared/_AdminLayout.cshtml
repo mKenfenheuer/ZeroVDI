@@ -64,6 +64,13 @@
                 </a>
             }
 
+            @if (User.IsInRole("Admin"))
+            {
+                <a asp-area="" asp-controller="DevicePolicy" asp-action="Index" class="@ItemClass("DevicePolicy")">
+                    <i class="ri-shield-keyhole-line text-lg"></i><span>Device policy</span>
+                </a>
+            }
+
             @if (User.IsInRole("Admin") || User.IsInRole("Auditor"))
             {
                 <p class="px-3 py-2 mt-3 text-xs font-medium text-sidebar-foreground/50 uppercase tracking-wide">Audit</p>

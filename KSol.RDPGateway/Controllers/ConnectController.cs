@@ -27,19 +27,22 @@ public class ConnectController : Controller
     private readonly ConnectionReadinessService _readiness;
     private readonly CredentialProtector _credentials;
     private readonly IAuditLogger _audit;
+    private readonly DevicePolicyService _devicePolicy;
 
     public ConnectController(
         ApplicationDbContext context,
         UserManager<ApplicationUser> userManager,
         ConnectionReadinessService readiness,
         CredentialProtector credentials,
-        IAuditLogger audit)
+        IAuditLogger audit,
+        DevicePolicyService devicePolicy)
     {
         _context = context;
         _userManager = userManager;
         _readiness = readiness;
         _credentials = credentials;
         _audit = audit;
+        _devicePolicy = devicePolicy;
     }
 
     private async Task<RDPResource?> AuthorizeResourceAsync(string id)
@@ -106,7 +109,9 @@ public class ConnectController : Controller
 
         if (req.RememberSettings)
         {
-            auth.ConnectionDefaults = new ConnectionDefaults
+            // Clamp against the tenant device policy so a crafted save cannot persist a feature the admin
+            // has locked off (the disabled checkbox is only the UI half of enforcement).
+            auth.ConnectionDefaults = _devicePolicy.Apply(new ConnectionDefaults
             {
                 Audio = req.Audio,
                 Clipboard = req.Clipboard,
@@ -114,7 +119,7 @@ public class ConnectController : Controller
                 Camera = req.Camera,
                 GfxMode = string.IsNullOrEmpty(req.GfxMode) ? "avc420" : req.GfxMode,
                 PerformanceFlags = req.PerformanceFlags,
-            };
+            });
         }
 
         await _context.SaveChangesAsync();

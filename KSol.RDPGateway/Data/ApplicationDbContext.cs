@@ -28,6 +28,7 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
     public DbSet<Recording> Recordings { get; set; }
     public DbSet<RecordingRule> RecordingRules { get; set; }
     public DbSet<AuditEvent> AuditEvents { get; set; }
+    public DbSet<DevicePolicy> DevicePolicies { get; set; }
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
