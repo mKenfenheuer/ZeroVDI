@@ -26,17 +26,20 @@ public class ConnectController : Controller
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly ConnectionReadinessService _readiness;
     private readonly CredentialProtector _credentials;
+    private readonly IAuditLogger _audit;
 
     public ConnectController(
         ApplicationDbContext context,
         UserManager<ApplicationUser> userManager,
         ConnectionReadinessService readiness,
-        CredentialProtector credentials)
+        CredentialProtector credentials,
+        IAuditLogger audit)
     {
         _context = context;
         _userManager = userManager;
         _readiness = readiness;
         _credentials = credentials;
+        _audit = audit;
     }
 
     private async Task<RDPResource?> AuthorizeResourceAsync(string id)
@@ -97,6 +100,8 @@ public class ConnectController : Controller
             auth.ProtectedUsername = _credentials.Protect(req.Username);
             auth.ProtectedPassword = _credentials.Protect(req.Password);
             auth.ProtectedDomain = _credentials.Protect(req.Domain);
+            await _audit.LogAsync(AuditCategory.Credential, "CredentialsStored",
+                targetType: nameof(RDPResource), targetId: id);
         }
 
         if (req.RememberSettings)
@@ -133,6 +138,8 @@ public class ConnectController : Controller
         auth.ProtectedDomain = null;
 
         await _context.SaveChangesAsync();
+        await _audit.LogAsync(AuditCategory.Credential, "CredentialsCleared",
+            targetType: nameof(RDPResource), targetId: id);
         return Ok(new { cleared = true });
     }
 

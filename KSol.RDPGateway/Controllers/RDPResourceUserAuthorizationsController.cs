@@ -17,11 +17,14 @@ namespace KSol.RDPGateway.Controllers
     {
         private readonly ApplicationDbContext _context;
         private readonly RDP.CredentialProtector _credentials;
+        private readonly RDP.IAuditLogger _audit;
 
-        public RDPResourceUserAuthorizationsController(ApplicationDbContext context, RDP.CredentialProtector credentials)
+        public RDPResourceUserAuthorizationsController(ApplicationDbContext context,
+            RDP.CredentialProtector credentials, RDP.IAuditLogger audit)
         {
             _context = context;
             _credentials = credentials;
+            _audit = audit;
         }
 
         // GET: /admin/authorizations
@@ -73,6 +76,9 @@ namespace KSol.RDPGateway.Controllers
             {
                 _context.Add(rDPResourceUserAuthorization);
                 await _context.SaveChangesAsync();
+                await _audit.LogAsync(Models.AuditCategory.Authorization, "AccessGranted",
+                    targetType: "RDPResource", targetId: rDPResourceUserAuthorization.RDPResourceId,
+                    detail: new { rDPResourceUserAuthorization.UserId });
                 return RedirectToAction(nameof(Index));
             }
             ViewData["RDPResourceId"] = new SelectList(_context.RDPResources, "Id", "Name", rDPResourceUserAuthorization.RDPResourceId);
@@ -204,6 +210,9 @@ namespace KSol.RDPGateway.Controllers
             if (rDPResourceUserAuthorization != null)
             {
                 _context.RDPResourceUserAuthorizations.Remove(rDPResourceUserAuthorization);
+                await _audit.LogAsync(Models.AuditCategory.Authorization, "AccessRevoked",
+                    targetType: "RDPResource", targetId: rDPResourceUserAuthorization.RDPResourceId,
+                    detail: new { rDPResourceUserAuthorization.UserId });
             }
 
             await _context.SaveChangesAsync();

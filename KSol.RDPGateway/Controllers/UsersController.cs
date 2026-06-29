@@ -15,11 +15,14 @@ namespace KSol.RDPGateway.Controllers
     {
         private readonly UserManager<ApplicationUser> _userManager;
         private readonly RoleManager<IdentityRole> _roleManager;
+        private readonly KSol.RDPGateway.RDP.IAuditLogger _audit;
 
-        public UsersController(UserManager<ApplicationUser> userManager, RoleManager<IdentityRole> roleManager)
+        public UsersController(UserManager<ApplicationUser> userManager, RoleManager<IdentityRole> roleManager,
+            KSol.RDPGateway.RDP.IAuditLogger audit)
         {
             _userManager = userManager;
             _roleManager = roleManager;
+            _audit = audit;
         }
 
         // GET: /admin/users
@@ -72,6 +75,8 @@ namespace KSol.RDPGateway.Controllers
                     {
                         // Assign User role by default
                         await _userManager.AddToRoleAsync(user, "User");
+                        await _audit.LogAsync(KSol.RDPGateway.Models.AuditCategory.User, "UserCreated",
+                            targetType: "User", targetId: user.Id, targetName: user.UserName);
                         return RedirectToAction(nameof(Index));
                     }
                     foreach (var error in result.Errors)
@@ -184,6 +189,8 @@ namespace KSol.RDPGateway.Controllers
                     }
                     return View(user);
                 }
+                await _audit.LogAsync(KSol.RDPGateway.Models.AuditCategory.User, "UserDeleted",
+                    targetType: "User", targetId: user.Id, targetName: user.UserName);
             }
             return RedirectToAction(nameof(Index));
         }
@@ -236,6 +243,13 @@ namespace KSol.RDPGateway.Controllers
                 if (rolesToAdd.Any())
                 {
                     await _userManager.AddToRolesAsync(user, rolesToAdd);
+                }
+
+                if (rolesToAdd.Any() || rolesToRemove.Any())
+                {
+                    await _audit.LogAsync(KSol.RDPGateway.Models.AuditCategory.Authorization, "RolesChanged",
+                        targetType: "User", targetId: user.Id, targetName: user.UserName,
+                        detail: new { added = rolesToAdd, removed = rolesToRemove });
                 }
 
                 return RedirectToAction(nameof(Details), new { id = user.Id });

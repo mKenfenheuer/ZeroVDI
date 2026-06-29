@@ -95,6 +95,42 @@ public class Program
         // recordings left Processing by a previous run — crash-resilient).
         builder.Services.AddHostedService<RDP.RecordingMuxService>();
 
+        // Audit trail: immutable record of authentication, session, credential and admin actions.
+        // HttpContextAccessor lets the scoped logger resolve the actor + client IP off the request.
+        builder.Services.AddHttpContextAccessor();
+        builder.Services.AddScoped<RDP.IAuditLogger, RDP.AuditLogger>();
+
+        // Rate limiting (brute-force / abuse protection). Two policies:
+        //  - "auth": IP-based fixed window on the login/register/password endpoints.
+        //  - "ws":   IP-based fixed window on the WebSocket relay handshake.
+        // Limits are configurable via the RateLimiting section; the defaults below are sane for a
+        // small/medium VDI deployment. A rejected request gets HTTP 429.
+        var rl = builder.Configuration.GetSection("RateLimiting");
+        builder.Services.AddRateLimiter(options =>
+        {
+            options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+            options.AddPolicy("auth", httpContext =>
+                System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    factory: _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = rl.GetValue("AuthPermitLimit", 10),
+                        Window = TimeSpan.FromSeconds(rl.GetValue("AuthWindowSeconds", 60)),
+                        QueueLimit = 0,
+                    }));
+
+            options.AddPolicy("ws", httpContext =>
+                System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+                    partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    factory: _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = rl.GetValue("WsPermitLimit", 30),
+                        Window = TimeSpan.FromSeconds(rl.GetValue("WsWindowSeconds", 60)),
+                        QueueLimit = 0,
+                    }));
+        });
+
         builder.Services.AddControllersWithViews().AddRazorRuntimeCompilation();
 
         // Route native RDGW connections through the gateway's NLA man-in-the-middle so they share the
@@ -294,6 +330,10 @@ public class Program
 
         app.UseRouting();
 
+        // Brute-force / abuse protection. After routing so per-endpoint policies are known; before auth
+        // so we reject floods before doing password work.
+        app.UseRateLimiter();
+
         app.UseAuthorization();
 
         app.MapStaticAssets();
@@ -301,8 +341,11 @@ public class Program
             name: "default",
             pattern: "{controller=Home}/{action=Index}/{id?}")
             .WithStaticAssets();
+        // Throttle the Identity account pages (login, register, password reset, 2FA) by client IP to
+        // blunt credential-stuffing / brute force beyond the per-account lockout.
         app.MapRazorPages()
-           .WithStaticAssets();
+           .WithStaticAssets()
+           .RequireRateLimiting("auth");
 
         app.Run();
     }

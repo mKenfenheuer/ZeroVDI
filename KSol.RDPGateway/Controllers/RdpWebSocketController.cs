@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using KSol.RDPGateway.Data;
 using KSol.RDPGateway.Models;
@@ -25,6 +26,7 @@ public class RdpWebSocketController : Controller
     private readonly RecordingPolicy _recordingPolicy;
     private readonly RedirectionTokenCache _redirections;
     private readonly IConfiguration _config;
+    private readonly IAuditLogger _audit;
     private readonly ILogger<RdpWebSocketController> _logger;
 
     public RdpWebSocketController(
@@ -36,6 +38,7 @@ public class RdpWebSocketController : Controller
         RecordingPolicy recordingPolicy,
         RedirectionTokenCache redirections,
         IConfiguration config,
+        IAuditLogger audit,
         ILogger<RdpWebSocketController> logger)
     {
         _context = context;
@@ -46,11 +49,13 @@ public class RdpWebSocketController : Controller
         _recordingPolicy = recordingPolicy;
         _redirections = redirections;
         _config = config;
+        _audit = audit;
         _logger = logger;
     }
 
     // GET /ws/rdp/{id}
     [HttpGet("ws/rdp/{id}")]
+    [EnableRateLimiting("ws")]
     public async Task Connect(string id)
     {
         if (!HttpContext.WebSockets.IsWebSocketRequest)
@@ -182,6 +187,10 @@ public class RdpWebSocketController : Controller
             });
 
         await _resolver.OnConnectedAsync(userId, id);
+        var sessionStartUtc = DateTime.UtcNow;
+        await _audit.LogAsync(AuditCategory.Session, "SessionConnected",
+            targetType: nameof(RDPResource), targetId: id, targetName: resource.Name,
+            detail: new { host, port, recorded = recorder != null });
         try
         {
             await session.RunAsync(HttpContext.RequestAborted);
@@ -193,6 +202,9 @@ public class RdpWebSocketController : Controller
         finally
         {
             await _resolver.OnDisconnectedAsync(userId, id);
+            await _audit.LogAsync(AuditCategory.Session, "SessionDisconnected",
+                targetType: nameof(RDPResource), targetId: id, targetName: resource.Name,
+                detail: new { durationSeconds = (int)(DateTime.UtcNow - sessionStartUtc).TotalSeconds });
 
             // Close this leg's raw streams (Dispose writes the leg's manifest.json). Only FINALIZE the
             // recording (hand off to the mux job) when no continuation was armed — i.e. this is the last

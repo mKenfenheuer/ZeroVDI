@@ -21,11 +21,14 @@ namespace KSol.RDPGateway.Areas.Identity.Pages.Account
     public class LoginModel : PageModel
     {
         private readonly SignInManager<ApplicationUser> _signInManager;
+        private readonly KSol.RDPGateway.RDP.IAuditLogger _audit;
         private readonly ILogger<LoginModel> _logger;
 
-        public LoginModel(SignInManager<ApplicationUser> signInManager, ILogger<LoginModel> logger)
+        public LoginModel(SignInManager<ApplicationUser> signInManager,
+            KSol.RDPGateway.RDP.IAuditLogger audit, ILogger<LoginModel> logger)
         {
             _signInManager = signInManager;
+            _audit = audit;
             _logger = logger;
         }
 
@@ -112,10 +115,12 @@ namespace KSol.RDPGateway.Areas.Identity.Pages.Account
             {
                 // This doesn't count login failures towards account lockout
                 // To enable password failures to trigger account lockout, set lockoutOnFailure: true
-                var result = await _signInManager.PasswordSignInAsync(Input.Email, Input.Password, Input.RememberMe, lockoutOnFailure: false);
+                var result = await _signInManager.PasswordSignInAsync(Input.Email, Input.Password, Input.RememberMe, lockoutOnFailure: true);
                 if (result.Succeeded)
                 {
                     _logger.LogInformation("User logged in.");
+                    await _audit.LogAsync(Models.AuditCategory.Authentication, "LoginSucceeded",
+                        actorName: Input.Email);
                     return LocalRedirect(returnUrl);
                 }
                 if (result.RequiresTwoFactor)
@@ -125,10 +130,14 @@ namespace KSol.RDPGateway.Areas.Identity.Pages.Account
                 if (result.IsLockedOut)
                 {
                     _logger.LogWarning("User account locked out.");
+                    await _audit.LogAsync(Models.AuditCategory.Authentication, "LoginLockedOut",
+                        success: false, actorName: Input.Email);
                     return RedirectToPage("./Lockout");
                 }
                 else
                 {
+                    await _audit.LogAsync(Models.AuditCategory.Authentication, "LoginFailed",
+                        success: false, actorName: Input.Email);
                     ModelState.AddModelError(string.Empty, "Invalid login attempt.");
                     return Page();
                 }

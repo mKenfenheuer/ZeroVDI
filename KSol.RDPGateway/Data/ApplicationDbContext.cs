@@ -27,6 +27,7 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
     public DbSet<ProxmoxBackend> ProxmoxBackends { get; set; }
     public DbSet<Recording> Recordings { get; set; }
     public DbSet<RecordingRule> RecordingRules { get; set; }
+    public DbSet<AuditEvent> AuditEvents { get; set; }
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -41,6 +42,16 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
         // (same rationale as above). Stored credentials are plain encrypted-string columns.
         builder.Entity<RDPResourceUserAuthorization>()
             .OwnsOne(a => a.ConnectionDefaults, b => b.ToJson());
+
+        // Audit trail: index the columns the admin viewer filters/sorts on (newest-first, by category,
+        // by actor). The store is append-only at the application level.
+        builder.Entity<AuditEvent>(e =>
+        {
+            e.HasIndex(a => a.TimestampUtc);
+            e.HasIndex(a => a.Category);
+            e.HasIndex(a => a.ActorUserId);
+            e.Property(a => a.Action).HasMaxLength(64);
+        });
 
         // Encrypt sensitive columns at rest. These hold secrets that must never be plaintext in the DB:
         //  - ApplicationUser.NtHash: unsalted MD4 of the gateway password (offline-crackable / PtH if leaked).
