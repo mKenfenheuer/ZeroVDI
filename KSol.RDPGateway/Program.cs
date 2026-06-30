@@ -366,6 +366,19 @@ public class Program
 
         app.UseHttpsRedirection();
 
+        // Serve runtime-uploaded assets (custom branding logos) from the persisted /app/Data volume at
+        // the /uploads URL prefix. This is deliberately a separate UseStaticFiles + PhysicalFileProvider
+        // rather than the build-time MapStaticAssets pipeline below: MapStaticAssets only serves files
+        // baked into the publish manifest, so logos written after deploy (Data/uploads/branding) would
+        // 404 in production. Storing them under Data also keeps them across container recreation.
+        var uploadsRoot = Controllers.AppearanceController.UploadsRoot(app.Environment);
+        Directory.CreateDirectory(uploadsRoot);
+        app.UseStaticFiles(new StaticFileOptions
+        {
+            FileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(uploadsRoot),
+            RequestPath = "/uploads",
+        });
+
         // Enable WebSocket upgrades for the browser RDP console (/ws/rdp/{id}). Must run before
         // routing so the relay endpoint can accept the upgrade.
         app.UseWebSockets();

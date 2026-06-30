@@ -7,6 +7,16 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.1] — 2026-06-30 — Logo serving fix
+
+### Fixed
+- **Uploaded logos now load in production.** Custom branding logos are served by a dedicated
+  static-file handler at `/uploads` and stored under the persisted `Data` volume, so they no longer
+  404 after deploy (the build-time static-asset pipeline never served runtime uploads) and survive
+  container recreation.
+
+---
+
 ## [0.6.0] — 2026-06-30 — Branding & documentation
 
 ### Added

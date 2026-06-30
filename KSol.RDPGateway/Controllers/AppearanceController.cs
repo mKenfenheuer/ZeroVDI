@@ -98,7 +98,7 @@ public class AppearanceController : Controller
             return RedirectToAction(nameof(Index));
         }
 
-        var dir = Path.Combine(_env.WebRootPath, "uploads", "branding");
+        var dir = Path.Combine(UploadsRoot(_env), "branding");
         Directory.CreateDirectory(dir);
 
         // Stable, unguessable-ish file name with a cache-busting token so a replaced logo refreshes.
@@ -178,8 +178,15 @@ public class AppearanceController : Controller
         }
         try
         {
-            var existing = Path.Combine(_env.WebRootPath, current.TrimStart('/')
-                .Replace('/', Path.DirectorySeparatorChar));
+            // Stored paths are "/uploads/branding/<file>"; map back onto the uploads root on disk.
+            var relative = current.TrimStart('/');
+            const string prefix = "uploads/";
+            if (relative.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                relative = relative[prefix.Length..];
+            }
+            var existing = Path.Combine(UploadsRoot(_env),
+                relative.Replace('/', Path.DirectorySeparatorChar));
             if (System.IO.File.Exists(existing))
             {
                 System.IO.File.Delete(existing);
@@ -190,6 +197,15 @@ public class AppearanceController : Controller
             // Best-effort cleanup; a leftover file is harmless.
         }
     }
+
+    /// <summary>
+    /// On-disk root for user-uploaded assets (logos). Lives under the persisted <c>/app/Data</c> volume
+    /// (see Dockerfile) so uploads survive container recreation, and is served at the <c>/uploads</c>
+    /// URL prefix by a dedicated static-file middleware in Program.cs — NOT by the build-time
+    /// <c>MapStaticAssets</c> manifest, which only knows about files present at publish time.
+    /// </summary>
+    public static string UploadsRoot(IWebHostEnvironment env)
+        => Path.Combine(env.ContentRootPath, "Data", "uploads");
 
     private static string? NormalizeHex(string? hex)
     {
