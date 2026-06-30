@@ -151,6 +151,18 @@ public class HomeController : Controller
                 // StoredUser/StoredPassword/StoredDomain intentionally NOT set.
             }
         }
+        // VDI pool entry point: on the FIRST connect no concrete clone (and thus no per-user SSO row keyed
+        // to the clone) exists yet — it's provisioned during the preflight. But if the pool generates a
+        // per-user credential, the relay WILL have stored SSO for the clone by the time the socket opens,
+        // so the console must auto-connect (suppress the login overlay) rather than prompt for credentials
+        // the user doesn't know. Detect the pool case here and pre-arm auto-connect with the pool defaults.
+        else if (!ViewData.ContainsKey("AutoConnect")
+            && await _context.VdiPools.AsNoTracking()
+                .AnyAsync(p => p.Id == id && p.IdentityMode == VdiIdentityMode.CloudInit && p.GenerateCredentials))
+        {
+            ViewData["AutoConnect"] = true;
+            ViewData["Defaults"] = _devicePolicy.Apply(resource.DefaultConnectionDefaults ?? new ConnectionDefaults());
+        }
 
         return View();
     }

@@ -7,6 +7,41 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.4] — 2026-06-30 — VDI pool SSO sign-in fix
+
+### Fixed
+- **Generated desktop credentials now sign you in automatically.** When a VDI pool generates a unique
+  per-user account (cloud-init + per-resource SSO), connecting through the pool used to still pop an
+  empty login window. The connect path looked up the stored credentials by the *pool* id, but they are
+  stored against the user's provisioned *clone* — so the lookup always missed. The relay now resolves
+  the pool to the user's clone and reads the SSO credentials (and binds the recording, redirection and
+  session rows) against that clone, and the console suppresses the login overlay for credential-
+  generating pools so the very first connect signs in without prompting.
+
+### Fixed
+- **Deprovisioning a desktop now stops a running VM before destroying it.** Proxmox refuses to delete a
+  running VM, so the tear-down could fail mid-way and leave an orphaned clone. Deprovision now checks the
+  VM's status, stops it only if it is running, waits for it to actually report `stopped`, and then
+  destroys it — a VM that is already gone is treated as success.
+
+---
+
+## [0.6.2] — 2026-06-30 — VDI reprovision fix
+
+### Fixed
+- **Dedicated desktops can be reconnected after a failed provision.** When a clone failed to provision,
+  its tracking row was left behind in a `Failed` state that connect-time lookups ignored but the unique
+  `(pool, owner)` index did not — so every later connect attempt hit a `UNIQUE constraint failed`
+  error and the user was permanently stuck. Provisioning now clears a stale `Failed`/`Deprovisioning`
+  instance (and its orphaned resource) before creating fresh tracking rows.
+- **Vanished desktops are recloned on connect.** If a dedicated clone's VM no longer exists on the
+  backend (deleted out-of-band in Proxmox, or its node lost), connecting used to fail trying to start a
+  ghost VM. The connect path now verifies the clone still exists and, if not, tears down the stale
+  instance and provisions a fresh desktop automatically. A transient backend outage is treated as
+  "still exists" so it never triggers a needless reclone.
+
+---
+
 ## [0.6.1] — 2026-06-30 — Logo serving fix
 
 ### Fixed

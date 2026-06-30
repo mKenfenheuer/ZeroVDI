@@ -86,11 +86,11 @@ public class RdpWebSocketController : Controller
             HttpContext.Response.StatusCode = StatusCodes.Status404NotFound;
             return;
         }
-        var authorization = await _context.RDPResourceUserAuthorizations
-            .FirstOrDefaultAsync(a => a.UserId == userId && a.RDPResourceId == id);
         var requestedPort = (ushort)(resource.Port > 0 ? resource.Port : 3389);
 
-        // Resolve the resource to a live host/port — starts/resumes a Proxmox VM and waits for it.
+        // Resolve the resource to a live host/port — starts/resumes a Proxmox VM and waits for it. When
+        // `id` is a VDI pool entry point this also provisions/reuses the user's clone and returns its
+        // concrete resource id, which we use below for the SSO lookup (the pool id has no per-user row).
         var resolved = await _resolver.ResolveAsync(userId, id, requestedPort);
         if (resolved == null)
         {
@@ -103,12 +103,21 @@ public class RdpWebSocketController : Controller
             return;
         }
 
-        var (host, port) = resolved.Value;
+        var (host, port, resolvedId) = resolved.Value;
+
+        // For a VDI pool entry point, `id` came in as the pool id but the request resolved to the user's
+        // concrete clone. Rebind to the clone id so everything downstream — the SSO lookup, recording FK
+        // (RDPResource), redirection cache, session registration and audit — binds to the real resource
+        // rather than the pool (which is not an RDPResource and has no per-user authorization row).
+        id = resolvedId;
+
         var kerberos = await ResolveKerberosAsync(resource);
 
         // SSO: if VM credentials are stored for this (user, resource), decrypt them and pass them to
         // the relay so the browser never sends a credentials frame. Decryption returning null (empty
         // store, or keyring lost) falls back to the browser-supplied first-frame credentials.
+        var authorization = await _context.RDPResourceUserAuthorizations
+            .FirstOrDefaultAsync(a => a.UserId == userId && a.RDPResourceId == id);
         RdpRelaySession.VmCredentials? presupplied = null;
         if (authorization?.HasStoredCredentials == true)
         {

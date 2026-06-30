@@ -23,7 +23,12 @@ public sealed record ReadinessProgress(
     string Message,
     string? Host = null,
     ushort Port = 0,
-    string? Error = null)
+    string? Error = null,
+    // The concrete resource id the request resolved to. Differs from the requested id when the request
+    // targeted a VDI pool entry point: the readiness pre-step provisions/reuses the user's clone and
+    // stamps its resource id here so credential/SSO lookups bind to the clone, not the pool (whose id
+    // has no per-user SSO row). Null until a Ready snapshot for a resolved request.
+    string? ResourceId = null)
 {
     public bool Done => Phase == ReadinessPhase.Ready;
     public bool Failed => Phase == ReadinessPhase.Error;

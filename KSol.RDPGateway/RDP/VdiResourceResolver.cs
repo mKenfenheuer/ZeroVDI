@@ -44,10 +44,14 @@ public class VdiResourceResolver
     /// Resolves a resource to a reachable host/port, starting a Proxmox VM on demand. Thin wrapper over
     /// <see cref="RunReadinessAsync"/> used by the WebSocket relay (which has no progress UI of its own).
     /// </summary>
-    public async Task<(string Host, ushort Port)?> ResolveAsync(string userId, string resource, ushort requestedPort)
+    /// <param name="resource">The requested id; may be a VDI pool entry point, in which case the returned
+    /// <c>ResourceId</c> is the user's concrete clone (provisioned on demand) rather than the pool id.</param>
+    public async Task<(string Host, ushort Port, string ResourceId)?> ResolveAsync(string userId, string resource, ushort requestedPort)
     {
         var final = await RunReadinessAsync(userId, resource, requestedPort, progress: null, CancellationToken.None);
-        return final is { Phase: ReadinessPhase.Ready, Host: { } host } ? (host, final.Port) : null;
+        return final is { Phase: ReadinessPhase.Ready, Host: { } host }
+            ? (host, final.Port, final.ResourceId ?? resource)
+            : null;
     }
 
     /// <summary>
@@ -266,8 +270,11 @@ public class VdiResourceResolver
         _logger.LogInformation("Resolve: {Resource} -> {Ip}:{Port}", resource, ip, port);
         return Ready(ip, port);
 
+        // `resource` has been reassigned to the concrete clone id by the pool pre-step above (line ~78)
+        // when the request targeted a pool, so it always names the real RDPResource here. Surface it so
+        // the relay can look up the owner's SSO credentials against the clone, not the pool.
         ReadinessProgress Ready(string host, ushort p) =>
-            new(ReadinessPhase.Ready, "Connecting…", host, p);
+            new(ReadinessPhase.Ready, "Connecting…", host, p, ResourceId: resource);
         ReadinessProgress Fail(string message) =>
             new(ReadinessPhase.Error, message, Error: message);
     }

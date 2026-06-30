@@ -273,6 +273,52 @@ public class ProxmoxClient
     }
 
     /// <summary>
+    /// Destroys a VM safely: checks its current status, stops it first if it is running (Proxmox refuses
+    /// to delete a running VM), waits for the stop to take effect, then deletes it and waits for the
+    /// destroy task to finish. Returns true once the VM is gone. Best-effort — logs and returns false on
+    /// any step failing so callers can surface the problem; a VM that was already absent counts as success.
+    /// </summary>
+    public async Task<bool> DestroyVmAsync(ProxmoxBackend backend, string node, int vmid, CancellationToken ct = default)
+    {
+        var status = await GetStatusAsync(backend, node, vmid, ct);
+        // Null status: the VM is gone or unreachable. Treat a vanished VM as already-destroyed.
+        if (status == null) return true;
+
+        if (!string.Equals(status, "stopped", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!await StopAsync(backend, node, vmid, ct))
+            {
+                _logger.LogWarning("Proxmox[{Backend}]: could not stop {Node}/{VmId} before destroy", backend.Name, node, vmid);
+                return false;
+            }
+            // status/stop returns immediately; poll until the VM actually reports stopped before deleting.
+            if (!await WaitForStatusAsync(backend, node, vmid, "stopped", TimeSpan.FromMinutes(2), ct))
+            {
+                _logger.LogWarning("Proxmox[{Backend}]: {Node}/{VmId} did not stop in time before destroy", backend.Name, node, vmid);
+                return false;
+            }
+        }
+
+        var upid = await DeleteVmAsync(backend, node, vmid, ct);
+        if (upid == null) return false;
+        return await WaitForTaskAsync(backend, node, upid, TimeSpan.FromMinutes(5), ct);
+    }
+
+    /// <summary>Polls a VM's status until it matches <paramref name="target"/> (case-insensitive) or the timeout elapses.</summary>
+    private async Task<bool> WaitForStatusAsync(
+        ProxmoxBackend backend, string node, int vmid, string target, TimeSpan timeout, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow.Add(timeout);
+        while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+        {
+            var status = await GetStatusAsync(backend, node, vmid, ct);
+            if (string.Equals(status, target, StringComparison.OrdinalIgnoreCase)) return true;
+            await Task.Delay(2000, ct);
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Sets cloud-init customization fields on a (stopped) clone before first boot: ciuser, cipassword,
     /// sshkeys, and the guest hostname (Proxmox stores the hostname via the searchdomain/ipconfig path;
     /// here we use the dedicated <c>name</c> plus cloud-init <c>ciuser</c>/etc.). Returns true on success.

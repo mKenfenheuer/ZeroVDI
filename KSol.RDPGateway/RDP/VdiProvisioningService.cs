@@ -70,11 +70,12 @@ public class VdiProvisioningService
         if (pool.Kind == VdiPoolKind.Floating)
             return new ProvisionResult(null, "Floating pools are not yet available."); // step 6
 
-        // Fast path: the user already has a usable dedicated instance.
+        // Fast path: the user already has a usable dedicated instance whose VM still exists.
         var existing = await db.VdiInstances
             .FirstOrDefaultAsync(i => i.PoolId == poolId && i.OwnerUserId == userId
                 && i.State != VdiInstanceState.Failed && i.State != VdiInstanceState.Deprovisioning, ct);
-        if (existing is { RDPResourceId: { } rid, State: VdiInstanceState.Ready })
+        if (existing is { RDPResourceId: { } rid, State: VdiInstanceState.Ready }
+            && await VmStillExistsAsync(db, existing, ct))
             return new ProvisionResult(rid, null);
 
         // Serialize provisioning for this (pool, user).
@@ -86,8 +87,19 @@ public class VdiProvisioningService
             existing = await db.VdiInstances
                 .FirstOrDefaultAsync(i => i.PoolId == poolId && i.OwnerUserId == userId
                     && i.State != VdiInstanceState.Failed && i.State != VdiInstanceState.Deprovisioning, ct);
-            if (existing is { RDPResourceId: { } rid2, State: VdiInstanceState.Ready })
+            if (existing is { RDPResourceId: { } rid2, State: VdiInstanceState.Ready }
+                && await VmStillExistsAsync(db, existing, ct))
                 return new ProvisionResult(rid2, null);
+
+            // A Ready instance whose VM has vanished (deleted out-of-band, lost node) cannot be started.
+            // Mark it Deprovisioning so the reprovision path below clears it and clones a fresh desktop.
+            if (existing is { State: VdiInstanceState.Ready })
+            {
+                _logger.LogWarning("VDI: instance {Instance} (VM {VmId}) no longer exists on the backend; recloning",
+                    existing.Id, existing.ProxmoxVmId);
+                existing.State = VdiInstanceState.Deprovisioning;
+                await db.SaveChangesAsync(ct);
+            }
 
             return await ProvisionDedicatedAsync(db, pool, userId, report, ct);
         }
@@ -101,6 +113,13 @@ public class VdiProvisioningService
         ApplicationDbContext db, VdiPool pool, string userId, Action<ReadinessProgress>? report, CancellationToken ct)
     {
         report?.Invoke(new ReadinessProgress(ReadinessPhase.Provisioning, "Provisioning your desktop…"));
+
+        // A prior attempt may have left a Failed/Deprovisioning row for this (pool, user). The
+        // fast-path/re-check queries skip those states, but the unique (PoolId, OwnerUserId) index
+        // does not — so without clearing it first, the INSERT below collides and the user can never
+        // reconnect after a single failed provision. Drop the stale row (and any orphaned resource it
+        // pointed at) before creating fresh tracking rows.
+        await ClearStaleInstanceAsync(db, pool.Id, userId, ct);
 
         var backend = await _backends.GetAsync(pool.ProxmoxBackendId, ct);
         if (backend == null || !backend.IsConfigured)
@@ -240,6 +259,60 @@ public class VdiProvisioningService
         auth.ProtectedPassword = _credentials.Protect(password);
         auth.ProtectedDomain = null;
         await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// True if the instance's clone still exists on its pool's backend. A clone can vanish out-of-band
+    /// (manually deleted in Proxmox, node lost) leaving a Ready instance that can never start; detecting
+    /// that here lets the caller reclone instead of failing on a ghost VM. Treats an unreachable/missing
+    /// backend as "exists" so a transient backend outage doesn't trigger a needless reclone.
+    /// </summary>
+    private async Task<bool> VmStillExistsAsync(ApplicationDbContext db, VdiInstance instance, CancellationToken ct)
+    {
+        var backendId = await db.VdiPools.Where(p => p.Id == instance.PoolId)
+            .Select(p => (int?)p.ProxmoxBackendId).FirstOrDefaultAsync(ct);
+        if (backendId == null) return true;
+
+        var backend = await _backends.GetAsync(backendId.Value, ct);
+        if (backend == null || !backend.IsConfigured) return true;
+
+        try
+        {
+            var vms = await _proxmox.ListVmsAsync(backend, ct);
+            return vms.Any(v => v.VmId == instance.ProxmoxVmId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "VDI: could not verify VM {VmId} existence; assuming it still exists",
+                instance.ProxmoxVmId);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Removes any leftover dedicated instance for <paramref name="poolId"/>/<paramref name="userId"/> that the
+    /// connect-time lookups treat as absent (Failed/Deprovisioning). Such a row would otherwise trip the unique
+    /// (PoolId, OwnerUserId) index on the next provision. Its orphaned <see cref="RDPResource"/> (the clone that
+    /// never came up) is removed too; the abandoned Proxmox VM, if any, is left for an administrator since we
+    /// have no record it was ever created successfully.
+    /// </summary>
+    private async Task ClearStaleInstanceAsync(ApplicationDbContext db, string poolId, string userId, CancellationToken ct)
+    {
+        var stale = await db.VdiInstances
+            .FirstOrDefaultAsync(i => i.PoolId == poolId && i.OwnerUserId == userId
+                && (i.State == VdiInstanceState.Failed || i.State == VdiInstanceState.Deprovisioning), ct);
+        if (stale == null) return;
+
+        if (stale.RDPResourceId is { } resId)
+        {
+            var resource = await db.RDPResources.FirstOrDefaultAsync(r => r.Id == resId, ct);
+            if (resource != null) db.RDPResources.Remove(resource);
+        }
+        db.VdiInstances.Remove(stale);
+        await db.SaveChangesAsync(ct);
+
+        _logger.LogInformation("VDI: cleared stale {State} instance {Instance} for pool {Pool} / user {User} before reprovision",
+            stale.State, stale.Id, poolId, userId);
     }
 
     private async Task<ProvisionResult> FailAsync(ApplicationDbContext db, VdiInstance instance, string error, CancellationToken ct)

@@ -254,11 +254,8 @@ public class VdiPoolsController : Controller
         var backend = await _backends.GetAsync(pool.ProxmoxBackendId);
         if (backend != null && instance.ProxmoxNode != null)
         {
-            // Stop first (best-effort), then destroy. Ignore failures — a missing VM is the goal state.
-            await _proxmox.StopAsync(backend, instance.ProxmoxNode, instance.ProxmoxVmId);
-            var upid = await _proxmox.DeleteVmAsync(backend, instance.ProxmoxNode, instance.ProxmoxVmId);
-            if (upid != null)
-                await _proxmox.WaitForTaskAsync(backend, instance.ProxmoxNode, upid, TimeSpan.FromMinutes(5));
+            // Stop the VM if it is running, then destroy it. Best-effort — a missing VM is the goal state.
+            await _proxmox.DestroyVmAsync(backend, instance.ProxmoxNode, instance.ProxmoxVmId);
         }
 
         if (instance.RDPResourceId != null)
