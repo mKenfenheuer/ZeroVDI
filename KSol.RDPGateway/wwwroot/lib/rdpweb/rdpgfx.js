@@ -280,7 +280,11 @@ RdpGfx.prototype._onCreateSurface = function (r) {
         ? new OffscreenCanvas(width, height)
         : Object.assign(document.createElement("canvas"), { width: width, height: height });
     const ctx = canvas.getContext("2d");
-    this.surfaces[surfaceId] = { width, height, canvas, ctx, pixelFormat };
+    // `touched` flips true on the first content write (_afterSurfaceUpdate). Untouched surfaces are
+    // never blitted to the output (see _paintSurface) — painting a brand-new empty surface would wipe
+    // the last good frame during a host-side reconfigure (GNOME RD deletes+recreates its surface and
+    // re-maps it on every DISPLAYCONTROL_MONITOR_LAYOUT, then streams nothing until damage occurs).
+    this.surfaces[surfaceId] = { width, height, canvas, ctx, pixelFormat, touched: false };
     this._log("rdpgfx: CREATE_SURFACE id=" + surfaceId + " " + width + "x" + height +
         " fmt=0x" + pixelFormat.toString(16));
 };
@@ -740,6 +744,7 @@ RdpGfx.prototype._surfSample = function (surf) {
 // After a surface region updates, push it to the output if the surface is mapped. Each changed region
 // is composited immediately (per-region) so partial updates appear without waiting for a full frame.
 RdpGfx.prototype._afterSurfaceUpdate = function (surfaceId, surf, regions) {
+    surf.touched = true; // has real content now — MAP-time full blits may paint it
     for (const rc of regions) this._paintSurface(surfaceId, 0, 0, surf, rc);
 };
 
@@ -748,6 +753,11 @@ RdpGfx.prototype._paintSurface = function (surfaceId, _x, _y, surf, region) {
     surf = surf || this.surfaces[surfaceId];
     const map = this.outputMap[surfaceId];
     if (!surf || !map || !this.cb.onPaint) return;
+    // Never blit a surface that has not received any content yet: MAP_SURFACE_TO_OUTPUT arrives for
+    // freshly-created (empty) surfaces during a host-side reconfigure, and painting the empty surface
+    // would black out the last good frame on the output canvas. The desktop is unchanged server-side,
+    // so keeping the previous pixels is exactly right until the first real update lands.
+    if (!surf.touched) return;
     const sx = region ? region.left : 0;
     const sy = region ? region.top : 0;
     const sw = region ? (region.right - region.left) : surf.width;

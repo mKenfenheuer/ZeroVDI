@@ -389,10 +389,11 @@ function tpktX224Wrap(userData) {
 // ================================================================================================
 // Client user data (CS_CORE / CS_SECURITY / CS_NET) for the basic settings exchange
 // ================================================================================================
-function clientCoreData(selectedProtocol, width, height) {
+function clientCoreData(selectedProtocol, width, height, desktopScaleFactor) {
+    var gfx = rdpTryGfx();
     const w = new ByteWriter();
     w.u16le(0xC001); // CS_CORE
-    w.u16le(216);    // length
+    w.u16le(gfx ? 234 : 216); // length (GFX path appends the 18-byte optional scale tail below)
     w.u32le(0x00080005); // version — match the working macOS Remote Desktop app's CS_CORE (was 0x00080011)
     w.u16le(width);
     w.u16le(height);
@@ -412,7 +413,6 @@ function clientCoreData(selectedProtocol, width, height) {
     w.u16le(0xCA01);     // postBeta2ColorDepth — match macOS app (was 0xCA03)
     w.u16le(0x0001);     // clientProductId
     w.u32le(0x00000000); // serialNumber
-    var gfx = rdpTryGfx();
     // highColorDepth / supportedColorDepths: when advertising GFX we mirror FreeRDP's working values
     // (24bpp high color, all depths supported). The no-GFX baseline keeps the conservative 16bpp set.
     w.u16le(gfx ? 0x0018 : 0x0010);     // highColorDepth: HIGH_COLOR_24BPP vs 16BPP
@@ -433,6 +433,20 @@ function clientCoreData(selectedProtocol, width, height) {
     w.u8(gfx ? 0x07 : 0x00);
     w.u8(0x00);          // pad
     w.u32le(selectedProtocol >>> 0); // serverSelectedProtocol
+    // Optional TS_UD_CS_CORE tail ([MS-RDPBCGR] 2.2.1.3.2), GFX path only (keeps the no-GFX Connect
+    // Initial byte-identical to the known-good baseline). This is what makes the session START at the
+    // display's HiDPI scale: GNOME Remote Desktop builds its INITIAL virtual-monitor config from these
+    // CS_CORE fields (grd-rdp-monitor-config.c create_monitor_config_from_client_core_data reads
+    // FreeRDP_DesktopScaleFactor), and Windows applies them as the connect-time session DPI. Without
+    // the tail the session always comes up at 100% and the RDPEDISP initial-scale layout has to win a
+    // race to fix it after the fact.
+    if (gfx) {
+        w.u32le(0);      // desktopPhysicalWidth (mm; 0 = unknown, host ignores)
+        w.u32le(0);      // desktopPhysicalHeight
+        w.u16le(0);      // desktopOrientation (ORIENTATION_LANDSCAPE)
+        w.u32le(Math.max(100, Math.min(500, desktopScaleFactor || 100))); // desktopScaleFactor
+        w.u32le(100);    // deviceScaleFactor: MUST be 100/140/180; all DPI rides in desktopScaleFactor
+    }
     return w.toArray();
 }
 function clientSecurityData() {
@@ -524,9 +538,9 @@ function clientMultitransportData() {
     return w.toArray();
 }
 
-function clientUserData(selectedProtocol, width, height, channels) {
+function clientUserData(selectedProtocol, width, height, channels, desktopScaleFactor) {
     const w = new ByteWriter();
-    w.bytes(clientCoreData(selectedProtocol, width, height));
+    w.bytes(clientCoreData(selectedProtocol, width, height, desktopScaleFactor));
     // Extra GCC blocks for the GFX/extended-client-data path are gated behind the same test toggle so
     // the default (no-GFX) Connect Initial stays byte-identical to the known-good baseline.
     if (rdpTryGfx()) w.bytes(clientClusterData());
@@ -1167,12 +1181,14 @@ function RdpProtocol(transport, opts, callbacks) {
     this.gfxDvcCbId = 0;
     this.gfx = null;            // RdpGfx instance, created on channel accept when GFX rendering is on
 
-    // Desktop scale factor (DPI). The RDP handshake (CS_CORE) carries no scale field, so the session
-    // ALWAYS starts at 100% — these track the scale currently in effect on the server, not what the
-    // client wants. Initializing them to anything but 100 would make the first MONITOR_LAYOUT (which
-    // applies the real DPI scale) look like a no-op and never get sent. The desired DPI scale is
-    // passed per-call to sendMonitorLayout instead. ([MS-RDPEDISP] percent values.)
-    this.desktopScaleFactor = 100; // 100..500, current server scale
+    // Desktop scale factor (DPI) — tracks the scale currently in effect on the server. On the GFX
+    // path CS_CORE carries opts.desktopScaleFactor (see clientCoreData's optional tail), so the
+    // session already STARTS at that scale; the no-GFX baseline CS_CORE stays scale-less → 100.
+    // The first MONITOR_LAYOUT is force-sent regardless of no-op detection (_monitorLayoutSent
+    // below), so initializing this to the CS_CORE value cannot suppress it. ([MS-RDPEDISP] percent.)
+    this.gfxEnabled = rdpTryGfx();  // session-wide GFX mode; the RdpGfx instance (this.gfx) is
+                                    // created later, on the host's DVC create-request
+    this.desktopScaleFactor = (this.gfxEnabled && opts.desktopScaleFactor) ? opts.desktopScaleFactor : 100;
     this.deviceScaleFactor = 100;  // 100, 140 or 180, current server scale
     this._monitorLayoutSent = false; // gate so the FIRST MONITOR_LAYOUT is never no-op'd (host needs it)
 
@@ -1204,7 +1220,8 @@ RdpProtocol.prototype._close = function (graceful, message) {
 // Kick off the handshake: send MCS connect-initial. Called once the relay is "ready".
 RdpProtocol.prototype.start = function () {
     this._log("MCS: Connect Initial");
-    const userData = clientUserData(this.selectedProtocol, this.width, this.height, this.staticChannels);
+    const userData = clientUserData(this.selectedProtocol, this.width, this.height, this.staticChannels,
+        this.desktopScaleFactor);
     const connectInitial = mcsConnectInitialSerialize(userData);
     this.t.send(tpktX224Wrap(connectInitial));
     this.state = ST.BASIC_SETTINGS;

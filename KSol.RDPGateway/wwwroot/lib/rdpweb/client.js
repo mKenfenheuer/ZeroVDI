@@ -714,31 +714,28 @@ Client.prototype.maybeResize = function (wrapEl) {
     return sent;
 };
 
-// The RDP handshake (CS_CORE) carries no DesktopScaleFactor, so the session always starts at 100%
-// scale regardless of the display's DPI — making the remote UI tiny on HiDPI screens. The only way
-// to set scale is an MS-RDPEDISP MONITOR_LAYOUT, so once Display Control is ready AND the session is
-// active we send one at the SAME resolution but the real DPR scale. This applies correct scaling
-// (e.g. 200%) from the start instead of only after a manual resize. Fires once per session.
+// Applies the session's HiDPI scale at start. On the GFX path the scale already rides in the CS_CORE
+// handshake (desktopScaleFactor optional tail — GNOME RD builds its initial monitor config from it,
+// Windows applies it as the connect-time session DPI), so the session STARTS at the right scale. The
+// single MONITOR_LAYOUT sent here repeats that same resolution+scale: it's the mstsc-style first
+// layout some hosts gate their 2nd RESET_GRAPHICS / free-running GFX stream on (see sendMonitorLayout's
+// first-layout exception). Hosts that fully reconfigure on ANY layout (GNOME RD tears down and
+// re-negotiates its PipeWire stream per DISPLAYCONTROL_MONITOR_LAYOUT) rebuild an identical desktop —
+// and rdpgfx keeps the last frame on screen through that (untouched-surface MAP blits are skipped),
+// so there's no black gap while the host renegotiates.
 Client.prototype._applyInitialScale = function () {
     if (this._initialScaleApplied) return;
-    // When GFX rendering is active, do NOT run the multi-step dummy-resize sequence: each dummy resize
-    // triggers a Deactivation-Reactivation that resizes (and thus CLEARS) the output canvas and tears
-    // down the GFX surface — wiping the just-decoded H.264/ClearCodec frame and going black (the host
-    // doesn't resend a keyframe for a no-op resolution change, so the cleared canvas stays cleared).
-    // Instead send ONE scale-only monitor layout at the target DPI: the single reactivation it causes
-    // makes the host re-send a keyframe at the new scale, which repaints correctly.
-    if (this.proto && this.proto.gfx) {
-        // Under GFX the host stalls (churns RESET_GRAPHICS) when a *resolution change* tears down the GFX
-        // surface mid-init (the multi-step dummy-resize sequence below does exactly that). So under GFX we
-        // send ONE scale-only monitor layout: same (device-pixel) resolution, target desktopScale. There's
-        // no resolution change, so no surface teardown; the single reactivation it triggers makes the host
-        // re-send a keyframe at the new scale. This gives native-res @ 200% without the RESET churn.
-        if (!this.proto.canResize()) return; // DisplayControl/active not ready yet; retried from _onActive
+    if (!this.proto || !this.proto.canResize()) return; // DisplayControl/active not ready; retried from _onActive / onDisplayControlReady
+    // Branch on gfxEnabled (the session-wide GFX mode), NOT on this.proto.gfx: the RdpGfx instance is
+    // only created when the host's GFX DVC create-request arrives, and that RACES onDisplayControlReady.
+    // Branching on the instance let the multi-step dummy-resize sequence below run on GFX sessions
+    // whenever Display Control came up first — its resolution bounces tore down the GFX surfaces
+    // mid-init (black screen) and its layouts got coalesced/dropped by the host (session stuck at 100%).
+    if (this.proto.gfxEnabled) {
         this._initialScaleApplied = true;
         this.proto.sendMonitorLayout(this.canvas.width, this.canvas.height, this._scaleForSession(), 100);
         return;
     }
-    if (!this.proto || !this.proto.canResize()) return; // not active yet; retried from _onActive
     if (this._sessionScale <= 100) { this._initialScaleApplied = true; return; } // nothing to scale
     this._initialScaleApplied = true;
     // Remember the real target resolution; the dummy-resize sequence bounces off it.
