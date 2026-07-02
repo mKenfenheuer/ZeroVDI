@@ -11,10 +11,12 @@
 //                          tile reconstruction, YCbCr->RGB
 //   prim_colors.c       — yCbCrToRGB_16s8u_P3AC4R fixed-point conversion
 //
-// GNOME RD sends WBT_TILE_SIMPLE tiles (one full 64x64 tile per changed grid cell), which decode
-// exactly like progressive_decompress_tile_first with a single pass and no progressive upgrade.
-// We implement SIMPLE/FIRST fully; UPGRADE (SRL/RAW refinement passes) is a no-op (logged) since
-// GNOME RD does not use it — if a host ever sends upgrades, the tile simply won't refine further.
+// Two host encoder profiles exist in the wild and both are supported:
+//   - GNOME RD: SIMPLE tiles, non-extrapolate DWT (regionFlags=0), no UPGRADE passes.
+//   - Windows RDS: FIRST tiles at reduced quality + UPGRADE (SRL/RAW) refinement passes, with the
+//     REDUCE_EXTRAPOLATE region flag set (different subband geometry AND a different inverse DWT).
+// UPGRADE passes mutate the persistent per-tile 'current'/'sign' coefficient state, so they are
+// required for correctness: skipping them desyncs later DIFFERENCE tiles, not just quality.
 //
 // All math is fixed-point INT16/INT32 matching FreeRDP exactly (the wavelet/quant are lossy-by-design
 // and must bit-match the encoder's assumptions to look right).
@@ -251,24 +253,43 @@ function lShift(buf, base, len, sh) {
 }
 
 // Decode one component (Y/Cb/Cr) into a 64x64 INT16 buffer 'srcDst' (row-major, length 4096).
-// 'current' persists across frames for coeffDiff; 'sign' is scratch. shift = per-band dequant shifts.
-function decodeComponent(mode, data, dataLen, srcDst, current, sign, idwtTmp, shift, coeffDiff) {
+// 'current' and 'sign' persist per tile cell (coeffDiff accumulation + UPGRADE passes read them).
+// shift = per-band dequant shifts. 'extrapolate' selects band geometry AND inverse DWT variant.
+function decodeComponent(mode, data, dataLen, srcDst, current, sign, idwtTmp, shift, coeffDiff, extrapolate) {
     rlgrDecode(mode, data, dataLen, srcDst, 4096);
-    // CopyMemory(sign, buffer) — sign tracking is only needed for UPGRADE passes; keep for parity.
+    // CopyMemory(sign, buffer) — the raw RLGR output; UPGRADE passes route zero/non-zero coefficients
+    // to the SRL vs RAW streams based on it.
     sign.set(srcDst.subarray(0, 4096));
 
-    // non-extrapolate path
-    differentialDecode(srcDst, 4032, 64); // LL3 differential (last 64 entries)
-    lShift(srcDst, 0,    1024, shift.HL1);
-    lShift(srcDst, 1024, 1024, shift.LH1);
-    lShift(srcDst, 2048, 1024, shift.HH1);
-    lShift(srcDst, 3072, 256,  shift.HL2);
-    lShift(srcDst, 3328, 256,  shift.LH2);
-    lShift(srcDst, 3584, 256,  shift.HH2);
-    lShift(srcDst, 3840, 64,   shift.HL3);
-    lShift(srcDst, 3904, 64,   shift.LH3);
-    lShift(srcDst, 3968, 64,   shift.HH3);
-    lShift(srcDst, 4032, 64,   shift.LL3);
+    if (!extrapolate) {
+        // Square subband layout (rfx_dwt.c geometry): 32/16/8 per level.
+        differentialDecode(srcDst, 4032, 64); // LL3 differential (last 64 entries)
+        lShift(srcDst, 0,    1024, shift.HL1);
+        lShift(srcDst, 1024, 1024, shift.LH1);
+        lShift(srcDst, 2048, 1024, shift.HH1);
+        lShift(srcDst, 3072, 256,  shift.HL2);
+        lShift(srcDst, 3328, 256,  shift.LH2);
+        lShift(srcDst, 3584, 256,  shift.HH2);
+        lShift(srcDst, 3840, 64,   shift.HL3);
+        lShift(srcDst, 3904, 64,   shift.LH3);
+        lShift(srcDst, 3968, 64,   shift.HH3);
+        lShift(srcDst, 4032, 64,   shift.LL3);
+    } else {
+        // REDUCE_EXTRAPOLATE layout (progressive.c band table):
+        //   HL1 31x33 @0, LH1 33x31 @1023, HH1 31x31 @2046, HL2 16x17 @3007, LH2 17x16 @3279,
+        //   HH2 16x16 @3551, HL3 8x9 @3807, LH3 9x8 @3879, HH3 8x8 @3951, LL3 9x9 @4015.
+        lShift(srcDst, 0,    1023, shift.HL1);
+        lShift(srcDst, 1023, 1023, shift.LH1);
+        lShift(srcDst, 2046, 961,  shift.HH1);
+        lShift(srcDst, 3007, 272,  shift.HL2);
+        lShift(srcDst, 3279, 272,  shift.LH2);
+        lShift(srcDst, 3551, 256,  shift.HH2);
+        lShift(srcDst, 3807, 72,   shift.HL3);
+        lShift(srcDst, 3879, 72,   shift.LH3);
+        lShift(srcDst, 3951, 64,   shift.HH3);
+        differentialDecode(srcDst, 4015, 81); // LL3 differential
+        lShift(srcDst, 4015, 81,   shift.LL3);
+    }
 
     // progressive_rfx_dwt_2d_decode: with coeffDiff, add 'current' into the buffer AND store the summed
     // result back into 'current' (FreeRDP add_16s_inplace writes BOTH operands) so the next difference
@@ -280,10 +301,21 @@ function decodeComponent(mode, data, dataLen, srcDst, current, sign, idwtTmp, sh
         current.set(srcDst.subarray(0, 4096));
     }
 
-    // Inverse DWT, 3 levels. FreeRDP indexes a single 4096 buffer at offsets 3840 / 3072 / 0.
-    dwtBlockAt(srcDst, 3840, idwtTmp, 8);
-    dwtBlockAt(srcDst, 3072, idwtTmp, 16);
-    dwtBlockAt(srcDst, 0,    idwtTmp, 32);
+    inverseDwt(srcDst, idwtTmp, extrapolate);
+}
+
+// Inverse DWT, 3 levels, over the packed subband buffer (in-place, pixels end up at [0..4095]).
+function inverseDwt(srcDst, idwtTmp, extrapolate) {
+    if (!extrapolate) {
+        // FreeRDP indexes a single 4096 buffer at offsets 3840 / 3072 / 0.
+        dwtBlockAt(srcDst, 3840, idwtTmp, 8);
+        dwtBlockAt(srcDst, 3072, idwtTmp, 16);
+        dwtBlockAt(srcDst, 0,    idwtTmp, 32);
+    } else {
+        dwtBlockEx(srcDst, 3807, idwtTmp, 3);
+        dwtBlockEx(srcDst, 3007, idwtTmp, 2);
+        dwtBlockEx(srcDst, 0,    idwtTmp, 1);
+    }
 }
 
 // dwt2dDecodeBlock but operating on buffer starting at 'base' (FreeRDP &buffer[base]).
@@ -326,6 +358,97 @@ function dwtBlockAt(buffer, base, idwt, subbandWidth) {
 }
 
 // =================================================================================================
+// REDUCE_EXTRAPOLATE inverse DWT (progressive.c progressive_rfx_idwt_x/_y + dwt_2d_decode_block).
+// Band sizes are asymmetric: per level, low count nL=(64>>level)+1, high count nH (31/16/8).
+// NOTE: the (a+b)/2 divisions are C integer division (truncate toward zero), NOT >>1 (floor) — use
+// |0 truncation or negative coefficients decode wrong.
+// =================================================================================================
+function idwtX(lb, lo, loStep, hb, hi, hiStep, db, dOff, dStep, nL, nH, nD) {
+    for (var i = 0; i < nD; i++) {
+        var pL = lo, pH = hi, pX = dOff;
+        var H0 = hb[pH++], L0 = lb[pL++];
+        var X0 = clampi16(L0 - H0), X2 = clampi16(L0 - H0), H1 = 0, X1 = 0;
+        for (var j = 0; j < nH - 1; j++) {
+            H1 = hb[pH++]; L0 = lb[pL++];
+            X2 = clampi16(L0 - (((H0 + H1) / 2) | 0));
+            X1 = clampi16((((X0 + X2) / 2) | 0) + 2 * H0);
+            db[pX] = X0; db[pX + 1] = X1; pX += 2;
+            X0 = X2; H0 = H1;
+        }
+        if (nL <= nH + 1) {
+            if (nL <= nH) {
+                db[pX] = X2; db[pX + 1] = clampi16(X2 + 2 * H0);
+            } else {
+                L0 = lb[pL++];
+                X0 = clampi16(L0 - H0);
+                db[pX] = X2; db[pX + 1] = clampi16((((X0 + X2) / 2) | 0) + 2 * H0); db[pX + 2] = X0;
+            }
+        } else {
+            L0 = lb[pL++];
+            X0 = clampi16(L0 - ((H0 / 2) | 0));
+            db[pX] = X2; db[pX + 1] = clampi16((((X0 + X2) / 2) | 0) + 2 * H0); db[pX + 2] = X0;
+            L0 = lb[pL++];
+            db[pX + 3] = clampi16(((X0 + L0) / 2) | 0);
+        }
+        lo += loStep; hi += hiStep; dOff += dStep;
+    }
+}
+
+function idwtY(lb, lo, loStep, hb, hi, hiStep, db, dOff, dStep, nL, nH, nD) {
+    for (var i = 0; i < nD; i++) {
+        var pL = lo, pH = hi, pX = dOff;
+        var H0 = hb[pH]; pH += hiStep;
+        var L0 = lb[pL]; pL += loStep;
+        var X0 = clampi16(L0 - H0), X2 = clampi16(L0 - H0), H1 = 0, X1 = 0;
+        for (var j = 0; j < nH - 1; j++) {
+            H1 = hb[pH]; pH += hiStep;
+            L0 = lb[pL]; pL += loStep;
+            X2 = clampi16(L0 - (((H0 + H1) / 2) | 0));
+            X1 = clampi16((((X0 + X2) / 2) | 0) + 2 * H0);
+            db[pX] = X0; pX += dStep;
+            db[pX] = X1; pX += dStep;
+            X0 = X2; H0 = H1;
+        }
+        if (nL <= nH + 1) {
+            if (nL <= nH) {
+                db[pX] = X2; pX += dStep;
+                db[pX] = clampi16(X2 + 2 * H0);
+            } else {
+                L0 = lb[pL];
+                X0 = clampi16(L0 - H0);
+                db[pX] = X2; pX += dStep;
+                db[pX] = clampi16((((X0 + X2) / 2) | 0) + 2 * H0); pX += dStep;
+                db[pX] = X0;
+            }
+        } else {
+            L0 = lb[pL]; pL += loStep;
+            X0 = clampi16(L0 - ((H0 / 2) | 0));
+            db[pX] = X2; pX += dStep;
+            db[pX] = clampi16((((X0 + X2) / 2) | 0) + 2 * H0); pX += dStep;
+            db[pX] = X0; pX += dStep;
+            L0 = lb[pL];
+            db[pX] = clampi16(((X0 + L0) / 2) | 0);
+        }
+        lo++; hi++; dOff++;
+    }
+}
+
+// One extrapolate DWT level: bands packed HL | LH | HH | LL at 'base', output (nL+nH)² at 'base'.
+function dwtBlockEx(buffer, base, temp, level) {
+    var nL = (64 >> level) + 1;
+    var nH = level === 1 ? 31 : ((64 + (1 << (level - 1))) >> level);
+    var dstStep = nL + nH;
+    var HL = base;
+    var LH = base + nH * nL;
+    var HH = LH + nL * nH;
+    var LL = HH + nH * nH;
+    var L = 0, H = nL * dstStep; // temp offsets
+    idwtX(buffer, LL, nL, buffer, HL, nH, temp, L, dstStep, nL, nH, nL); // horizontal LL+HL -> L
+    idwtX(buffer, LH, nL, buffer, HH, nH, temp, H, dstStep, nL, nH, nH); // horizontal LH+HH -> H
+    idwtY(temp, L, dstStep, temp, H, dstStep, buffer, base, dstStep, nL, nH, dstStep); // vertical
+}
+
+// =================================================================================================
 // YCbCr -> RGBA (prim_colors.c general_yCbCrToRGB_16s8u_P3AC4R). Inputs are 64x64 INT16 planes.
 // =================================================================================================
 var C_CrR = Math.round(1.402525 * 65536);
@@ -355,14 +478,40 @@ function readQuant(data, o) {
         LH1: b4 & 0x0F, HH1: b4 >> 4,
     };
 }
-// shift = (quant + quantProg) then subtract 1 from every band (progressive_rfx_quant_add + lsub 1).
-// quantProg for SIMPLE/quality=0xFF is the "full" prog quant = all zeros.
-function quantToShift(q) {
+// Per-band quant arithmetic (progressive_rfx_quant_add / _sub / _lsub). quantProg for quality=0xFF
+// is the "full" prog quant = all zeros.
+var QUANT_ZERO = { LL3: 0, HL3: 0, LH3: 0, HH3: 0, HL2: 0, LH2: 0, HH2: 0, HL1: 0, LH1: 0, HH1: 0 };
+function quantAdd(a, b) {
     return {
-        LL3: q.LL3 - 1, HL3: q.HL3 - 1, LH3: q.LH3 - 1, HH3: q.HH3 - 1,
-        HL2: q.HL2 - 1, LH2: q.LH2 - 1, HH2: q.HH2 - 1,
-        HL1: q.HL1 - 1, LH1: q.LH1 - 1, HH1: q.HH1 - 1,
+        LL3: a.LL3 + b.LL3, HL3: a.HL3 + b.HL3, LH3: a.LH3 + b.LH3, HH3: a.HH3 + b.HH3,
+        HL2: a.HL2 + b.HL2, LH2: a.LH2 + b.LH2, HH2: a.HH2 + b.HH2,
+        HL1: a.HL1 + b.HL1, LH1: a.LH1 + b.LH1, HH1: a.HH1 + b.HH1,
     };
+}
+// a - b per band, clamped at 0 (numBits for an UPGRADE pass can never be negative).
+function quantSub(a, b) {
+    function s(x, y) { var d = x - y; return d < 0 ? 0 : d; }
+    return {
+        LL3: s(a.LL3, b.LL3), HL3: s(a.HL3, b.HL3), LH3: s(a.LH3, b.LH3), HH3: s(a.HH3, b.HH3),
+        HL2: s(a.HL2, b.HL2), LH2: s(a.LH2, b.LH2), HH2: s(a.HH2, b.HH2),
+        HL1: s(a.HL1, b.HL1), LH1: s(a.LH1, b.LH1), HH1: s(a.HH1, b.HH1),
+    };
+}
+// shift = (quant + quantProg) - 1 per band (progressive_rfx_quant_add + lsub 1).
+function quantShift(q, prog) {
+    return {
+        LL3: q.LL3 + prog.LL3 - 1, HL3: q.HL3 + prog.HL3 - 1, LH3: q.LH3 + prog.LH3 - 1, HH3: q.HH3 + prog.HH3 - 1,
+        HL2: q.HL2 + prog.HL2 - 1, LH2: q.LH2 + prog.LH2 - 1, HH2: q.HH2 + prog.HH2 - 1,
+        HL1: q.HL1 + prog.HL1 - 1, LH1: q.LH1 + prog.LH1 - 1, HH1: q.HH1 + prog.HH1 - 1,
+    };
+}
+// Resolve a tile's quality byte to its region progQuant entry: null = full quality (all-zero prog
+// quant), undefined = invalid index (skip the tile).
+function progQuantFor(region, quality, log) {
+    if (quality === 0xFF) return null;
+    if (quality < region.numProgQuant) return region.progQuants[quality];
+    if (log) log("progressive: tile quality " + quality + " >= numProgQuant " + region.numProgQuant);
+    return undefined;
 }
 
 // =================================================================================================
@@ -373,12 +522,9 @@ function ProgressiveContext() {
     this.scratchY = new Int16Array(4096);
     this.scratchCb = new Int16Array(4096);
     this.scratchCr = new Int16Array(4096);
-    this.signY = new Int16Array(4096);
-    this.signCb = new Int16Array(4096);
-    this.signCr = new Int16Array(4096);
     this.idwt = new Int16Array(4096 * 2 + 64); // DWT temp (needs 2*total*sw room)
     this.rgba = new Uint8ClampedArray(64 * 64 * 4);
-    this.tiles = {};         // "x,y" -> { current:[Int16Array*3] } persistent for diff tiles
+    this.tiles = {};         // "x,y" -> per-cell persistent state (diff accumulation + upgrades)
     this.gridWidth = 0; this.gridHeight = 0;
 }
 ProgressiveContext.prototype.reset = function () { this.tiles = {}; };
@@ -386,7 +532,11 @@ ProgressiveContext.prototype._tileCell = function (xIdx, yIdx) {
     var key = xIdx + "," + yIdx;
     var c = this.tiles[key];
     if (!c) {
-        c = { cur: [new Int16Array(4096), new Int16Array(4096), new Int16Array(4096)] };
+        c = {
+            cur: [new Int16Array(4096), new Int16Array(4096), new Int16Array(4096)],
+            sign: [new Int16Array(4096), new Int16Array(4096), new Int16Array(4096)],
+            bitPos: null, // [Y,Cb,Cr] per-band bit positions, set by FIRST/SIMPLE, consumed by UPGRADE
+        };
         this.tiles[key] = c;
     }
     return c;
@@ -521,8 +671,7 @@ function processTiles(ctx, region, contextFlags, onTile, log) {
     function r16() { var v = dv.getUint16(p, true); p += 2; return v; }
     function r32() { var v = dv.getUint32(p, true); p += 4; return v; }
 
-    if (extrapolate && log && !ctx._loggedExtrap) { ctx._loggedExtrap = 1; log("progressive: REDUCE_EXTRAPOLATE set (regionFlags=0x" + region.flags.toString(16) + ") — non-extrapolate path will be WRONG"); }
-    if (log && !ctx._loggedCtx) { ctx._loggedCtx = 1; log("progressive: contextFlags=0x" + contextFlags.toString(16) + " regionFlags=0x" + region.flags.toString(16) + " subbandDiffing=" + coeffDiffSub); }
+    if (log && !ctx._loggedCtx) { ctx._loggedCtx = 1; log("progressive: contextFlags=0x" + contextFlags.toString(16) + " regionFlags=0x" + region.flags.toString(16) + " subbandDiffing=" + coeffDiffSub + " extrapolate=" + extrapolate); }
 
     while (p + 6 <= end) {
         var blockType = r16();
@@ -545,15 +694,34 @@ function processTiles(ctx, region, contextFlags, onTile, log) {
 
             if (log && (tflags & RFX_TILE_DIFFERENCE) && !ctx._loggedDiff) { ctx._loggedDiff = 1; log("progressive: first DIFFERENCE tile seen (tflags=0x" + tflags.toString(16) + " at " + xIdx + "," + yIdx + ")"); }
             if (quantIdxY < region.numQuant && quantIdxCb < region.numQuant && quantIdxCr < region.numQuant) {
-                reconstructTile(ctx, region, xIdx, yIdx, tflags,
+                reconstructTile(ctx, region, xIdx, yIdx, tflags, quality,
                     region.quants[quantIdxY], region.quants[quantIdxCb], region.quants[quantIdxCr],
-                    data, yData, yLen, cbData, cbLen, crData, crLen, onTile);
+                    data, yData, yLen, cbData, cbLen, crData, crLen, extrapolate, onTile, log);
             } else if (log) {
                 log("progressive: tile quantIdx out of range");
             }
             p = bEnd;
         } else if (blockType === WBT_TILE_UPGRADE) {
-            // SRL/RAW progressive refinement — GNOME RD does not use this. Skip.
+            // SRL/RAW progressive refinement pass (progressive_tile_read_upgrade): header is 20 bytes,
+            // then the 6 per-component SRL/RAW blobs.
+            var uQY = r8(), uQCb = r8(), uQCr = r8();
+            var uX = r16(), uY = r16();
+            var uQuality = r8();
+            var ySrlLen = r16(), yRawLen = r16(), cbSrlLen = r16(), cbRawLen = r16(), crSrlLen = r16(), crRawLen = r16();
+            var ySrl = p; p += ySrlLen;
+            var yRaw = p; p += yRawLen;
+            var cbSrl = p; p += cbSrlLen;
+            var cbRaw = p; p += cbRawLen;
+            var crSrl = p; p += crSrlLen;
+            var crRaw = p; p += crRawLen;
+            if (log && !ctx._loggedUpg) { ctx._loggedUpg = 1; log("progressive: first UPGRADE tile (quality=" + uQuality + " at " + uX + "," + uY + ")"); }
+            if (uQY < region.numQuant && uQCb < region.numQuant && uQCr < region.numQuant && p <= bEnd) {
+                upgradeTile(ctx, region, uX, uY, uQuality,
+                    region.quants[uQY], region.quants[uQCb], region.quants[uQCr],
+                    data,
+                    [ySrl, ySrlLen, yRaw, yRawLen, cbSrl, cbSrlLen, cbRaw, cbRawLen, crSrl, crSrlLen, crRaw, crRawLen],
+                    extrapolate, onTile, log);
+            }
             p = bEnd;
         } else {
             p = bEnd;
@@ -561,19 +729,26 @@ function processTiles(ctx, region, contextFlags, onTile, log) {
     }
 }
 
-function reconstructTile(ctx, region, xIdx, yIdx, tflags, qY, qCb, qCr,
-                         data, yOff, yLen, cbOff, cbLen, crOff, crLen, onTile) {
+function reconstructTile(ctx, region, xIdx, yIdx, tflags, quality, qY, qCb, qCr,
+                         data, yOff, yLen, cbOff, cbLen, crOff, crLen, extrapolate, onTile, log) {
     var coeffDiff = (tflags & RFX_TILE_DIFFERENCE) !== 0;
-    var shY = quantToShift(qY), shCb = quantToShift(qCb), shCr = quantToShift(qCr);
+    var prog = progQuantFor(region, quality, log);
+    if (prog === undefined) return;
+    var pY = prog ? prog.y : QUANT_ZERO, pCb = prog ? prog.cb : QUANT_ZERO, pCr = prog ? prog.cr : QUANT_ZERO;
+    var shY = quantShift(qY, pY), shCb = quantShift(qCb, pCb), shCr = quantShift(qCr, pCr);
     var cell = ctx._tileCell(xIdx, yIdx);
 
     var yData = data.subarray(yOff, yOff + yLen);
     var cbData = data.subarray(cbOff, cbOff + cbLen);
     var crData = data.subarray(crOff, crOff + crLen);
 
-    decodeComponent(1, yData, yLen, ctx.scratchY, cell.cur[0], ctx.signY, ctx.idwt, shY, coeffDiff);
-    decodeComponent(1, cbData, cbLen, ctx.scratchCb, cell.cur[1], ctx.signCb, ctx.idwt, shCb, coeffDiff);
-    decodeComponent(1, crData, crLen, ctx.scratchCr, cell.cur[2], ctx.signCr, ctx.idwt, shCr, coeffDiff);
+    decodeComponent(1, yData, yLen, ctx.scratchY, cell.cur[0], cell.sign[0], ctx.idwt, shY, coeffDiff, extrapolate);
+    decodeComponent(1, cbData, cbLen, ctx.scratchCb, cell.cur[1], cell.sign[1], ctx.idwt, shCb, coeffDiff, extrapolate);
+    decodeComponent(1, crData, crLen, ctx.scratchCr, cell.cur[2], cell.sign[2], ctx.idwt, shCr, coeffDiff, extrapolate);
+
+    // bitPos = quant + progQuant per component: how many bits each band is still missing; UPGRADE
+    // passes deliver (oldBitPos - newBitPos) bits per coefficient.
+    cell.bitPos = [quantAdd(qY, pY), quantAdd(qCb, pCb), quantAdd(qCr, pCr)];
 
     ycbcrToRgba(ctx.scratchY, ctx.scratchCb, ctx.scratchCr, ctx.rgba);
     // Diagnostic: log a few of the MOST detailed tiles (largest yLen) in the first frame so we see
@@ -585,6 +760,126 @@ function reconstructTile(ctx, region, xIdx, yIdx, tflags, qY, qCb, qCr,
         var px = []; for (var s = 0; s < 4; s++) { var o = (s * 1100) * 4; px.push(ctx.rgba[o] + "," + ctx.rgba[o + 1] + "," + ctx.rgba[o + 2]); }
         ctx._sampleLog("progressive content tile " + xIdx + "," + yIdx + ": Y[" + yMin + ".." + yMax + "] avg=" + (ySum / 4096 | 0) + " yLen=" + yLen + " RGBA " + px.join(" / "));
     }
+    onTile(xIdx, yIdx, ctx.rgba);
+}
+
+// =================================================================================================
+// UPGRADE pass (progressive_decompress_tile_upgrade): each pass adds numBits low-order bits to every
+// coefficient in 'current'. Coefficients whose sign is already known (sign != 0) read their bits from
+// the RAW stream; still-zero coefficients read from the SRL (sign+run-length) stream, which also
+// reveals their sign. The LL3 band is all-RAW. Afterwards pixels are rebuilt from 'current' (the
+// "reverse" DWT path — 'current' itself stays in coefficient domain).
+// Band offsets here are the extrapolate layout unconditionally, mirroring FreeRDP (Windows hosts
+// only emit upgrades with REDUCE_EXTRAPOLATE set).
+// =================================================================================================
+function srlRead(state, numBits) {
+    var bs = state.srl;
+    if (state.nz) { state.nz--; return 0; }
+    var k = state.kp >> 3;
+    if (!state.mode) {
+        // zero encoding
+        var bit = (bs.accumulator & 0x80000000) ? 1 : 0;
+        bs.shift(1);
+        if (!bit) {
+            // '0' bit: nz = (1 << k)
+            state.nz = (1 << k);
+            state.kp += 4; if (state.kp > 80) state.kp = 80;
+            state.nz--;
+            return 0;
+        } else {
+            // '1' bit: nz = next k bits, then unary
+            state.nz = 0;
+            state.mode = 1;
+            if (k) {
+                state.nz = (bs.accumulator >>> (32 - k)) & ((1 << k) - 1);
+                bs.shift(k);
+            }
+            if (state.nz) { state.nz--; return 0; }
+        }
+    }
+    state.mode = 0;
+    // unary encoding: sign bit, then count zeros until a 1 (capped at (1<<numBits)-1)
+    var sign = (bs.accumulator & 0x80000000) ? 1 : 0;
+    bs.shift(1);
+    state.kp = state.kp < 6 ? 0 : state.kp - 6;
+    if (numBits === 1) return sign ? -1 : 1;
+    var mag = 1, max = (1 << numBits) - 1;
+    while (mag < max) {
+        var b = (bs.accumulator & 0x80000000) ? 1 : 0;
+        bs.shift(1);
+        if (b) break;
+        mag++;
+    }
+    return sign ? -mag : mag;
+}
+
+function rawRead(raw, numBits) {
+    var v = (raw.accumulator >>> (32 - numBits)) & ((1 << numBits) - 1);
+    raw.shift(numBits);
+    return v;
+}
+
+function upgradeBlock(state, current, sign, off, length, shift, numBits, nonLL) {
+    if (numBits < 1) return;
+    var raw = state.raw;
+    if (!nonLL) {
+        for (var i = 0; i < length; i++) {
+            var v = rawRead(raw, numBits);
+            current[off + i] = clampi16(current[off + i] + (v << shift));
+        }
+        return;
+    }
+    for (var j = 0; j < length; j++) {
+        var input;
+        var s = sign[off + j];
+        if (s > 0) input = rawRead(raw, numBits);
+        else if (s < 0) input = -rawRead(raw, numBits);
+        else { input = srlRead(state, numBits); sign[off + j] = clampi16(input); }
+        current[off + j] = clampi16(current[off + j] + (input << shift));
+    }
+}
+
+function upgradeComponent(ctx, shift, numBits, srcDst, current, sign, data, srlOff, srlLen, rawOff, rawLen, extrapolate) {
+    var state = {
+        kp: 8, mode: 0, nz: 0,
+        srl: new BitStream(data.subarray(srlOff, srlOff + srlLen), srlLen),
+        raw: new BitStream(data.subarray(rawOff, rawOff + rawLen), rawLen),
+    };
+    upgradeBlock(state, current, sign, 0,    1023, shift.HL1, numBits.HL1, true);
+    upgradeBlock(state, current, sign, 1023, 1023, shift.LH1, numBits.LH1, true);
+    upgradeBlock(state, current, sign, 2046, 961,  shift.HH1, numBits.HH1, true);
+    upgradeBlock(state, current, sign, 3007, 272,  shift.HL2, numBits.HL2, true);
+    upgradeBlock(state, current, sign, 3279, 272,  shift.LH2, numBits.LH2, true);
+    upgradeBlock(state, current, sign, 3551, 256,  shift.HH2, numBits.HH2, true);
+    upgradeBlock(state, current, sign, 3807, 72,   shift.HL3, numBits.HL3, true);
+    upgradeBlock(state, current, sign, 3879, 72,   shift.LH3, numBits.LH3, true);
+    upgradeBlock(state, current, sign, 3951, 64,   shift.HH3, numBits.HH3, true);
+    upgradeBlock(state, current, sign, 4015, 81,   shift.LL3, numBits.LL3, false);
+    // reverse DWT: rebuild pixels from the upgraded coefficients
+    srcDst.set(current.subarray(0, 4096));
+    inverseDwt(srcDst, ctx.idwt, extrapolate);
+}
+
+function upgradeTile(ctx, region, xIdx, yIdx, quality, qY, qCb, qCr, data, blobs, extrapolate, onTile, log) {
+    var cell = ctx._tileCell(xIdx, yIdx);
+    if (!cell.bitPos) {
+        if (log && !ctx._loggedUpgNoFirst) { ctx._loggedUpgNoFirst = 1; log("progressive: UPGRADE for tile " + xIdx + "," + yIdx + " without FIRST — skipped"); }
+        return;
+    }
+    var prog = progQuantFor(region, quality, log);
+    if (prog === undefined) return;
+    var progs = [prog ? prog.y : QUANT_ZERO, prog ? prog.cb : QUANT_ZERO, prog ? prog.cr : QUANT_ZERO];
+    var quants = [qY, qCb, qCr];
+    var scratch = [ctx.scratchY, ctx.scratchCb, ctx.scratchCr];
+    for (var c = 0; c < 3; c++) {
+        var newBitPos = quantAdd(quants[c], progs[c]);
+        var numBits = quantSub(cell.bitPos[c], newBitPos);
+        var shift = quantShift(quants[c], progs[c]);
+        upgradeComponent(ctx, shift, numBits, scratch[c], cell.cur[c], cell.sign[c],
+            data, blobs[c * 4], blobs[c * 4 + 1], blobs[c * 4 + 2], blobs[c * 4 + 3], extrapolate);
+        cell.bitPos[c] = newBitPos;
+    }
+    ycbcrToRgba(ctx.scratchY, ctx.scratchCb, ctx.scratchCr, ctx.rgba);
     onTile(xIdx, yIdx, ctx.rgba);
 }
 
