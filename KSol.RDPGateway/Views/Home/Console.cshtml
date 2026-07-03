@@ -79,6 +79,12 @@
            on HiDPI displays (crisp, no browser upscaling). */
         #canvas { background: #000; display: block; }
         #pointer-cache { display: none; }
+        /* The remote pointer is applied by client.js to #screen-wrap (the whole console area,
+           including the black letterbox around the canvas); `cursor` inherits down to the
+           canvas. Overlays/dialogs are siblings of #screen-wrap and keep their own cursors. */
+        html, body {
+            scrollbar-width: none; /* Instantly deletes the 15px invisible barrier in Firefox */
+        }
         .pointer-cache-null { cursor: none; }
         .pointer-cache-default { cursor: default; }
         /* Preflight overlay: the readiness flow (start VM, wait for guest agent / IP / RDP) shown before

@@ -22,6 +22,11 @@ function Client(websocketURL, canvasID) {
     this.ctx = this.canvas.getContext("2d");
     this.pointerCacheCanvas = document.getElementById("pointer-cache");
     this.pointerCacheCanvasCtx = this.pointerCacheCanvas.getContext("2d");
+    // The RDP cursor is applied to the whole console area (#screen-wrap fills the viewport),
+    // not just the canvas, so the letterbox margins around the canvas also show the remote
+    // cursor. Overlays/dialogs (floatbar, clipboard, preflight, login) are separate elements
+    // stacked above it and keep their own cursors. Falls back to the canvas if not present.
+    this.cursorEl = document.getElementById("screen-wrap") || this.canvas;
     this.connected = false;     // input/render enabled (session active)
     this.pointerCache = {};
     this.proto = null;
@@ -941,7 +946,7 @@ Client.prototype.deinitialize = function () {
         document.getElementsByTagName("head")[0].removeChild(style);
     });
     this.pointerCache = {};
-    this.canvas.classList = [];
+    this._setCursorClass(null);
 
     // Tear down the audio timeline so a later reconnect starts fresh (the AudioContext is reused).
     this._audioTime = 0;
@@ -1118,36 +1123,86 @@ Client.prototype._onGfxReset = function (w, h) {
     }
 };
 
-Client.prototype.handlePointer = function (header, r) {
-    if (header.isPTRNull()) { this.canvas.classList = ["pointer-cache-null"]; return; }
-    if (header.isPTRDefault()) { this.canvas.classList = ["pointer-cache-default"]; return; }
-    if (header.isPTRColor()) { /* color pointer unsupported in v1 */ return; }
+// Gated pointer-update tracing. Off unless window.RDP_LOG == 1 (see top of file), so the
+// hot path stays quiet in production but pointer-cache issues (e.g. reverting to the OS
+// default cursor) can be diagnosed by flipping the flag in devtools.
+function PTR_LOG(msg) { if (window.RDP_LOG == 1) console.log("rdp: pointer " + msg); }
 
-    if (header.isPTRNew()) {
-        const u = parseNewPointerUpdate(r);
-        const img = u.getImageData(this.pointerCacheCanvasCtx);
-        if (!img) return;
-        this.pointerCacheCanvasCtx.putImageData(img, 0, 0);
-        const url = this.pointerCacheCanvas.toDataURL("image/webp", 1);
-
-        if (this.pointerCache.hasOwnProperty(u.cacheIndex)) {
-            document.getElementsByTagName("head")[0].removeChild(this.pointerCache[u.cacheIndex]);
-            delete this.pointerCache[u.cacheIndex];
-        }
-        const style = document.createElement("style");
-        const className = "pointer-cache-" + u.cacheIndex;
-        style.innerHTML = "." + className + " {cursor:url(\"" + url + "\") " + u.x + " " + u.y + ", auto}";
-        document.getElementsByTagName("head")[0].appendChild(style);
-        this.pointerCache[u.cacheIndex] = style;
-        this.canvas.classList = [className];
-        return;
+// Select the active RDP cursor by swapping the single pointer-cache-* class on cursorEl.
+// Only that class is touched, so any other classes on the element are preserved. Pass null
+// to clear the cursor (revert to whatever the element's own CSS specifies).
+Client.prototype._setCursorClass = function (cls) {
+    const el = this.cursorEl;
+    for (const c of Array.from(el.classList)) {
+        if (c.indexOf("pointer-cache-") === 0) el.classList.remove(c);
     }
+    if (cls) el.classList.add(cls);
+};
+
+Client.prototype.handlePointer = function (header, r) {
+    if (header.isPTRNull()) { PTR_LOG("PTR_NULL"); this._setCursorClass("pointer-cache-null"); return; }
+    if (header.isPTRDefault()) { PTR_LOG("PTR_DEFAULT -> OS default cursor"); this._setCursorClass("pointer-cache-default"); return; }
+
+    // PTR_COLOR and PTR_NEW carry the same cursor bitmap (PTR_COLOR is implicitly 24-bpp);
+    // both must be cached so later PTR_CACHED references resolve. Dropping PTR_COLOR left
+    // its cache slot empty, so a subsequent PTR_CACHED to that index reverted to the OS
+    // default cursor.
+    if (header.isPTRColor()) { this._cachePointer(parseColorPointerUpdate(r), "PTR_COLOR"); return; }
+    if (header.isPTRNew()) { this._cachePointer(parseNewPointerUpdate(r), "PTR_NEW"); return; }
+
     if (header.isPTRCached()) {
         const cacheIndex = r.uint16(true);
-        this.canvas.classList = ["pointer-cache-" + cacheIndex];
+        if (!this.pointerCache.hasOwnProperty(cacheIndex)) {
+            // Referenced a slot we never built (unsupported/failed decode). Keeping the
+            // current cursor is less jarring than snapping to the OS default.
+            PTR_LOG("PTR_CACHED miss idx=" + cacheIndex + " (keeping current cursor)");
+            return;
+        }
+        PTR_LOG("PTR_CACHED idx=" + cacheIndex);
+        this._setCursorClass("pointer-cache-" + cacheIndex);
         return;
     }
     // PTR_POSITION / large pointer: not handled in v1.
+    PTR_LOG("unhandled pointer update");
+};
+
+// Build a CSS cursor from a decoded pointer bitmap and cache it by index, so PTR_CACHED
+// can re-select it later. Shared by PTR_NEW and PTR_COLOR.
+Client.prototype._cachePointer = function (u, kind) {
+    // Size the cache canvas to this pointer. RDP pointers are no longer assumed to be
+    // 32x32 — large-pointer capable hosts send up to 96x96 (e.g. the Windows text I-beam).
+    // Resizing also clears the canvas, so stale pixels never bleed through.
+    if (this.pointerCacheCanvas.width !== u.width || this.pointerCacheCanvas.height !== u.height) {
+        this.pointerCacheCanvas.width = u.width;
+        this.pointerCacheCanvas.height = u.height;
+    } else {
+        this.pointerCacheCanvasCtx.clearRect(0, 0, u.width, u.height);
+    }
+    const img = u.getImageData(this.pointerCacheCanvasCtx);
+    if (!img) {
+        PTR_LOG(kind + " decode failed bpp=" + u.xorBpp + " " + u.width + "x" + u.height +
+            " lenXor=" + u.lengthXorMask + " lenAnd=" + u.lengthAndMask + " (keeping current cursor)");
+        return;
+    }
+    this.pointerCacheCanvasCtx.putImageData(img, 0, 0);
+    // PNG, not WebP: lossy WebP (which toDataURL produces) drops or flattens the alpha
+    // channel in several browsers, which turned anti-aliased pointers (e.g. the text I-beam,
+    // whose shape lives entirely in the alpha channel) into an opaque blob. PNG preserves
+    // per-pixel alpha losslessly.
+    const url = this.pointerCacheCanvas.toDataURL("image/png");
+
+    if (this.pointerCache.hasOwnProperty(u.cacheIndex)) {
+        document.getElementsByTagName("head")[0].removeChild(this.pointerCache[u.cacheIndex]);
+        delete this.pointerCache[u.cacheIndex];
+    }
+    const style = document.createElement("style");
+    const className = "pointer-cache-" + u.cacheIndex;
+    style.innerHTML = "." + className + " * {cursor:url(\"" + url + "\") " + u.x + " " + u.y + ", auto !important;}";
+    document.getElementsByTagName("head")[0].appendChild(style);
+    this.pointerCache[u.cacheIndex] = style;
+    this._setCursorClass(className);
+    PTR_LOG(kind + " cached idx=" + u.cacheIndex + " bpp=" + u.xorBpp + " " +
+        u.width + "x" + u.height + " hot=" + u.x + "," + u.y);
 };
 
 // ---- input ---------------------------------------------------------------------------------------

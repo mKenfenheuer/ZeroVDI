@@ -7,6 +7,53 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.9] — 2026-07-03 — Web client supports arbitrary-size and alpha pointers
+
+### Fixed
+- **The web console now renders every mouse pointer the host sends, at any size.** The client
+  previously hard-rejected any pointer that was not exactly 32×32 (`unsupported pointer size: 41 39`
+  in the console), discarding it entirely — so large cursors such as the Windows text I-beam, resize
+  arrows, and hand pointer left the cursor frozen on its last shape. Pointer decoding now computes the
+  correct WORD-padded scan-line stride for the reported width (matching FreeRDP and MS-RDPBCGR
+  2.2.9.1.1.4.4/.5), and the pointer cache canvas is resized per pointer, so pointers up to the
+  large-pointer maximum (96×96) are drawn correctly.
+- **The text-edit (I-beam) cursor is now drawn correctly instead of an all-white shape.** Two bugs
+  combined here:
+  - The "white → inverted" pointer pixels (which the host uses for the whole I-beam glyph) were
+    compared against the constant `0xFFFFFFFF`, but the decoded pixel is built with JavaScript's `<<`
+    operator, which produces a **signed** 32-bit integer (`-1`), so the comparison never matched and
+    every glyph pixel was written out as opaque white. The comparison now normalises to unsigned
+    first, so inverted pixels are detected.
+  - "Inverted" pointer pixels are meant to be XOR-combined with whatever is on screen behind them
+    (this is how mstsc keeps the I-beam visible on any background). A CSS `cursor` image cannot XOR
+    against the page, and the previous checkerboard fallback rendered as a faint, near-invisible
+    white smear. Inverted pixels are now drawn as solid black, which is legible on the light document
+    backgrounds where I-beams almost always appear.
+- **The web console now renders 32-bpp color pointers with their real per-pixel alpha.** These carry
+  their own alpha channel in the XOR mask (used for anti-aliased edges); the source alpha is now
+  preserved rather than being forced fully opaque/transparent from the 1-bit AND mask. 24-bpp and
+  1-bpp pointers keep their AND-mask transparency/inversion handling. Pointers are also encoded to the
+  CSS `cursor` data URI as **PNG instead of lossy WebP**, since WebP from `canvas.toDataURL`
+  drops/flattens the alpha channel in several browsers.
+- Fixed a latent bug where the AND mask was only sampled from its first byte per scan line, so the
+  transparency mask of any pointer wider than 8 px was read incorrectly.
+- **The cursor no longer intermittently reverts to the OS default.** Color pointer updates
+  (`PTR_COLOR`, the implicitly-24-bpp form of `PTR_NEW`) were silently dropped, so their pointer-cache
+  slots were never populated; a later `PTR_CACHED` update referencing one of those slots resolved to
+  an empty CSS class and the browser fell back to its own default cursor. `PTR_COLOR` is now decoded
+  and cached like `PTR_NEW`, and a `PTR_CACHED` reference to an unknown slot now keeps the current
+  cursor instead of reverting.
+- **The remote cursor now covers the whole console, not just the canvas.** The pointer class was
+  applied to `#canvas`, so the black letterbox margins around the session (and any area the canvas did
+  not exactly fill) showed the browser's own arrow cursor — which read as the cursor "reverting" as
+  the mouse moved off the canvas. It is now applied to the full-viewport `#screen-wrap`, inheriting
+  down to the canvas, while overlays and dialogs (floatbar, clipboard, preflight, reconnect, login)
+  are stacked above it and keep their own cursors. The class is now swapped without clobbering the
+  element's other classes.
+- Added gated pointer-update tracing (`window.RDP_LOG = 1` in devtools) covering every pointer PDU —
+  cache hits/misses, decode failures, and null/default transitions — to make future cursor issues
+  diagnosable without rebuilding.
+
 ## [0.6.8] — 2026-07-03 — Web client clipboard redirection fixes
 
 ### Fixed

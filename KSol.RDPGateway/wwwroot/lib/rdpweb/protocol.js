@@ -1198,6 +1198,7 @@ function RdpProtocol(transport, opts, callbacks) {
 
     this.state = null;
     this.rxBuf = new Uint8Array(0); // inbound reassembly buffer
+    this.rxPos = 0;                 // read cursor into rxBuf (unconsumed data is rxBuf[rxPos..])
     this._bwStart = null;           // auto-detect bandwidth-measure window start (ms), null when idle
     this._bwBytes = 0;              // bytes received during the current bandwidth-measure window
 
@@ -1236,24 +1237,42 @@ RdpProtocol.prototype.feed = function (chunk) {
     // Count bytes received during an in-progress auto-detect bandwidth measurement so the
     // Bandwidth Measure Results we report back to the host reflects the real payload size.
     if (this._bwStart != null) this._bwBytes = (this._bwBytes || 0) + chunk.length;
-    // grow rxBuf
-    const merged = new Uint8Array(this.rxBuf.length + chunk.length);
-    merged.set(this.rxBuf, 0);
-    merged.set(chunk, this.rxBuf.length);
-    this.rxBuf = merged;
 
-    // Process as many framed units as are complete.
+    // Append the new chunk to whatever unconsumed remainder is still buffered. A read cursor (rxPos)
+    // lets us drain complete framed units WITHOUT recopying — we only allocate here to join the
+    // leftover tail (typically empty, since a chunk usually contains whole PDUs) with the new bytes,
+    // so the copy is proportional to the partial-frame remainder, not the whole receive history. This
+    // avoids the O(n^2) full-buffer realloc-per-chunk churn under high-throughput GFX streaming.
+    const remaining = this.rxBuf.length - this.rxPos;
+    if (remaining === 0) {
+        // Common case: nothing left over — the new chunk IS the buffer, no join copy.
+        this.rxBuf = chunk;
+    } else {
+        const merged = new Uint8Array(remaining + chunk.length);
+        merged.set(this.rxBuf.subarray(this.rxPos), 0);
+        merged.set(chunk, remaining);
+        this.rxBuf = merged;
+    }
+    this.rxPos = 0;
+
+    // Process as many framed units as are complete, advancing the cursor instead of reslicing.
     for (;;) {
         const consumed = this._processOne();
         if (consumed <= 0) break;
-        this.rxBuf = this.rxBuf.subarray(consumed);
+        this.rxPos += consumed;
     }
+
+    // If everything was consumed, drop the buffer so we don't retain the (now fully read) chunk.
+    if (this.rxPos >= this.rxBuf.length) { this.rxBuf = EMPTY_RX; this.rxPos = 0; }
 };
+var EMPTY_RX = new Uint8Array(0);
 
 // Determine the length of the next inbound unit (TPKT slow-path or fastpath), returning 0 if more
 // bytes are needed. Then dispatch it. Returns the number of bytes consumed (0 if incomplete).
 RdpProtocol.prototype._processOne = function () {
-    const b = this.rxBuf;
+    // Operate on the unconsumed window rxBuf[rxPos..] as a view (no copy). Returned "consumed" counts
+    // are relative to this view; feed() advances rxPos by that amount.
+    const b = this.rxPos === 0 ? this.rxBuf : this.rxBuf.subarray(this.rxPos);
     if (b.length < 1) return 0;
 
     const first = b[0];
