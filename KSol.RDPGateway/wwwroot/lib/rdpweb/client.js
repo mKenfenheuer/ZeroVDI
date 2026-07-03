@@ -1,4 +1,6 @@
-window.RDP_LOG = 1;
+// Protocol/GFX diagnostic logging is OFF by default (set window.RDP_LOG = 1 in devtools to enable).
+// console.error/console.warn for real failures always fire regardless of this flag.
+window.RDP_LOG = window.RDP_LOG || 0;
 // client.js — browser RDP client over the gateway WebSocket relay.
 //
 // Flow:
@@ -24,6 +26,13 @@ function Client(websocketURL, canvasID) {
     this.pointerCache = {};
     this.proto = null;
     this.statusCb = null;       // optional (status, message) => void for the UI
+
+    // Windows keyboard layout id (KLID) sent in the RDP handshake (CS_CORE + Input capset) so the
+    // host loads the layout matching the user's physical keyboard instead of always US English.
+    // Synchronous locale-based guess now; refined asynchronously via the Keyboard API (Chromium)
+    // before connect() completes its gateway handshake.
+    this.keyboardLayout = this._detectKeyboardLayout();
+    this._refineKeyboardLayout();
 
     this.handleKeyDown = this.handleKeyDown.bind(this);
     this.handleKeyUp = this.handleKeyUp.bind(this);
@@ -206,6 +215,87 @@ Client.prototype.desktopScaleForDpr = function (dpr) {
     return best;
 };
 
+// ---- keyboard layout detection --------------------------------------------------------------------
+// The RDP host interprets our scancodes (physical key positions) through the keyboard layout we
+// advertise in the handshake, so it must match the user's REAL keyboard or every non-US key is wrong
+// (QWERTZ Y/Z swap, dead keys, umlauts). Browsers don't expose the OS layout directly; we combine:
+//   1. window.RDP_KEYBOARD_LAYOUT — explicit override (a Windows KLID, e.g. 0x0407), wins outright.
+//   2. navigator.languages — locale → KLID table (good proxy: UI language usually matches keyboard).
+//   3. navigator.keyboard.getLayoutMap() (Chromium, async) — probes what characters a few physical
+//      keys actually produce, correcting the family when UI language and keyboard disagree
+//      (e.g. English-UI browser on a German QWERTZ keyboard).
+
+// Windows KLIDs ([MS-LCID] / kbd layout ids) for a browser locale tag. Exact-tag entries first for
+// regional keyboards that differ from the language default, then primary-language fallbacks.
+const KLID_EXACT = {
+    "en-gb": 0x0809, "en-ie": 0x1809, "en-ca": 0x0409, "en-au": 0x0409,
+    "de-ch": 0x0807, "de-li": 0x0807,
+    "fr-be": 0x080C, "fr-ca": 0x0C0C, "fr-ch": 0x100C,
+    "it-ch": 0x0807,               // Swiss keyboards are QWERTZ (Swiss German covers it-CH hardware)
+    "nl-be": 0x0813,
+    "pt-br": 0x0416,
+    "es-mx": 0x080A, "es-419": 0x080A, "es-ar": 0x080A, "es-cl": 0x080A, "es-co": 0x080A,
+    "zh-tw": 0x0404, "zh-hk": 0x0404,
+};
+const KLID_LANG = {
+    en: 0x0409, de: 0x0407, fr: 0x040C, it: 0x0410, es: 0x040A, pt: 0x0816, nl: 0x0413,
+    sv: 0x041D, nb: 0x0414, nn: 0x0414, no: 0x0414, da: 0x0406, fi: 0x040B, is: 0x040F,
+    pl: 0x0415, cs: 0x0405, sk: 0x041B, hu: 0x040E, ro: 0x0418, bg: 0x0402, hr: 0x041A,
+    sl: 0x0424, sr: 0x081A, et: 0x0425, lv: 0x0426, lt: 0x0427, el: 0x0408, tr: 0x041F,
+    ru: 0x0419, uk: 0x0422, he: 0x040D, ar: 0x0401, th: 0x041E, vi: 0x042A,
+    ja: 0x0411, ko: 0x0412, zh: 0x0804,
+};
+function klidForLocale(tag) {
+    const t = (tag || "").toLowerCase();
+    return KLID_EXACT[t] || KLID_LANG[t.split("-")[0]] || 0;
+}
+
+// Synchronous best guess from the browser's language preferences (first tag that maps wins).
+Client.prototype._detectKeyboardLayout = function () {
+    if (window.RDP_KEYBOARD_LAYOUT) return window.RDP_KEYBOARD_LAYOUT >>> 0;
+    const tags = navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language];
+    for (const tag of tags) {
+        const klid = klidForLocale(tag);
+        if (klid) return klid;
+    }
+    return 0x0409; // US English
+};
+
+// Async refinement (Chromium only): the Keyboard API reveals the character each PHYSICAL key
+// produces under the OS layout, which identifies the layout family even when the browser UI
+// language doesn't match the keyboard. Only overrides when the locale guess disagrees.
+Client.prototype._refineKeyboardLayout = function () {
+    if (window.RDP_KEYBOARD_LAYOUT) return;
+    if (!(navigator.keyboard && navigator.keyboard.getLayoutMap)) return;
+    const self = this;
+    navigator.keyboard.getLayoutMap().then(function (map) {
+        const keyY = map.get("KeyY"), keyQ = map.get("KeyQ"), semi = map.get("Semicolon");
+        const current = self.keyboardLayout;
+        let refined = 0;
+        if (keyY === "z") {
+            // QWERTZ family: keep a QWERTZ locale guess (German/Swiss/Czech/Hungarian…), else German.
+            const qwertz = [0x0407, 0x0807, 0x0405, 0x041B, 0x040E, 0x0424, 0x041A];
+            refined = qwertz.indexOf(current) >= 0 ? current : 0x0407;
+        } else if (keyQ === "a") {
+            // AZERTY family: keep a French-family guess, else French.
+            const azerty = [0x040C, 0x080C];
+            refined = azerty.indexOf(current) >= 0 ? current : 0x040C;
+        } else if (semi) {
+            // QWERTY variants: the Semicolon position carries a distinctive letter on many layouts.
+            const bySemi = { "ò": 0x0410, "ñ": 0x040A, "ç": 0x0816, "ø": 0x0414, "æ": 0x0406, "ö": 0x041D };
+            const hit = bySemi[semi];
+            if (hit === 0x041D && (current === 0x040B || current === 0x041D)) refined = current; // sv/fi share hardware
+            else if (hit === 0x0816 && current === 0x0416) refined = current;                    // pt-BR keeps ABNT2
+            else if (hit === 0x040A && current === 0x080A) refined = current;                    // Latin American
+            else if (hit) refined = hit;
+        }
+        if (refined && refined !== current) {
+            self.keyboardLayout = refined;
+            if (window.RDP_LOG == 1) console.log("rdp: keyboard layout refined to 0x" + refined.toString(16));
+        }
+    }).catch(function () { /* keep the locale-based guess */ });
+};
+
 Client.prototype._startProtocol = function () {
     const self = this;
     const transport = {
@@ -229,6 +319,7 @@ Client.prototype._startProtocol = function () {
         // via desktopScaleFactor (100..500).
         desktopScaleFactor: this._scaleForSession(),
         deviceScaleFactor: 100,
+        keyboardLayout: this.keyboardLayout, // Windows KLID detected from the browser (see _detectKeyboardLayout)
         performanceFlags: this.creds.performanceFlags, // undefined → protocol default (best visuals)
         audio: !!this.audioEnabled,        // request the rdpsnd channel for remote sound
         microphone: !!this.microphoneEnabled, // accept the AUDIO_INPUT DVC for mic redirection
@@ -997,16 +1088,6 @@ Client.prototype._onGfxPaint = function (canvas, sx, sy, sw, sh, dx, dy) {
     if (sw <= 0 || sh <= 0) return;
     try {
         this.ctx.drawImage(canvas, sx, sy, sw, sh, dx, dy, sw, sh);
-        // Log the first few paints, then every 30th, so we can SEE whether painting keeps going (stream
-        // alive) vs. genuinely stops — without per-frame spam.
-        const pc = (this._gfxPaintCount = (this._gfxPaintCount || 0) + 1);
-        if (pc <= 8 || pc % 30 === 0) {
-            let sample = "?";
-            try {
-                const px = this.ctx.getImageData(Math.floor(this.canvas.width / 2), Math.floor(this.canvas.height / 2), 1, 1).data;
-                sample = "centerPx=rgba(" + px[0] + "," + px[1] + "," + px[2] + "," + px[3] + ")";
-            } catch (e) { sample = "centerPx=?(" + (e && e.message) + ")"; }
-        }
     } catch (e) {
         console.warn("gfx paint failed:", e);
     }
@@ -1019,8 +1100,6 @@ Client.prototype._onGfxDirectFrame = function (frame, surfaceId, map) {
     const ox = (map && map.originX) || 0, oy = (map && map.originY) || 0;
     try {
         this.ctx.drawImage(frame, ox, oy);
-        const px = this.ctx.getImageData(Math.floor(this.canvas.width / 2), Math.floor(this.canvas.height / 2), 1, 1).data;
-        if (!this._directDbg) { this._directDbg = 1; }
         if (frame.close) frame.close();
     } catch (e) {
         console.warn("DIRECT drawImage(frame) threw:", e);

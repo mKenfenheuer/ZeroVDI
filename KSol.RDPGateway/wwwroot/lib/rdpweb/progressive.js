@@ -526,6 +526,7 @@ function ProgressiveContext() {
     this.rgba = new Uint8ClampedArray(64 * 64 * 4);
     this.tiles = {};         // "x,y" -> per-cell persistent state (diff accumulation + upgrades)
     this.gridWidth = 0; this.gridHeight = 0;
+    this._blobs = new Array(12); // reusable [srlOff,srlLen,rawOff,rawLen]*3 for UPGRADE tiles
 }
 ProgressiveContext.prototype.reset = function () { this.tiles = {}; };
 ProgressiveContext.prototype._tileCell = function (xIdx, yIdx) {
@@ -671,8 +672,6 @@ function processTiles(ctx, region, contextFlags, onTile, log) {
     function r16() { var v = dv.getUint16(p, true); p += 2; return v; }
     function r32() { var v = dv.getUint32(p, true); p += 4; return v; }
 
-    if (log && !ctx._loggedCtx) { ctx._loggedCtx = 1; log("progressive: contextFlags=0x" + contextFlags.toString(16) + " regionFlags=0x" + region.flags.toString(16) + " subbandDiffing=" + coeffDiffSub + " extrapolate=" + extrapolate); }
-
     while (p + 6 <= end) {
         var blockType = r16();
         var blockLen = r32();
@@ -692,7 +691,6 @@ function processTiles(ctx, region, contextFlags, onTile, log) {
             var crData = p; p += crLen;
             /* tailData */ p += tailLen;
 
-            if (log && (tflags & RFX_TILE_DIFFERENCE) && !ctx._loggedDiff) { ctx._loggedDiff = 1; log("progressive: first DIFFERENCE tile seen (tflags=0x" + tflags.toString(16) + " at " + xIdx + "," + yIdx + ")"); }
             if (quantIdxY < region.numQuant && quantIdxCb < region.numQuant && quantIdxCr < region.numQuant) {
                 reconstructTile(ctx, region, xIdx, yIdx, tflags, quality,
                     region.quants[quantIdxY], region.quants[quantIdxCb], region.quants[quantIdxCr],
@@ -714,13 +712,13 @@ function processTiles(ctx, region, contextFlags, onTile, log) {
             var cbRaw = p; p += cbRawLen;
             var crSrl = p; p += crSrlLen;
             var crRaw = p; p += crRawLen;
-            if (log && !ctx._loggedUpg) { ctx._loggedUpg = 1; log("progressive: first UPGRADE tile (quality=" + uQuality + " at " + uX + "," + uY + ")"); }
             if (uQY < region.numQuant && uQCb < region.numQuant && uQCr < region.numQuant && p <= bEnd) {
+                ctx._blobs[0] = ySrl;  ctx._blobs[1] = ySrlLen;  ctx._blobs[2] = yRaw;  ctx._blobs[3] = yRawLen;
+                ctx._blobs[4] = cbSrl; ctx._blobs[5] = cbSrlLen; ctx._blobs[6] = cbRaw; ctx._blobs[7] = cbRawLen;
+                ctx._blobs[8] = crSrl; ctx._blobs[9] = crSrlLen; ctx._blobs[10] = crRaw; ctx._blobs[11] = crRawLen;
                 upgradeTile(ctx, region, uX, uY, uQuality,
                     region.quants[uQY], region.quants[uQCb], region.quants[uQCr],
-                    data,
-                    [ySrl, ySrlLen, yRaw, yRawLen, cbSrl, cbSrlLen, cbRaw, cbRawLen, crSrl, crSrlLen, crRaw, crRawLen],
-                    extrapolate, onTile, log);
+                    data, ctx._blobs, extrapolate, onTile, log);
             }
             p = bEnd;
         } else {
@@ -751,15 +749,6 @@ function reconstructTile(ctx, region, xIdx, yIdx, tflags, quality, qY, qCb, qCr,
     cell.bitPos = [quantAdd(qY, pY), quantAdd(qCb, pCb), quantAdd(qCr, pCr)];
 
     ycbcrToRgba(ctx.scratchY, ctx.scratchCb, ctx.scratchCr, ctx.rgba);
-    // Diagnostic: log a few of the MOST detailed tiles (largest yLen) in the first frame so we see
-    // whether content tiles span a real luma range or collapse to a flat tone.
-    if (ctx._sampleLog && (ctx._sampleCount = (ctx._sampleCount || 0)) < 6 && yLen > 200) {
-        ctx._sampleCount++;
-        var yMin = 32767, yMax = -32768, ySum = 0;
-        for (var k = 0; k < 4096; k++) { var yv = ctx.scratchY[k]; if (yv < yMin) yMin = yv; if (yv > yMax) yMax = yv; ySum += yv; }
-        var px = []; for (var s = 0; s < 4; s++) { var o = (s * 1100) * 4; px.push(ctx.rgba[o] + "," + ctx.rgba[o + 1] + "," + ctx.rgba[o + 2]); }
-        ctx._sampleLog("progressive content tile " + xIdx + "," + yIdx + ": Y[" + yMin + ".." + yMax + "] avg=" + (ySum / 4096 | 0) + " yLen=" + yLen + " RGBA " + px.join(" / "));
-    }
     onTile(xIdx, yIdx, ctx.rgba);
 }
 
@@ -888,7 +877,6 @@ global.RfxProgressive = {
     // decode(ctx, payload Uint8Array, onTile(xIdx,yIdx,rgbaUint8ClampedArray), log) -> {tiles,frames}|null
     decode: function (ctx, payload, onTile, log) {
         ctx._streamData = payload;
-        ctx._sampleLog = log;
         ctx._streamDv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
         try {
             return decodeStream(ctx, payload, onTile, log);

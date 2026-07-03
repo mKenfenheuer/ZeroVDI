@@ -198,7 +198,6 @@ RdpGfx.prototype.onChannelData = function (data) {
     if (!inflated) { this._log("rdpgfx: zgfx decompress failed (" + data.length + " bytes)"); return; }
 
     let off = 0;
-    const seq = [];
     while (off + RDPGFX_HEADER_SIZE <= inflated.length) {
         const r = new ByteReader(inflated.subarray(off));
         const cmdId = r.u16le();
@@ -208,23 +207,15 @@ RdpGfx.prototype.onChannelData = function (data) {
             this._log("rdpgfx: bad pduLength " + pduLength + " at off " + off + " (blob " + inflated.length + ")");
             break;
         }
-        seq.push("0x" + cmdId.toString(16) + ":" + pduLength);
         // The PDU body is everything after the 8-byte header, up to pduLength.
         const body = inflated.subarray(off + RDPGFX_HEADER_SIZE, off + pduLength);
         this._dispatch(cmdId, body);
         off += pduLength;
     }
-    // Log EVERY GFX blob (no cap). To diagnose the post-keyframe stall we need to know definitively
-    // whether the host keeps sending after frame ~2 — a silent cap hid that. Toggle off via
-    // window.RDP_GFX_QUIET=1 once the stall is understood.
-    if (!(typeof window !== "undefined" && window.RDP_GFX_QUIET))
-        this._log("rdpgfx: PDU walk blob=" + inflated.length + " [" + seq.join(" ") + "] consumed=" + off);
 };
 
 RdpGfx.prototype._dispatch = function (cmdId, body) {
     const r = new ByteReader(body);
-    if (!(typeof window !== "undefined" && window.RDP_GFX_QUIET))
-        this._log("rdpgfx:   dispatch cmdId=0x" + cmdId.toString(16) + " bodyLen=" + body.length);
     switch (cmdId) {
         case RDPGFX_CMDID_CAPSCONFIRM: return this._onCapsConfirm(r);
         case RDPGFX_CMDID_RESETGRAPHICS: return this._onResetGraphics(r);
@@ -332,8 +323,6 @@ RdpGfx.prototype._onStartFrame = function (r) {
     /* timestamp */ r.u32le();
     this._curFrameId = r.u32le();
     this._frameStartMs = Date.now();   // for QOE timeDiffSE (START->END)
-    if (!(typeof window !== "undefined" && window.RDP_GFX_QUIET))
-        this._log("rdpgfx: START_FRAME frameId=" + this._curFrameId);
     this._dirty = [];
 };
 
@@ -369,8 +358,6 @@ RdpGfx.prototype._onEndFrame = function (r) {
         this._sendFrameAck(frameId, RDPGFX_QUEUE_DEPTH_UNAVAILABLE);
     }
     this._sendQoeFrameAck(frameId);
-    if (!(typeof window !== "undefined" && window.RDP_GFX_QUIET))
-        this._log("rdpgfx: END_FRAME " + frameId + " acked (FRAME_ACK+QOE), totalDecoded=" + this.framesDecoded);
 };
 
 RdpGfx.prototype._sendFrameAck = function (frameId, queueDepth) {
@@ -380,9 +367,6 @@ RdpGfx.prototype._sendFrameAck = function (frameId, queueDepth) {
     body.u32le(this.framesDecoded);              // totalFramesDecoded
     if (this.cb.send) {
         this.cb.send(this._wrapPdu(RDPGFX_CMDID_FRAMEACKNOWLEDGE, body.toArray()));
-        if (!(typeof window !== "undefined" && window.RDP_GFX_QUIET))
-            this._log("rdpgfx: sent FRAME_ACK frameId=" + frameId + " total=" + this.framesDecoded +
-                " queueDepth=0x" + (queueDepth >>> 0).toString(16));
     } else {
         this._log("rdpgfx: NO send callback — cannot ack frame " + frameId);
     }
@@ -422,24 +406,6 @@ RdpGfx.prototype._onWireToSurface1 = function (r) {
     if (!surf) { this._log("rdpgfx: WIRE_TO_SURFACE_1 for unknown surface " + surfaceId); return; }
 
     const rect = { left: destLeft, top: destTop, right: destRight, bottom: destBottom };
-    // DIAG: dump the FULL raw WIRE_TO_SURFACE_1 bitmapData (codecId + metablock + bitstream) for the
-    // first keyframe-bearing PDU so we can parse the true codec/metablock offline. Prefix a 12-byte
-    // header [codecId(2) pixelFormat(1) pad(1) destL/T/R/B(2 each = 8)] so the offline parser has context.
-    if (typeof window !== "undefined" && window.RDP_DUMP_RAW && !window.__rawDumped && bitmapData.length > 1000) {
-        window.__rawDumped = 1;
-        const hdr = new Uint8Array(12);
-        const dv = new DataView(hdr.buffer);
-        dv.setUint16(0, codecId, true); dv.setUint8(2, pixelFormat);
-        dv.setUint16(4, destLeft, true); dv.setUint16(6, destTop, true);
-        dv.setUint16(8, destRight, true); dv.setUint16(10, destBottom, true);
-        const blob = new Uint8Array(hdr.length + bitmapData.length);
-        blob.set(hdr, 0); blob.set(bitmapData, hdr.length);
-        const self = this;
-        fetch("/debug/dump/wire1.bin", { method: "POST", body: blob })
-            .then(function (r) { return r.json(); })
-            .then(function (j) { self._log("rdpgfx: RAW wire1 dumped codec=0x" + codecId.toString(16) + " " + JSON.stringify(j)); })
-            .catch(function (e) { self._log("rdpgfx: RAW dump failed: " + e); });
-    }
     if (codecId === RDPGFX_CODECID_AVC420) {
         this._decodeAvc420(surfaceId, surf, rect, bitmapData);
     } else if (codecId === RDPGFX_CODECID_AVC444 || codecId === RDPGFX_CODECID_AVC444v2) {
@@ -481,11 +447,6 @@ RdpGfx.prototype._onWireToSurface2 = function (r) {
 // desktop this way. Each tile reconstruction (RLGR → dequant → inverse DWT → YCbCr→RGB) lives in
 // progressive.js; here we just place tiles and mark them dirty so they paint at END_FRAME flush.
 RdpGfx.prototype._decodeProgressive = function (surfaceId, surf, bitmapData) {
-    if ((this._progHexDbg = (this._progHexDbg || 0) + 1) <= 2) {
-        let hex = "";
-        for (let i = 0; i < Math.min(32, bitmapData.length); i++) hex += bitmapData[i].toString(16).padStart(2, "0") + " ";
-        this._log("rdpgfx: progressive head[" + bitmapData.length + "B]: " + hex);
-    }
     let ctx = this.progCtx[surfaceId];
     if (!ctx) { ctx = new this.progressive.Context(); this.progCtx[surfaceId] = ctx; }
     const self = this;
@@ -516,8 +477,6 @@ RdpGfx.prototype._decodeProgressive = function (surfaceId, surf, bitmapData) {
         }, function (m) { self._log("rdpgfx: " + m); });
 
         if (!res) { this._log("rdpgfx: progressive decode failed (" + bitmapData.length + " bytes)"); }
-        else if ((this._progDbg = (this._progDbg || 0) + 1) <= 6)
-            this._log("rdpgfx: progressive decoded " + res.tiles + " tile(s) (" + bitmapData.length + "B)");
     } catch (e) {
         this._log("rdpgfx: progressive EXCEPTION (" + bitmapData.length + "B): " + (e && e.stack ? e.stack : e));
     }
@@ -538,30 +497,6 @@ RdpGfx.prototype._decodeAvc420 = function (surfaceId, surf, destRect, data) {
     // quantQualityVals: numRegionRects * 2 bytes (qpVal, qualityVal) — we don't need them for decode.
     r.skip(numRegionRects * 2);
     const h264 = r.bytes(r.remaining());
-    if ((this._avcDbg = (this._avcDbg || 0) + 1) <= 8)
-        this._log("rdpgfx: AVC420 surf=" + surfaceId + " rects=" + numRegionRects +
-            " h264=" + h264.length + "B firstNALs=" + nalSummary(h264));
-    // Optional one-shot stream dump for offline ffmpeg analysis (window.RDP_DUMP_H264=1, capped).
-    if (typeof window !== "undefined" && window.RDP_DUMP_H264) {
-        const max = window.RDP_DUMP_H264_MAX || 120;
-        const n = (window.__h264dumpN = (window.__h264dumpN || 0) + 1);
-        if (n <= max) {
-            const append = n > 1 ? "?append=1" : "";
-            fetch("/debug/dump/stream.h264" + append, { method: "POST", body: h264.slice() }).catch(function () {});
-        }
-    }
-
-    // DIAGNOSTIC: drop H.264 frames entirely (no WebCodecs) to verify the GFX frame STREAM keeps
-    // flowing independently of decoder buffering. END_FRAME acks happen in _onEndFrame regardless of
-    // decode, so if the host keeps sending while we drop+ack, the "stall" is purely decoder output
-    // delay (not protocol). Enable with window.RDP_GFX_NODECODE=1.
-    if (typeof window !== "undefined" && window.RDP_GFX_NODECODE) {
-        const n = (this._nodecodeCount = (this._nodecodeCount || 0) + 1);
-        this._log("rdpgfx: NODECODE drop frame #" + n + " surf=" + surfaceId + " rects=" + numRegionRects +
-            " h264=" + h264.length + "B nals=" + nalSummary(h264));
-        return;
-    }
-
     let dec = this.decoders[surfaceId];
     if (!dec) {
         dec = new H264SurfaceDecoder(surf, this, surfaceId);
@@ -663,10 +598,6 @@ RdpGfx.prototype.onDecodedFrame = function (surfaceId, frame, regions) {
                 surf.ctx.putImageData(new ImageData(sub, w, h), sl, st);
             }
             self._afterSurfaceUpdate(surfaceId, surf, rects);
-            const fn = (self._dbgFrames = (self._dbgFrames || 0) + 1);
-            if (fn <= 6 || fn % 60 === 0)
-                self._log("rdpgfx: H264 frame #" + fn + " painted surf " + surfaceId + " rects=" +
-                    rects.length + " " + self._surfSample(surf));
         } catch (e) {
             self._log("rdpgfx: H264 paint threw: " + (e && e.message || e));
         } finally {
@@ -706,10 +637,6 @@ RdpGfx.prototype._paintViaBitmap = function (surfaceId, surf, frame, rects, cw, 
             }
             bmp.close && bmp.close();
             self._afterSurfaceUpdate(surfaceId, surf, rects);
-            const fn = (self._dbgFrames = (self._dbgFrames || 0) + 1);
-            if (fn <= 6 || fn % 60 === 0)
-                self._log("rdpgfx: H264 frame #" + fn + " painted(bitmap) surf " + surfaceId +
-                    " rects=" + rects.length + " " + self._surfSample(surf));
         } catch (e) {
             self._log("rdpgfx: H264 bitmap paint threw: " + (e && e.message || e));
         } finally {
@@ -723,24 +650,6 @@ RdpGfx.prototype._paintViaBitmap = function (surfaceId, surf, frame, rects, cw, 
 
 // Scan the whole surface canvas for any non-black pixel and report stats — to tell "decoded to black"
 // from "decoded fine but the sampled point happens to be black".
-RdpGfx.prototype._surfSample = function (surf) {
-    try {
-        const img = surf.ctx.getImageData(0, 0, surf.width, surf.height).data;
-        let nonBlack = 0, maxR = 0, maxG = 0, maxB = 0, firstX = -1, firstY = -1;
-        const n = surf.width * surf.height;
-        for (let i = 0; i < n; i++) {
-            const r = img[i * 4], g = img[i * 4 + 1], b = img[i * 4 + 2];
-            if (r > 8 || g > 8 || b > 8) {
-                nonBlack++;
-                if (r > maxR) maxR = r; if (g > maxG) maxG = g; if (b > maxB) maxB = b;
-                if (firstX < 0) { firstX = i % surf.width; firstY = (i / surf.width) | 0; }
-            }
-        }
-        return "nonBlack=" + nonBlack + "/" + n + " max=rgb(" + maxR + "," + maxG + "," + maxB + ")" +
-            (firstX >= 0 ? " first@" + firstX + "," + firstY : "");
-    } catch (e) { return "sample?(" + (e && e.message) + ")"; }
-};
-
 // After a surface region updates, push it to the output if the surface is mapped. Each changed region
 // is composited immediately (per-region) so partial updates appear without waiting for a full frame.
 RdpGfx.prototype._afterSurfaceUpdate = function (surfaceId, surf, regions) {
@@ -859,21 +768,6 @@ RdpGfx.prototype._onCacheToSurface = function (r) {
     }
     if (surf && updated.length) this._afterSurfaceUpdate(surfaceId, surf, updated);
 };
-
-// Summarize the leading NAL units of an Annex-B bitstream (types of the first few NALs) for diagnostics.
-// H.264 NAL types: 1=non-IDR slice, 5=IDR slice, 6=SEI, 7=SPS, 8=PPS, 9=AUD.
-function nalSummary(data) {
-    const types = [];
-    for (let i = 0; i + 4 < data.length && types.length < 6; i++) {
-        if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1) {
-            types.push(data[i + 3] & 0x1f); i += 3;
-        } else if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0 && data[i + 3] === 1) {
-            types.push((data[i + 4] || 0) & 0x1f); i += 4;
-        }
-    }
-    return types.length ? "[" + types.join(",") + "]" : "(no start codes! first bytes=" +
-        Array.from(data.subarray(0, 6)).map(function (b) { return b.toString(16); }).join(" ") + ")";
-}
 
 // ================================================================================================
 // H.264 (AVC420) decode via WebCodecs VideoDecoder
@@ -1093,11 +987,6 @@ H264SurfaceDecoder.prototype.decode = function (annexb, regions, _destRect) {
 };
 
 H264SurfaceDecoder.prototype._onFrame = function (frame) {
-    this._frameCount = (this._frameCount || 0) + 1;
-    if (this._frameCount <= 8)
-        this.gfx._log("rdpgfx: H264 frame #" + this._frameCount + " " +
-            (frame.displayWidth || frame.codedWidth) + "x" + (frame.displayHeight || frame.codedHeight) +
-            " fmt=" + frame.format);
     const regions = this._pendingRegions.shift() || null;
     this.gfx.onDecodedFrame(this.surfaceId, frame, regions);
 };

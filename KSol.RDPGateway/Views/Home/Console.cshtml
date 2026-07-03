@@ -33,24 +33,14 @@
 <html lang="en">
 <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>@resourceName — RDP Console</title>
     <link rel="stylesheet" href="~/lib/fontawesome/css/all.min.css" />
     @* The redesigned overlays (preflight, login, reconnect, clipboard) use the Tailwind design system.
-       Load the same bundle + icons + pre-paint theme script as the rest of the app so they match. *@
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/remixicon@4.5.0/fonts/remixicon.css" />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="~/css/app.css" asp-append-version="true" />
-    <script>
-        (function () {
-            try {
-                var theme = localStorage.getItem('rdpgw-theme') || 'blue';
-                var mode = localStorage.getItem('rdpgw-mode') || 'light';
-                document.documentElement.setAttribute('data-theme', theme);
-                if (mode === 'dark') document.documentElement.classList.add('dark');
-            } catch (e) { /* localStorage unavailable — fall back to defaults */ }
-        })();
-    </script>
+       Share the app's <head> assets + pre-paint theme script via _ThemeHead so the console honors the
+       admin's forced theme/mode AND the tenant's custom brand color (emitted as inline CSS overrides) —
+       exactly like the rest of the app, rather than the bespoke localStorage-only script this used to
+       carry (which never injected the custom color). *@
+    @await Html.PartialAsync("_ThemeHead")
     <style>
         html, body { height: 100%; margin: 0; background: #1a1a1a; color: #eee; overflow: hidden; }
 

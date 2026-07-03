@@ -232,13 +232,20 @@ ClipRdr.prototype._onFormatDataRequest = function (body) {
 
 // The remote returned the clipboard contents we requested — deliver text to the browser.
 ClipRdr.prototype._onFormatDataResponse = function (msgFlags, body) {
+    // Consume the outstanding request id FIRST and ignore responses we have no request for. Hosts
+    // often announce a single copy with two Format List PDUs (clipboard-chain re-announcements), so
+    // we issue two data requests and get two responses; the second used to find _requestId already
+    // cleared, fall into the ANSI branch, and decode the UTF-16LE payload as "first char only" —
+    // overwriting the correctly decoded text in the UI.
+    const reqId = this._requestId;
+    this._requestId = null;
+    if (reqId == null) return;
     if (!(msgFlags & CB_RESPONSE_OK)) return;
     let text;
-    if (this._requestId === CF_UNICODETEXT) text = utf16leToString(body);
+    if (reqId === CF_UNICODETEXT) text = utf16leToString(body);
     else { // CF_TEXT (ASCII/ANSI)
         text = "";
         for (let i = 0; i < body.length; i++) { if (body[i] === 0) break; text += String.fromCharCode(body[i]); }
     }
-    this._requestId = null;
     if (text && this.cb.onRemoteText) this.cb.onRemoteText(text);
 };

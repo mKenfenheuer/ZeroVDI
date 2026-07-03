@@ -389,7 +389,7 @@ function tpktX224Wrap(userData) {
 // ================================================================================================
 // Client user data (CS_CORE / CS_SECURITY / CS_NET) for the basic settings exchange
 // ================================================================================================
-function clientCoreData(selectedProtocol, width, height, desktopScaleFactor) {
+function clientCoreData(selectedProtocol, width, height, desktopScaleFactor, keyboardLayout) {
     var gfx = rdpTryGfx();
     const w = new ByteWriter();
     w.u16le(0xC001); // CS_CORE
@@ -399,7 +399,7 @@ function clientCoreData(selectedProtocol, width, height, desktopScaleFactor) {
     w.u16le(height);
     w.u16le(0xCA01); // colorDepth RNS_UD_COLOR_8BPP
     w.u16le(0xAA03); // SASSequence
-    w.u32le(0x00000409); // keyboardLayout US
+    w.u32le((keyboardLayout >>> 0) || 0x00000409); // keyboardLayout (Windows KLID; detected from the browser)
     w.u32le(18363);  // clientBuild (Windows 10 1909, matching modern clients)
     // clientName[32] (UTF-16LE, padded)
     const nameW = new ByteWriter().utf16le(PROJECT_NAME).toArray();
@@ -538,9 +538,9 @@ function clientMultitransportData() {
     return w.toArray();
 }
 
-function clientUserData(selectedProtocol, width, height, channels, desktopScaleFactor) {
+function clientUserData(selectedProtocol, width, height, channels, desktopScaleFactor, keyboardLayout) {
     const w = new ByteWriter();
-    w.bytes(clientCoreData(selectedProtocol, width, height, desktopScaleFactor));
+    w.bytes(clientCoreData(selectedProtocol, width, height, desktopScaleFactor, keyboardLayout));
     // Extra GCC blocks for the GFX/extended-client-data path are gated behind the same test toggle so
     // the default (no-GFX) Connect Initial stays byte-identical to the known-good baseline.
     if (rdpTryGfx()) w.bytes(clientClusterData());
@@ -922,11 +922,11 @@ function capPointer() {
     d.u16le(25); // pointerCacheSize
     return capSet(0x0008, d.toArray());
 }
-function capInput() {
+function capInput(keyboardLayout) {
     const d = new ByteWriter();
     d.u16le(0x0001 | 0x0004 | 0x0010 | 0x0020); // SCANCODES|MOUSEX|UNICODE|FASTPATH_INPUT2
     d.u16le(0);          // padding
-    d.u32le(0x00000409); // keyboardLayout US
+    d.u32le((keyboardLayout >>> 0) || 0x00000409); // keyboardLayout (same KLID as CS_CORE)
     d.u32le(0x00000004); // keyboardType
     d.u32le(0);          // keyboardSubType
     d.u32le(12);         // keyboardFunctionKey
@@ -1024,7 +1024,7 @@ function capBitmapCacheRev2() {
     ]));
 }
 
-function confirmActivePdu(shareID, userId, width, height) {
+function confirmActivePdu(shareID, userId, width, height, keyboardLayout) {
     // Our own capsets (responses valid for OUR Demand Active — emitting the macOS app's verbatim got
     // ERRINFO_BAD_CAPABILITIES 0x10EA). Added the GFX-gating capsets the macOS app has that we were
     // missing: MULTIFRAGMENTUPDATE now with a REAL MaxRequestSize (was 0), SURFACE_COMMANDS, BITMAP_CODECS,
@@ -1036,13 +1036,13 @@ function confirmActivePdu(shareID, userId, width, height) {
     const minimal = (typeof window !== "undefined" && window.RDP_MIN_CAPS);
     const caps = minimal ? [
         capGeneral(), capBitmap(width, height), capOrder(), capBitmapCacheRev1(),
-        capPointer(), capInput(), capBrush(), capGlyphCache(), capOffscreen(),
+        capPointer(), capInput(keyboardLayout), capBrush(), capGlyphCache(), capOffscreen(),
         capVirtualChannel(), capSound(), capMultifragmentUpdate(),
         capLargePointer(), capSurfaceCommands(), capBitmapCodecs(), capFrameAcknowledge(),
     ] : [
         capGeneral(), capBitmap(width, height), capOrder(), capBitmapCacheRev2(),
         capColorCache(), capWindowActivation(), capControl(), capPointer(), capShare(),
-        capInput(), capSound(), capFont(), capGlyphCache(), capBrush(), capOffscreen(),
+        capInput(keyboardLayout), capSound(), capFont(), capGlyphCache(), capBrush(), capOffscreen(),
         capVirtualChannel(), capMultifragmentUpdate(), capSurfaceCommands(), capLargePointer(),
         capFrameAcknowledge(), capWindow(), capBitmapCodecs(),
     ];
@@ -1190,6 +1190,10 @@ function RdpProtocol(transport, opts, callbacks) {
                                     // created later, on the host's DVC create-request
     this.desktopScaleFactor = (this.gfxEnabled && opts.desktopScaleFactor) ? opts.desktopScaleFactor : 100;
     this.deviceScaleFactor = 100;  // 100, 140 or 180, current server scale
+    // Windows keyboard layout id (KLID) advertised in CS_CORE and the Input capset. The host loads
+    // this layout for the session, so the scancodes we send (physical-key e.code positions) produce
+    // the characters the user's real keyboard is labelled with. Detected browser-side (client.js).
+    this.keyboardLayout = (opts.keyboardLayout >>> 0) || 0x0409;
     this._monitorLayoutSent = false; // gate so the FIRST MONITOR_LAYOUT is never no-op'd (host needs it)
 
     this.state = null;
@@ -1221,7 +1225,7 @@ RdpProtocol.prototype._close = function (graceful, message) {
 RdpProtocol.prototype.start = function () {
     this._log("MCS: Connect Initial");
     const userData = clientUserData(this.selectedProtocol, this.width, this.height, this.staticChannels,
-        this.desktopScaleFactor);
+        this.desktopScaleFactor, this.keyboardLayout);
     const connectInitial = mcsConnectInitialSerialize(userData);
     this.t.send(tpktX224Wrap(connectInitial));
     this.state = ST.BASIC_SETTINGS;
@@ -1305,19 +1309,30 @@ RdpProtocol.prototype._handleSlowPath = function (x224) {
         case ST.JOIN_CHANNELS:
             return this._onChannelJoinConfirm(r);
         case ST.LICENSING:
-            if (this._handleAutoDetect(this._mcsSendDataIndication(r))) return;
+            this._mcsSendDataIndication(r);
+            if (this._routeChannelData(r)) return;
+            if (this._handleAutoDetect(r)) return;
             return this._onLicensing(r);
         case ST.CAPABILITIES:
-            if (this._handleAutoDetect(this._mcsSendDataIndication(r))) return;
+            this._mcsSendDataIndication(r);
+            if (this._routeChannelData(r)) return;
+            if (this._handleAutoDetect(r)) return;
             return this._onDemandActive(r);
         case ST.FINALIZATION:
-            if (this._handleAutoDetect(this._mcsSendDataIndication(r))) return;
+            this._mcsSendDataIndication(r);
+            if (this._routeChannelData(r)) return;
+            if (this._handleAutoDetect(r)) return;
             return this._onFinalization(r);
         case ST.ACTIVE:
             // Slow-path data during the active phase (e.g. error info / deactivate-all, or a
-            // continuous-mode auto-detect request). Handle autodetect, else parse the share control
-            // header to detect deactivate-all & error info; otherwise ignore.
-            if (this._handleAutoDetect(this._mcsSendDataIndication(r))) return;
+            // continuous-mode auto-detect request). Route virtual-channel data by source channel id
+            // FIRST — _handleAutoDetect sniffs the first u16 as security flags, and a channel PDU
+            // whose length happens to have the 0x1000/0x4000 bits set would be eaten as a bogus
+            // autodetect/heartbeat PDU. Then handle autodetect, else parse the share control header
+            // to detect deactivate-all & error info; otherwise ignore.
+            this._mcsSendDataIndication(r);
+            if (this._routeChannelData(r)) return;
+            if (this._handleAutoDetect(r)) return;
             return this._onActiveSlowPath(r);
         default:
             return;
@@ -1472,6 +1487,10 @@ RdpProtocol.prototype._onAttachUserConfirm = function (r) {
     this._log("MCS: Attach User Confirm (user " + this.userId + ")");
 
     if (this.skipChannelJoin) {
+        // No join round-trips — but the static channel handlers must still be constructed here,
+        // exactly as at the end of the join sequence. Skipping this left this.cliprdr/this.rdpsnd
+        // null on skip-channel-join hosts (modern Windows), silently dropping all clipboard traffic.
+        this._initStaticChannelHandlers();
         this._sendClientInfo();
         return;
     }
@@ -1723,7 +1742,7 @@ RdpProtocol.prototype._onDemandActiveControl = function (r) {
     this._log("RDP: Demand Active (shareID " + this.shareID + ")");
 
     // Reply with Confirm Active, then run connection finalization.
-    const confirm = confirmActivePdu(this.shareID, this.userId, this.width, this.height);
+    const confirm = confirmActivePdu(this.shareID, this.userId, this.width, this.height, this.keyboardLayout);
     this.t.send(tpktX224Wrap(mcsSendDataSerialize(this.userId, this.mcsChannelId, confirm)));
 
     this._sendFinalization();
@@ -1799,32 +1818,42 @@ RdpProtocol.prototype._readShareDataHeader = function (r) {
     return { pduType2: pduType2 };
 };
 
-// Active-phase slow-path MCS data. Routes by source channel: the drdynvc virtual channel feeds the
-// DVC manager (MS-RDPEDYC); the global I/O channel carries share-control PDUs (error info, and the
+// Route slow-path MCS data arriving on a virtual channel to its handler, keyed by the source channel
+// id (set by _mcsSendDataIndication): drdynvc feeds the DVC manager (MS-RDPEDYC); rdpsnd/cliprdr/rdpdr
+// get their CHANNEL_PDU_HEADER stripped+reassembled, then the complete payload dispatched. Returns
+// true when the data was on a virtual channel (consumed), false for global/message channel data.
+// Called from EVERY post-join state, not just ACTIVE — hosts start static channels as soon as they
+// exist (FreeRDP-based hosts right after Client Info), so e.g. the cliprdr caps + Monitor Ready PDUs
+// can arrive during licensing/capabilities/finalization; dropping them killed the clipboard handshake.
+RdpProtocol.prototype._routeChannelData = function (r) {
+    if (this.drdynvcChannelId && this._lastChannelId === this.drdynvcChannelId) {
+        this._onDrdynvcData(r);
+        return true;
+    }
+    const svcName = this.staticChannelById[this._lastChannelId];
+    if (svcName === "rdpsnd" || svcName === "cliprdr" || svcName === "rdpdr") {
+        const payload = this._reassembleSvc(svcName, r);
+        if (!payload) return true; // more fragments pending
+        if (svcName === "rdpsnd" && this.rdpsnd) this.rdpsnd.onData(payload);
+        else if (svcName === "cliprdr" && this.cliprdr) this.cliprdr.onData(payload);
+        else if (svcName === "rdpdr") this._onRdpdrData(payload);
+        return true;
+    }
+    // Data on a static channel we joined but have no handler for (named so it's diagnosable, not a
+    // silent drop). The global I/O channel returns false to the caller's share-control parsing.
+    if (svcName && this._lastChannelId !== this.mcsChannelId) {
+        this._log("svc: DROP " + r.remaining() + "B on unhandled static channel '" + svcName +
+            "' id=" + this._lastChannelId);
+        return true;
+    }
+    return false;
+};
+
+// Active-phase slow-path MCS data on the global I/O channel: share-control PDUs (error info, and the
 // DEACTIVATE_ALL that begins a Deactivation-Reactivation Sequence after a resolution/scale change).
+// Virtual-channel data was already routed by _routeChannelData before this is called.
 RdpProtocol.prototype._onActiveSlowPath = function (r) {
     try {
-        if (this.drdynvcChannelId && this._lastChannelId === this.drdynvcChannelId) {
-            return this._onDrdynvcData(r);
-        }
-        // rdpsnd / cliprdr static channels: strip+reassemble the CHANNEL_PDU_HEADER, then dispatch
-        // the complete payload to the channel handler.
-        const svcName = this.staticChannelById[this._lastChannelId];
-        if (svcName === "rdpsnd" || svcName === "cliprdr" || svcName === "rdpdr") {
-            const payload = this._reassembleSvc(svcName, r);
-            if (!payload) return; // more fragments pending
-            if (svcName === "rdpsnd" && this.rdpsnd) this.rdpsnd.onData(payload);
-            else if (svcName === "cliprdr" && this.cliprdr) this.cliprdr.onData(payload);
-            else if (svcName === "rdpdr") this._onRdpdrData(payload);
-            return;
-        }
-        // Data on a static channel we joined but have no handler for (named so it's diagnosable, not a
-        // silent drop). The global I/O channel falls through below to share-control parsing.
-        if (svcName && this._lastChannelId !== this.mcsChannelId) {
-            this._log("svc: DROP " + r.remaining() + "B on unhandled static channel '" + svcName +
-                "' id=" + this._lastChannelId);
-            return;
-        }
 
         // Peek the share-control PDU type (low nibble of the 2nd u16). Some hosts prefix a 4-byte
         // security header before the ShareControlHeader; if the type at offset+2 isn't a known PDU
@@ -1915,26 +1944,6 @@ RdpProtocol.prototype.sendInputEvent = function (eventBytes) {
     }
     w.bytes(ev);
     this.t.send(w.toArray());
-    // Diagnostic: confirm input actually reaches the wire. If GFX frames resume right after these, the
-    // host was IDLE on a static desktop (correct), not stalled. Capped to avoid mousemove spam.
-    if (!(typeof window !== "undefined" && window.RDP_GFX_QUIET) && (this._inDbg = (this._inDbg || 0) + 1) <= 40) {
-        const code = (ev[0] >> 5) & 0x7;
-        const kind = code === 0 ? "KBD" : code === 1 ? "MOUSE" : code === 3 ? "SYNC" : ("code" + code);
-        // For mouse events, decode pointerFlags (LE u16 at ev[1..2]) so a CLICK (PTRFLAGS_BUTTON1 0x1000
-        // / BUTTON2 0x2000 + DOWN 0x8000) is distinguishable from a bare MOVE (PTRFLAGS_MOVE 0x0800).
-        let extra = "";
-        if (code === 1 && ev.length >= 5) {
-            const pf = ev[1] | (ev[2] << 8);
-            const x = ev[3] | (ev[4] << 8), y = (ev.length >= 7) ? (ev[5] | (ev[6] << 8)) : 0;
-            extra = " pf=0x" + pf.toString(16) + " @" + x + "," + y +
-                (pf & 0x8000 ? " DOWN" : "") + (pf & 0x1000 ? " BTN1" : "") +
-                (pf & 0x2000 ? " BTN2" : "") + (pf & 0x0800 ? " MOVE" : "");
-        } else if (code === 0 && ev.length >= 2) {
-            extra = " scancode=0x" + ev[1].toString(16) + (ev[0] & 0x01 ? " UP" : " DOWN");
-        }
-        //this._log("input: sent #" + this._inDbg + " " + kind + " (" + ev.length + "B, hdr=0x" +
-        //    (ev[0] || 0).toString(16) + ")" + extra);
-    }
 };
 
 // Send a fastpath INPUT SYNC event (FASTPATH_INPUT_EVENT_SYNC, eventCode 3) — toggle-key state sync.
@@ -1963,6 +1972,10 @@ RdpProtocol.prototype.sendRefreshRect = function (width, height) {
 // ================================================================================================
 const CHANNEL_FLAG_FIRST = 0x00000001;
 const CHANNEL_FLAG_LAST = 0x00000002;
+const CHANNEL_FLAG_SHOW_PROTOCOL = 0x00000010;
+// Max bytes of channel data per Virtual Channel PDU ([MS-RDPBCGR] 2.2.6.1 CHANNEL_CHUNK_LENGTH).
+// Messages larger than this MUST be split into FIRST..LAST chunks or the host drops the channel.
+const CHANNEL_CHUNK_LENGTH = 1600;
 // CHANNEL_PDU_HEADER compression flags ([MS-RDPBCGR] 2.2.6.1.1).
 const CHANNEL_PACKET_COMPRESSED = 0x00200000;
 const CHANNEL_PACKET_AT_FRONT = 0x00400000;
@@ -2007,27 +2020,45 @@ const RDPEVOR_DATA_PREFIX = "Microsoft::Windows::RDS::Video::Data";
 const RDPEGT_GEOMETRY_PREFIX = "Microsoft::Windows::RDS::Geometry";
 
 // Wrap a virtual-channel payload in a CHANNEL_PDU_HEADER and send it on `channelId` via MCS
-// send-data-request. Payloads here are small (caps/create responses, monitor layout) and fit a
-// single chunk, so FIRST|LAST is always set.
+// send-data-request, splitting into CHANNEL_CHUNK_LENGTH chunks when needed (clipboard text can
+// exceed one chunk; each chunk's length field carries the TOTAL uncompressed message length).
 RdpProtocol.prototype._sendOnChannel = function (channelId, payload, compress) {
-    const w = new ByteWriter();
-    w.u32le(payload.length);                    // CHANNEL_PDU_HEADER.length (uncompressed total)
-    let flags = CHANNEL_FLAG_FIRST | CHANNEL_FLAG_LAST;
-    let body = payload;
+    // Channels advertised with CHANNEL_OPTION_SHOW_PROTOCOL (cliprdr) MUST have SHOW_PROTOCOL set in
+    // every Channel PDU ([MS-RDPBCGR] 3.1.5.2.2, FreeRDP channels.c) — rdpclip expects the header
+    // visible; without it Windows hosts misparse every client→server clipboard PDU.
+    const chName = this.staticChannelById ? this.staticChannelById[channelId] : null;
+    const showProto = (chName && CHANNEL_DEFS[chName] &&
+        (CHANNEL_DEFS[chName].options & CHANNEL_OPTION_SHOW_PROTOCOL)) ? CHANNEL_FLAG_SHOW_PROTOCOL : 0;
+
     // Optionally RDP-bulk (MPPC) compress, matching the macOS app's wire form (it sends GFX caps with
     // CHANNEL flags 0x600003 = FIRST|LAST|COMPRESSED|AT_FRONT, 8K/RDP4). The host decompresses to the
-    // same bytes; declaredLen above stays the UNCOMPRESSED length. Only used where the macOS app compresses.
+    // same bytes; the declared length stays the UNCOMPRESSED length. Only used where the macOS app
+    // compresses (small single-chunk payloads), so the compressed path never needs chunking.
     if (compress && this._mppcSend) {
         const c = this._mppcSend.compress(payload);
-        body = c.data;
-        flags |= CHANNEL_PACKET_COMPRESSED;                 // 0x00200000
+        let flags = CHANNEL_FLAG_FIRST | CHANNEL_FLAG_LAST | showProto | CHANNEL_PACKET_COMPRESSED;
         if (c.flags & 0x40) flags |= CHANNEL_PACKET_AT_FRONT; // 0x00400000
         if (c.flags & 0x80) flags |= CHANNEL_PACKET_FLUSHED;  // 0x00800000
         // compressionType (0x000F0000 mask) = 0 → PACKET_COMPR_TYPE_8K, matching the macOS app.
+        const w = new ByteWriter();
+        w.u32le(payload.length);
+        w.u32le(flags >>> 0);
+        w.bytes(c.data);
+        this.t.send(tpktX224Wrap(mcsSendDataSerialize(this.userId, channelId, w.toArray())));
+        return;
     }
-    w.u32le(flags >>> 0);
-    w.bytes(body);
-    this.t.send(tpktX224Wrap(mcsSendDataSerialize(this.userId, channelId, w.toArray())));
+
+    for (let off = 0; off === 0 || off < payload.length; off += CHANNEL_CHUNK_LENGTH) {
+        const chunk = payload.subarray(off, Math.min(off + CHANNEL_CHUNK_LENGTH, payload.length));
+        let flags = showProto;
+        if (off === 0) flags |= CHANNEL_FLAG_FIRST;
+        if (off + chunk.length >= payload.length) flags |= CHANNEL_FLAG_LAST;
+        const w = new ByteWriter();
+        w.u32le(payload.length);                // CHANNEL_PDU_HEADER.length (whole-message total)
+        w.u32le(flags >>> 0);
+        w.bytes(chunk);
+        this.t.send(tpktX224Wrap(mcsSendDataSerialize(this.userId, channelId, w.toArray())));
+    }
 };
 
 // Reassemble a static virtual channel message ([MS-RDPBCGR] 2.2.6.1): each MCS send carries a

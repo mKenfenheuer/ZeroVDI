@@ -16,13 +16,26 @@ Most keys pass straight through to the remote desktop. A few combinations are sp
   by your browser before they reach the desktop.
 - If a shortcut isn't reaching the remote machine, try going full screen first.
 
+Your keyboard layout (for example German QWERTZ or French AZERTY) is detected from your browser and
+passed to the remote desktop automatically, so keys produce the characters printed on them. If the
+wrong characters appear, check your browser's language settings — the layout is derived from them on
+browsers that can't report the physical keyboard directly.
+
 ## Clipboard (copy &amp; paste)
 
-When clipboard sharing is enabled, you can copy text on your local computer and paste it into the
-remote desktop, and vice-versa. The first time, your browser may ask for permission to read the
-clipboard — allow it for copy/paste to work.
+When clipboard sharing is enabled, text moves between your computer and the remote desktop through
+the **clipboard panel** — click the clipboard button in the session toolbar to open it:
 
-If copy/paste isn't working, check that **Clipboard** is turned on in
+- **To the remote desktop:** type or paste text into the panel and click **Send to remote**, then
+  paste inside the session as usual.
+- **From the remote desktop:** copy text inside the session and it appears in the panel; click
+  **Copy** to put it on your computer's clipboard. Your browser may ask for permission the first
+  time — allow it.
+
+Browsers don't let a web page read your clipboard silently, which is why the panel is the exchange
+point rather than copy/paste happening invisibly in the background.
+
+If the panel isn't available, check that **Clipboard** is turned on in
 [Connection settings](connection-settings.md).
 
 ## Sound, microphone and camera
