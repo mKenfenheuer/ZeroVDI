@@ -50,6 +50,26 @@ All notable changes to ZeroVDI are recorded here. The format is based on
   down to the canvas, while overlays and dialogs (floatbar, clipboard, preflight, reconnect, login)
   are stacked above it and keep their own cursors. The class is now swapped without clobbering the
   element's other classes.
+- **The browser no longer flips to the OS cursor near the bottom/right window edges.** Browsers
+  deliberately revert a custom CSS cursor to the default whenever the cursor *image* would extend past
+  the viewport edge (an anti-cursor-spoofing measure) — and RDP cursor bitmaps are fixed 32×32/96×96
+  frames that are mostly transparent padding, so the dead zone was up to the full frame size. Cursor
+  images are now cropped to the bounding box of their visible pixels (with the hotspot re-based), so
+  the dead zone shrinks to the few pixels of actual glyph. A fully transparent bitmap is now treated
+  as "hide the pointer".
+
+### Added
+- **Session recordings now include the mouse cursor.** The desktop video stream never contains the
+  cursor (RDP sends pointer shapes out of band and clients draw them locally), so recordings played
+  back without one. The gateway now mirrors the pointer state — shapes decoded from `PTR_NEW` /
+  `PTR_COLOR` (same mask semantics as the web client), the shape cache, `PTR_CACHED` / `PTR_NULL` /
+  `PTR_DEFAULT` transitions, and the position from the client's own mouse input plus `PTR_POSITION` —
+  and alpha-blends the active cursor into each decoded desktop frame before it is H.264-encoded at
+  mux. No post-processing re-encode is needed. When the host selects the system default pointer, a
+  classic arrow is drawn. *Limitation:* this covers RemoteFX Progressive sessions (e.g. GNOME Remote
+  Desktop), where frames are decoded server-side anyway; AVC sessions copy the host's H.264 stream
+  verbatim at mux, and burning a cursor in there would require a full decode + re-encode pass — those
+  recordings remain cursor-less for now.
 - Added gated pointer-update tracing (`window.RDP_LOG = 1` in devtools) covering every pointer PDU —
   cache hits/misses, decode failures, and null/default transitions — to make future cursor issues
   diagnosable without rebuilding.

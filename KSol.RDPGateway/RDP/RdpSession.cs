@@ -73,9 +73,13 @@ public sealed class RdpSession
     // surface framebuffer and emits a composited BGRA frame to the media sink at each END_FRAME. Created
     // lazily on the first progressive tile (only when recording, i.e. a media sink is present).
     private GfxProgressiveCompositor? _gfxComp;
+    // Mouse-cursor state (shape cache + position) mirrored from fastpath pointer updates and client
+    // mouse input, so recordings can burn the cursor into the composited desktop frames.
+    private PointerTracker? _pointer;
 
     internal IRdpMediaSink? Media => _media;
     internal GfxProgressiveCompositor GfxCompositor => _gfxComp ??= new GfxProgressiveCompositor();
+    internal PointerTracker Pointer => _pointer ??= new PointerTracker();
     internal List<PcmFormat> SndFormats => _sndFormats;
     internal List<PcmFormat> AudinFormats => _audinFormats;
     internal int AudinOpenFormat { get => _audinOpenFormat; set => _audinOpenFormat = value; }

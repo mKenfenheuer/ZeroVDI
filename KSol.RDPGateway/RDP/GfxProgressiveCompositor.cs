@@ -78,11 +78,17 @@ internal sealed class GfxProgressiveCompositor
         return n > 0;
     }
 
+    // Scratch frame reused for cursor burn-in, so the persistent surface framebuffer is never
+    // modified (progressive updates only rewrite dirty tiles — drawing the cursor into the surface
+    // itself would leave cursor trails wherever tiles are not re-sent).
+    private byte[] _scratch = Array.Empty<byte>();
+
     /// <summary>
     /// At END_FRAME: emit the visible desktop (the surface mapped to output 0,0, or the only/first dirty
-    /// surface) as one BGRA frame. No-op if nothing was composited this frame.
+    /// surface) as one BGRA frame, with the current mouse cursor composited in when a tracker is given.
+    /// No-op if nothing was composited this frame.
     /// </summary>
-    public void OnEndFrame(IRdpMediaSink sink, long timestampMs)
+    public void OnEndFrame(IRdpMediaSink sink, long timestampMs, PointerTracker? pointer = null)
     {
         Surface? best = null;
         foreach (var s in _surfaces.Values)
@@ -92,7 +98,15 @@ internal sealed class GfxProgressiveCompositor
             best ??= s;
         }
         if (best == null) return;
-        sink.OnDesktopRawFrame(best.Width, best.Height, best.Bgra, timestampMs);
+        var frame = best.Bgra;
+        if (pointer != null)
+        {
+            if (_scratch.Length != frame.Length) _scratch = new byte[frame.Length];
+            Buffer.BlockCopy(frame, 0, _scratch, 0, frame.Length);
+            pointer.CompositeOnto(_scratch, best.Width, best.Height);
+            frame = _scratch;
+        }
+        sink.OnDesktopRawFrame(best.Width, best.Height, frame, timestampMs);
         foreach (var s in _surfaces.Values) s.Dirty = false;
     }
 

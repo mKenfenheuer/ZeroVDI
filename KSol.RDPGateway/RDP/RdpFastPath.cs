@@ -55,7 +55,7 @@ internal static class RdpFastPath
         root.Raw(unit.AsSpan(0, headerLen));
 
         var body = unit.AsSpan(headerLen);
-        if (dir == RdpDir.ClientToServer) DecodeInput(root, fpHeader, body);
+        if (dir == RdpDir.ClientToServer) DecodeInput(s, root, fpHeader, body);
         else DecodeOutput(s, root, body);
         return root;
     }
@@ -92,8 +92,12 @@ internal static class RdpFastPath
                     switch (updateCode)
                     {
                         case FP_UPDATETYPE_BITMAP: DecodeBitmapUpdate(u, data); break;
-                        case FP_UPDATETYPE_PTR_POSITION: DecodePtrPosition(u, data); break;
-                        case FP_UPDATETYPE_PTR_CACHED: DecodePtrCached(u, data); break;
+                        case FP_UPDATETYPE_PTR_POSITION: DecodePtrPosition(s, u, data); break;
+                        case FP_UPDATETYPE_PTR_CACHED: DecodePtrCached(s, u, data); break;
+                        case FP_UPDATETYPE_PTR_NULL: s.Pointer.OnPtrNull(); break;
+                        case FP_UPDATETYPE_PTR_DEFAULT: s.Pointer.OnPtrDefault(); break;
+                        case FP_UPDATETYPE_PTR_COLOR: s.Pointer.OnPtrShape(data, hasXorBpp: false); break;
+                        case FP_UPDATETYPE_PTR_NEW: s.Pointer.OnPtrShape(data, hasXorBpp: true); break;
                         case FP_UPDATETYPE_SURFCMDS: DecodeSurfCmds(u, data); break;
                         case FP_UPDATETYPE_SYNCHRONIZE: break; // empty body
                         default: if (data.Length > 0) u.FieldHex("data", data); break;
@@ -131,15 +135,25 @@ internal static class RdpFastPath
         u.Field("rectangles", arr);
     }
 
-    private static void DecodePtrPosition(Node u, ReadOnlySpan<byte> data)
+    private static void DecodePtrPosition(RdpSession s, Node u, ReadOnlySpan<byte> data)
     {
         var c = new Cur(data);
-        if (c.Remaining >= 4) u.Field("x", c.U16le()).Field("y", c.U16le());
+        if (c.Remaining >= 4)
+        {
+            int x = c.U16le(), y = c.U16le();
+            u.Field("x", x).Field("y", y);
+            s.Pointer.OnPtrPosition(x, y);
+        }
     }
-    private static void DecodePtrCached(Node u, ReadOnlySpan<byte> data)
+    private static void DecodePtrCached(RdpSession s, Node u, ReadOnlySpan<byte> data)
     {
         var c = new Cur(data);
-        if (c.Remaining >= 2) u.Field("cacheIndex", c.U16le());
+        if (c.Remaining >= 2)
+        {
+            int idx = c.U16le();
+            u.Field("cacheIndex", idx);
+            s.Pointer.OnPtrCached(idx);
+        }
     }
 
     // SURFCMDS: a sequence of TS_SURFCMD; cmdType(2) then a body. Most relevant is SET_SURFACE_BITS (0x01)
@@ -184,7 +198,7 @@ internal static class RdpFastPath
     private static string FragName(int f) => f switch { 0 => "SINGLE", 1 => "LAST", 2 => "FIRST", 3 => "NEXT", _ => f.ToString() };
 
     // ---- input: numEvents events ----
-    private static void DecodeInput(Node root, byte fpHeader, ReadOnlySpan<byte> body)
+    private static void DecodeInput(RdpSession s, Node root, byte fpHeader, ReadOnlySpan<byte> body)
     {
         int numEvents = (fpHeader >> 2) & 0xf;
         root.Field("numEvents", numEvents == 0 ? "(in body)" : (JsonNode?)numEvents);
@@ -221,6 +235,7 @@ internal static class RdpFastPath
                         int pf = c.U16le(); int x = c.U16le(); int y = c.U16le();
                         ev.Field("pointerFlags", "0x" + pf.ToString("X")).Field("x", x).Field("y", y)
                           .Field("decode", MouseFlags(pf));
+                        s.Pointer.OnMouseInput(pf, x, y);
                     }
                     break;
                 case 0x3: // SYNC (toggle keys) — eventFlags carry the toggle state, no extra bytes

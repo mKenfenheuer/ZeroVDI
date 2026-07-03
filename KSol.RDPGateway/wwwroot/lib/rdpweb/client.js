@@ -1166,23 +1166,65 @@ Client.prototype.handlePointer = function (header, r) {
     PTR_LOG("unhandled pointer update");
 };
 
+// Crop an ImageData to the bounding box of its non-transparent pixels. RDP cursor bitmaps
+// are fixed-size frames (32x32/96x96) that are mostly transparent padding; browsers revert
+// a custom CSS cursor to the OS default whenever the cursor IMAGE would extend past the
+// viewport edge (anti-cursor-spoofing), so the padding created a dead zone of default
+// cursor along the bottom/right edges. Cropping to the visible glyph shrinks that zone to
+// the glyph itself. Returns {img, x, y} with the crop origin, or null if fully transparent.
+function cropImageDataToOpaqueBounds(ctx, img) {
+    const w = img.width, h = img.height, d = img.data;
+    let minX = w, minY = h, maxX = -1, maxY = -1;
+    for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+            if (d[(y * w + x) * 4 + 3] !== 0) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+        }
+    }
+    if (maxX < 0) return null;
+    const cw = maxX - minX + 1, ch = maxY - minY + 1;
+    if (cw === w && ch === h) return { img: img, x: 0, y: 0 };
+    const out = ctx.createImageData(cw, ch);
+    for (let y = 0; y < ch; y++) {
+        const src = ((y + minY) * w + minX) * 4;
+        out.data.set(d.subarray(src, src + cw * 4), y * cw * 4);
+    }
+    return { img: out, x: minX, y: minY };
+}
+
 // Build a CSS cursor from a decoded pointer bitmap and cache it by index, so PTR_CACHED
 // can re-select it later. Shared by PTR_NEW and PTR_COLOR.
 Client.prototype._cachePointer = function (u, kind) {
-    // Size the cache canvas to this pointer. RDP pointers are no longer assumed to be
-    // 32x32 — large-pointer capable hosts send up to 96x96 (e.g. the Windows text I-beam).
-    // Resizing also clears the canvas, so stale pixels never bleed through.
-    if (this.pointerCacheCanvas.width !== u.width || this.pointerCacheCanvas.height !== u.height) {
-        this.pointerCacheCanvas.width = u.width;
-        this.pointerCacheCanvas.height = u.height;
-    } else {
-        this.pointerCacheCanvasCtx.clearRect(0, 0, u.width, u.height);
-    }
-    const img = u.getImageData(this.pointerCacheCanvasCtx);
-    if (!img) {
+    const full = u.getImageData(this.pointerCacheCanvasCtx);
+    if (!full) {
         PTR_LOG(kind + " decode failed bpp=" + u.xorBpp + " " + u.width + "x" + u.height +
             " lenXor=" + u.lengthXorMask + " lenAnd=" + u.lengthAndMask + " (keeping current cursor)");
         return;
+    }
+    const crop = cropImageDataToOpaqueBounds(this.pointerCacheCanvasCtx, full);
+    if (!crop) {
+        // Fully transparent bitmap: the host means "hide the pointer".
+        PTR_LOG(kind + " idx=" + u.cacheIndex + " fully transparent -> null cursor");
+        this._setCursorClass("pointer-cache-null");
+        return;
+    }
+    // Hotspot moves with the crop origin; it may legitimately sit in cropped-away padding,
+    // so clamp it into the cropped image (CSS requires the hotspot inside the image).
+    const img = crop.img;
+    const hotX = Math.min(Math.max(u.x - crop.x, 0), img.width - 1);
+    const hotY = Math.min(Math.max(u.y - crop.y, 0), img.height - 1);
+
+    // Size the cache canvas to the cropped pointer (resizing also clears it, so stale
+    // pixels never bleed through).
+    if (this.pointerCacheCanvas.width !== img.width || this.pointerCacheCanvas.height !== img.height) {
+        this.pointerCacheCanvas.width = img.width;
+        this.pointerCacheCanvas.height = img.height;
+    } else {
+        this.pointerCacheCanvasCtx.clearRect(0, 0, img.width, img.height);
     }
     this.pointerCacheCanvasCtx.putImageData(img, 0, 0);
     // PNG, not WebP: lossy WebP (which toDataURL produces) drops or flattens the alpha
@@ -1197,12 +1239,17 @@ Client.prototype._cachePointer = function (u, kind) {
     }
     const style = document.createElement("style");
     const className = "pointer-cache-" + u.cacheIndex;
-    style.innerHTML = "." + className + " * {cursor:url(\"" + url + "\") " + u.x + " " + u.y + ", auto !important;}";
+    // Target both the classed element and everything inside it, with !important, so
+    // interactive elements' own cursor rules (e.g. buttons' cursor:pointer) cannot
+    // override the session cursor while it is active.
+    style.innerHTML = "." + className + ", ." + className +
+        " * {cursor:url(\"" + url + "\") " + hotX + " " + hotY + ", auto !important;}";
     document.getElementsByTagName("head")[0].appendChild(style);
     this.pointerCache[u.cacheIndex] = style;
     this._setCursorClass(className);
     PTR_LOG(kind + " cached idx=" + u.cacheIndex + " bpp=" + u.xorBpp + " " +
-        u.width + "x" + u.height + " hot=" + u.x + "," + u.y);
+        u.width + "x" + u.height + " cropped=" + img.width + "x" + img.height +
+        "+" + crop.x + "+" + crop.y + " hot=" + hotX + "," + hotY);
 };
 
 // ---- input ---------------------------------------------------------------------------------------

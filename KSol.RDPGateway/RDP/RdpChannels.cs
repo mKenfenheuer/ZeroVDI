@@ -568,7 +568,7 @@ internal static class RdpChannels
                 break;
             case 0x000c: // END_FRAME
                 if (c.Remaining >= 4) p.Field("frameId", c.U32le());
-                if (s.Media != null && s.GfxCompositor.HasProgressive) s.GfxCompositor.OnEndFrame(s.Media, s.GfxFrameTs != 0 ? s.GfxFrameTs : s.ElapsedMs);
+                if (s.Media != null && s.GfxCompositor.HasProgressive) s.GfxCompositor.OnEndFrame(s.Media, s.GfxFrameTs != 0 ? s.GfxFrameTs : s.ElapsedMs, s.Pointer);
                 break;
             case 0x000d: // FRAME_ACKNOWLEDGE
                 if (c.Remaining >= 12) p.Field("queueDepth", "0x" + c.U32le().ToString("X")).Field("frameId", c.U32le()).Field("totalFramesDecoded", c.U32le());
