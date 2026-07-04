@@ -1066,7 +1066,9 @@ Client.prototype.handleBitmap = function (r) {
 
         const ok = Module.ccall("RleDecompress", "number",
             ["number", "number", "number", "number"],
-            [inputPtr, bitmapData.bitmapLength, outputPtr, rowDelta]);
+            // srcBytes.length, NOT bitmapData.bitmapLength: when a TS_CD_HEADER is present,
+            // bitmapLength includes its 8 bytes and would make the decoder run past the input.
+            [inputPtr, srcBytes.length, outputPtr, rowDelta]);
         if (!ok) {
             Module._free(inputPtr);
             Module._free(padded);
