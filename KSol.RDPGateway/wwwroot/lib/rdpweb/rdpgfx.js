@@ -540,87 +540,59 @@ RdpGfx.prototype._decodeClear = function (surfaceId, surf, rect, data) {
     this._afterSurfaceUpdate(surfaceId, surf, [rect]);
 };
 
-// Called by the H264 decoder when a VideoFrame is ready. The decoded frame is the FULL surface picture.
-//
-// IMPORTANT: do NOT use ctx.drawImage(videoFrame) — in some browsers (observed: Firefox) drawing a
-// decoded H.264 VideoFrame straight to a 2D canvas yields ALL BLACK (the YUV→RGB / color-space step is
-// skipped). Instead we copyTo() the frame's pixels into an RGBA buffer (the browser does the conversion)
-// and putImageData them onto the surface canvas. copyTo is async, so the surface update + output paint
-// happen in the promise continuation.
 RdpGfx.prototype.onDecodedFrame = function (surfaceId, frame, regions) {
     const surf = this.surfaces[surfaceId];
-    if (!surf) { if (frame.close) frame.close(); return; }
-    const self = this;
-    // copyTo() produces the frame's VISIBLE rect (coded size minus H.264 crop/16-alignment), so the
-    // RGBA buffer stride is visibleRect.width, NOT codedWidth. Region rects from the metablock are in
-    // visible-frame coordinates. Fall back to coded size if visibleRect is absent.
-    const vr = frame.visibleRect || { x: 0, y: 0, width: frame.codedWidth, height: frame.codedHeight };
-    const fw = frame.codedWidth;
-    const fh = frame.codedHeight;
-    const cw = Math.min(fw, surf.width), ch = Math.min(fh, surf.height);
-
-    // DEBUG: draw the decoded VideoFrame STRAIGHT to the visible output canvas, bypassing the offscreen
-    // surface + bitmap machinery, so we can see with our own eyes whether the frame has content.
-    // Enable with window.RDP_GFX_DEBUG_DIRECT=1.
-    if (typeof window !== "undefined" && window.RDP_GFX_DEBUG_DIRECT && this.cb.onDirectFrame) {
-        this.cb.onDirectFrame(frame, surfaceId, this.outputMap[surfaceId]);
+    if (!surf) {
+        if (frame.close) frame.close();
         return;
     }
 
-    // Render the decoded frame via VideoFrame.copyTo() into an explicit RGBA CPU buffer, then
-    // putImageData per region rect. WHY copyTo and not drawImage/createImageBitmap: in Firefox a
-    // GPU-backed decoded H.264 VideoFrame composited to a 2D canvas yields ALL BLACK (observed here:
-    // fmt=BGRX, nonBlack=0/4111360 via the createImageBitmap path). copyTo with an EXPLICIT
-    // { format: "RGBA" } forces the browser to read the frame back to CPU and do the BGRX/YUV→RGBA
-    // conversion into a buffer we own — the reliable path. (An earlier copyTo attempt got "collapsed"
-    // pixels because it copied in the frame's NATIVE layout and misread it as RGBA; specifying the
-    // output format is the fix.)
-    //
-    // CRITICAL ([MS-RDPEGFX] AVC420 / FreeRDP yuv420_context_decode): the decoder emits a FULL-surface
-    // frame, but only the metablock region rects carry valid pixels for THIS update; a P-frame leaves
-    // non-dirty areas black/skip. So we putImageData ONLY the region rects onto the persistent surface
-    // (whole frame when there are no regions, e.g. a covering keyframe).
-    const rects = (regions && regions.length)
-        ? regions
-        : [{ left: 0, top: 0, right: cw, bottom: ch }];
-    const paintRgba = function (rgba) {
+    const self = this;
+
+    const cw = frame.codedWidth;
+    const ch = frame.codedHeight;
+
+    if (!cw || !ch) {
+        if (frame.close) frame.close();
+        return;
+    }
+
+    const paintFrame = function (bitmap) {
         try {
-            for (const rc of rects) {
-                const sl = Math.max(0, rc.left), st = Math.max(0, rc.top);
-                const sr = Math.min(cw, rc.right), sb = Math.min(ch, rc.bottom);
-                const w = sr - sl, h = sb - st;
-                if (w <= 0 || h <= 0) continue;
-                // Extract this rect's rows from the full-frame RGBA buffer (stride = fw*4).
-                const sub = new Uint8ClampedArray(w * h * 4);
-                for (let row = 0; row < h; row++) {
-                    const srcOff = ((st + row) * fw + sl) * 4;
-                    sub.set(rgba.subarray(srcOff, srcOff + w * 4), row * w * 4);
-                }
-                surf.ctx.putImageData(new ImageData(sub, w, h), sl, st);
-            }
-            self._afterSurfaceUpdate(surfaceId, surf, rects);
+            // Draw full frame (NO RGBA extraction, NO stride risk)
+            surf.ctx.drawImage(bitmap, 0, 0, cw, ch);
+
+            self._afterSurfaceUpdate(surfaceId, surf, [
+                { left: 0, top: 0, right: cw, bottom: ch }
+            ]);
+
         } catch (e) {
-            self._log("rdpgfx: H264 paint threw: " + (e && e.message || e));
+            self._log("rdpgfx: bitmap paint failed: " + (e && e.message || e));
         } finally {
+            if (bitmap && bitmap.close) bitmap.close();
             if (frame.close) frame.close();
         }
     };
-    // copyTo into RGBA. allocationSize/copyTo with {format:"RGBA"} are widely supported; if copyTo
-    // rejects (older impls), fall back to the createImageBitmap path.
-    let rgba;
-    try {
-        rgba = new Uint8ClampedArray(fw * fh * 4);
-    } catch (e) { rgba = null; }
-    if (rgba && frame.copyTo) {
-        frame.copyTo(rgba, { format: "RGBA" }).then(function () {
-            paintRgba(rgba);
-        }).catch(function (e) {
-            self._log("rdpgfx: H264 copyTo(RGBA) failed: " + (e && e.message || e) + " — trying bitmap");
-            self._paintViaBitmap(surfaceId, surf, frame, rects, cw, ch);
-        });
+
+    // Primary safe path for Safari/iOS
+    if (typeof createImageBitmap === "function") {
+        createImageBitmap(frame)
+            .then(paintFrame)
+            .catch(function (e) {
+                self._log("rdpgfx: createImageBitmap failed: " + (e && e.message || e));
+                if (frame.close) frame.close();
+            });
         return;
     }
-    self._paintViaBitmap(surfaceId, surf, frame, rects, cw, ch);
+
+    // Last fallback (desktop-ish path)
+    try {
+        surf.ctx.drawImage(frame, 0, 0, cw, ch);
+    } catch (e) {
+        self._log("rdpgfx: drawImage(frame) failed: " + (e && e.message || e));
+    } finally {
+        if (frame.close) frame.close();
+    }
 };
 
 // Fallback render path: createImageBitmap(frame) → drawImage per region rect. Used only when copyTo is
