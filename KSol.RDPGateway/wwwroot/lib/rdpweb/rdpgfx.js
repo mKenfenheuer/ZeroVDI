@@ -555,7 +555,8 @@ RdpGfx.prototype.onDecodedFrame = function (surfaceId, frame, regions) {
     // RGBA buffer stride is visibleRect.width, NOT codedWidth. Region rects from the metablock are in
     // visible-frame coordinates. Fall back to coded size if visibleRect is absent.
     const vr = frame.visibleRect || { x: 0, y: 0, width: frame.codedWidth, height: frame.codedHeight };
-    const fw = vr.width, fh = vr.height;
+    const fw = frame.codedWidth;
+    const fh = frame.codedHeight;
     const cw = Math.min(fw, surf.width), ch = Math.min(fh, surf.height);
 
     // DEBUG: draw the decoded VideoFrame STRAIGHT to the visible output canvas, bypassing the offscreen
