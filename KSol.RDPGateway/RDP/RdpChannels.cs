@@ -597,8 +597,10 @@ internal static class RdpChannels
                     int surfaceId2 = c.U16le(); p.Field("surfaceId", surfaceId2);
                     int codecId = c.U16le();
                     p.Field("codecId", "0x" + codecId.ToString("X4") + " " + GfxCodec(codecId));
-                    p.Field("codecContextId", c.U32le()).Field("pixelFormat", "0x" + c.U8().ToString("X2"));
+                    p.Field("codecContextId", c.U32le()).Field("pixelFormat", "0x" + c.U8().ToString("X2"));                 // bitmapDataLength (4 bytes, [MS-RDPEGFX] 2.2.2.2) — the codec bitstream length.
+                    long bitmapDataLen = c.Remaining >= 4 ? c.U32le() : 0;
                     var bitstream = c.Rest();
+                    if (bitmapDataLen > 0 && bitmapDataLen <= bitstream.Length) bitstream = bitstream[..(int)bitmapDataLen];
                     // RemoteFX Progressive (0x0009) / V2 (0x000d): decode + composite server-side for recording.
                     if (s.Media != null && (codecId == 0x0009 || codecId == 0x000d) && bitstream.Length > 0)
                     {
