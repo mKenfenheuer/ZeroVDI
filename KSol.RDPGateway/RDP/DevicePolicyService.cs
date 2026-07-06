@@ -61,6 +61,7 @@ public sealed class DevicePolicyService
             Camera = DevicePolicy.Clamp(p.Camera, requested.Camera),
             // Display/performance are not policy-controlled; pass through unchanged.
             GfxMode = requested.GfxMode,
+            HiDpi = requested.HiDpi,
             PerformanceFlags = requested.PerformanceFlags,
         };
     }

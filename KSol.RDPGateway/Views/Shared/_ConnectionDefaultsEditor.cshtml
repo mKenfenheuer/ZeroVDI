@@ -67,6 +67,16 @@
                 <option value="avc444" selected="@(Model.GfxMode == "avc444")">GFX — H.264 (AVC444), fallback ClearCodec</option>
             </select>
         </div>
+
+        <label class="flex items-center gap-2 text-sm cursor-pointer pt-1">
+            <input class="form-check" type="checkbox" name="@Name("HiDpi")" value="true" @(Model.HiDpi ? "checked" : "") />
+            <input type="hidden" name="@Name("HiDpi")" value="false" />
+            <span>HiDPI (native resolution)</span>
+        </label>
+        <p class="text-xs text-muted-foreground">
+            Render at the display's full pixel density — crisp on Retina/HiDPI screens. Off streams less
+            data and is faster; default off.
+        </p>
     </div>
 
     <div class="space-y-2">

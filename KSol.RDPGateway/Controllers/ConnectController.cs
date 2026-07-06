@@ -126,6 +126,7 @@ public class ConnectController : Controller
                 Microphone = req.Microphone,
                 Camera = req.Camera,
                 GfxMode = string.IsNullOrEmpty(req.GfxMode) ? "avc420" : req.GfxMode,
+                HiDpi = req.HiDpi,
                 PerformanceFlags = req.PerformanceFlags,
             });
         }
@@ -188,5 +189,6 @@ public class SaveConnectionRequest
     public bool Microphone { get; set; } = true;
     public bool Camera { get; set; } = true;
     public string? GfxMode { get; set; }
+    public bool HiDpi { get; set; }
     public int PerformanceFlags { get; set; }
 }

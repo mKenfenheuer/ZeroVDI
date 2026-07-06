@@ -407,6 +407,15 @@
                             </select>
                         </div>
 
+                        <label class="flex items-center gap-2 text-sm cursor-pointer pt-2">
+                            <input class="form-check" type="checkbox" id="opt-hidpi" checked="@(defaults?.HiDpi ?? false)" />
+                            <span>HiDPI (native resolution)</span>
+                        </label>
+                        <p class="text-xs text-muted-foreground">
+                            Render at your display's full pixel density for a crisp picture on Retina/HiDPI
+                            screens. Off is faster (less data to stream); default off.
+                        </p>
+
                         <div class="pt-1 text-xs font-medium text-muted-foreground">Visual quality</div>
                         @* Performance flags. Checked = the named eye-candy / quality feature is ON.
                            Defaults below favour better visuals (font smoothing + composition, all
@@ -504,6 +513,7 @@
         // gateway also has the credentials for NLA, so client.js must NOT send a credentials frame.
         window.RDP_AUTOCONNECT = @(autoConnect ? "true" : "false");
         window.RDP_DEFAULT_PERF = @(defaults?.PerformanceFlags ?? 0);
+        window.RDP_DEFAULT_HIDPI = @((defaults?.HiDpi ?? false) ? "true" : "false");
         window.RDP_RESOURCE_ID = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(resourceId));
     </script>
     <script>
@@ -688,6 +698,11 @@
                 }
                 window.RDP_GFX_MODE = gfxMode;
 
+                // HiDPI: render at the panel's native device-pixel resolution (crisp on Retina) vs. the
+                // logical CSS size (cheaper). Read from the popup checkbox.
+                var hidpiCb = document.getElementById("opt-hidpi");
+                var hiDpi = !!(hidpiCb && hidpiCb.checked);
+
                 // Optionally persist credentials / settings to this user's authorization (best-effort,
                 // fire-and-forget so it never blocks the connect). The server stores credentials
                 // encrypted; settings become this resource's connect defaults for the user.
@@ -701,7 +716,7 @@
                         audio: document.getElementById("opt-audio").checked,
                         clipboard: document.getElementById("opt-clipboard").checked,
                         microphone: micOn, camera: camOn,
-                        gfxMode: gfxMode, performanceFlags: perf
+                        gfxMode: gfxMode, hiDpi: hiDpi, performanceFlags: perf
                     };
                     fetch("/connect/" + encodeURIComponent(window.RDP_RESOURCE_ID) + "/save", {
                         method: "POST",
@@ -712,7 +727,7 @@
 
                 // Pick a desktop resolution that fills the visible area in *device* pixels (crisp on
                 // HiDPI), bake it into the handshake by sizing the canvas before connecting.
-                var size = client.chooseDesktopSize(screenWrap);
+                var size = client.chooseDesktopSize(screenWrap, hiDpi);
                 client.applyDesktopSize(screenWrap, size);
                 client.connect({ user: user, password: pass, domain: domain, performanceFlags: perf });
             });

@@ -59,12 +59,20 @@ Client.prototype._status = function (status, message) { if (this.statusCb) this.
 //
 // RDP desktop dimensions must be even (bitmap rows are 16bpp; widths are safest as multiples of 4),
 // and are clamped to the [MS-RDPBCGR] valid range (200..8192 px per axis for typical hosts).
-Client.prototype.chooseDesktopSize = function (wrapEl) {
+Client.prototype.chooseDesktopSize = function (wrapEl, hiDpi) {
     // Match the remote desktop resolution to the console panel size in DEVICE pixels (CSS × dpr), so the
     // host's framebuffer is 1:1 with the physical display — crisp, no browser upscaling. The display DPI
     // is ALSO carried as the RDP DesktopScaleFactor (see _scaleForSession / the CS_CORE handshake) so
     // Windows sizes its UI correctly: e.g. a 200% Retina panel gets a 2560x1606 desktop @ 200% scale.
-    const dpr = window.devicePixelRatio || 1;
+    //
+    // When hiDpi is off (the default — better performance), we ignore devicePixelRatio and request the
+    // desktop at the panel's LOGICAL CSS size (scale factor 100). The framebuffer is then upscaled to
+    // fit the panel by _fit(), trading crispness on HiDPI panels for streaming ~1/dpr² the pixels.
+    // The flag is passed explicitly at connect (from the console popup) and remembered as _hiDpi so
+    // later live resizes (requestResize/maybeResize, which call without it) reuse the session's choice.
+    if (hiDpi === undefined) hiDpi = !!this._hiDpi;
+    this._hiDpi = !!hiDpi;
+    const dpr = hiDpi ? (window.devicePixelRatio || 1) : 1;
     const cssW = Math.max(1, Math.floor(wrapEl.clientWidth));
     const cssH = Math.max(1, Math.floor(wrapEl.clientHeight));
     let w = Math.round(cssW * dpr);

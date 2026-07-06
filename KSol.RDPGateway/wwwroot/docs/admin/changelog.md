@@ -7,6 +7,21 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.11] — 2026-07-06 — Web console HiDPI is now an opt-in setting
+
+### Added
+- **HiDPI (native resolution) toggle for the web console.** The console previously always requested the
+  remote desktop at the panel's full device-pixel resolution (CSS × `devicePixelRatio`) with a matching
+  RDP DesktopScaleFactor — crisp on Retina/HiDPI screens, but a 2× panel streams ~4× the pixels. HiDPI
+  is now a setting, **off by default** for better performance: with it off the desktop is requested at
+  the logical CSS size (scale factor 100) and upscaled to fit the panel. The choice is available in the
+  console **Session options** popup, persists via *Remember settings*, and is honoured on later live
+  resolution changes within the session.
+  - Configurable as a starting default in the admin resource **connection defaults** (resource-wide and
+    per-(user, resource) override) via the shared connection-defaults editor.
+
+---
+
 ## [0.6.10] — 2026-07-06 — Connectors: reach RDP hosts and Proxmox clusters behind NAT
 
 ### Added

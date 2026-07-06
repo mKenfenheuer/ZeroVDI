@@ -31,6 +31,15 @@ public class ConnectionDefaults
     public string GfxMode { get; set; } = "avc420";
 
     /// <summary>
+    /// Render the remote desktop at the panel's native device-pixel resolution with a matching RDP
+    /// DesktopScaleFactor (crisp, 1:1 on HiDPI/Retina displays). When off (the default), the desktop is
+    /// requested at the logical CSS size (scale factor 100) — coarser on HiDPI panels but noticeably
+    /// cheaper to encode/transport/decode, since a 2× panel otherwise streams 4× the pixels.
+    /// Maps to the "HiDPI (native resolution)" checkbox.
+    /// </summary>
+    public bool HiDpi { get; set; } = false;
+
+    /// <summary>
     /// The assembled RDP ExtendedInfoPacket performanceFlags bitmask (the value the editors build from
     /// the per-flag checkboxes). Default = all visual features on: ENABLE_FONT_SMOOTHING (0x80) |
     /// ENABLE_DESKTOP_COMPOSITION (0x100), with every DISABLE_* eye-candy bit cleared (so wallpaper,
