@@ -6,7 +6,12 @@ using KSol.ZeroVDI.Connector;
 //   connector                                                              → run (default)
 //
 // Config lives at ~/.zerovdi-connector/config.json (override with ZEROVDI_CONNECTOR_HOME). Environment
-// fallbacks: ZEROVDI_URL, ZEROVDI_REGISTRATION_TOKEN.
+// configuration (used by the Docker image, which persists no state):
+//   ZEROVDI_URL                 gateway base URL (https://…)
+//   ZEROVDI_AUTH_TOKEN          long-lived auth token → run stateless, no config file needed
+//   ZEROVDI_REGISTRATION_TOKEN  one-time token → self-enroll on first boot (persists to config)
+//   ZEROVDI_CONNECTOR_ID        optional, informational when injecting an auth token
+//   ZEROVDI_CONNECTOR_HOME      override config directory
 
 var command = args.Length > 0 && !args[0].StartsWith('-') ? args[0].ToLowerInvariant() : "run";
 var opts = ParseOptions(args);
@@ -44,10 +49,38 @@ switch (command)
 
     case "run":
     {
+        // Prefer an explicit auth token from the environment (ideal for containers running with no persisted
+        // state); otherwise fall back to the on-disk config written at registration. If a URL is supplied
+        // via env but only a registration token is present, self-enroll on first boot.
+        var envUrl = Environment.GetEnvironmentVariable("ZEROVDI_URL");
+        var envAuth = Environment.GetEnvironmentVariable("ZEROVDI_AUTH_TOKEN");
+        var envRegToken = Environment.GetEnvironmentVariable("ZEROVDI_REGISTRATION_TOKEN");
+
         var cfg = AgentConfig.Load();
+        if (!string.IsNullOrWhiteSpace(envAuth) && !string.IsNullOrWhiteSpace(envUrl))
+        {
+            cfg = new AgentConfig
+            {
+                GatewayUrl = envUrl.TrimEnd('/'),
+                AuthToken = envAuth,
+                ConnectorId = Environment.GetEnvironmentVariable("ZEROVDI_CONNECTOR_ID"),
+            };
+        }
+        else if ((cfg == null || string.IsNullOrEmpty(cfg.AuthToken))
+                 && !string.IsNullOrWhiteSpace(envUrl) && !string.IsNullOrWhiteSpace(envRegToken))
+        {
+            try { cfg = await Agent.RegisterAsync(envUrl, envRegToken); }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"self-registration failed: {ex.Message}");
+                return 1;
+            }
+        }
+
         if (cfg == null || string.IsNullOrEmpty(cfg.AuthToken))
         {
             Console.Error.WriteLine("not registered. Run: connector register --url <gateway-url> --token <registration-token>");
+            Console.Error.WriteLine("  (or set ZEROVDI_URL + ZEROVDI_AUTH_TOKEN, or ZEROVDI_URL + ZEROVDI_REGISTRATION_TOKEN)");
             return 2;
         }
         await new Agent(cfg).RunAsync(cts.Token);

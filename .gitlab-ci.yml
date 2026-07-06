@@ -18,6 +18,20 @@ build_amd64_image:
     - docker image push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
     - docker image prune -a
 
+# ZeroVDI connector agent image, published under the /connector path of the registry so it versions
+# alongside the gateway (same short-SHA tag).
+build_connector_image:
+  stage: build
+  tags:
+    - docker
+    - build
+    - shell
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build -f KSol.ZeroVDI.Connector/Dockerfile -t $CI_REGISTRY_IMAGE/connector:$CI_COMMIT_SHORT_SHA .
+    - docker image push $CI_REGISTRY_IMAGE/connector:$CI_COMMIT_SHORT_SHA
+    - docker image prune -a
+
 # Shared deploy logic. Prod and dev run as two isolated compose projects on the
 # same host: distinct project names give each its own pgdata + keys volumes, so
 # the ES256 signing key is generated once per environment and persisted across
@@ -25,6 +39,7 @@ build_amd64_image:
 .deploy_template: &deploy_template
   needs:
     - build_amd64_image
+    - build_connector_image
   stage: deploy
   allow_failure: false
   tags:
@@ -34,15 +49,22 @@ build_amd64_image:
   script:
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
     - export APP_IMAGE=$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+    - export CONNECTOR_IMAGE=$CI_REGISTRY_IMAGE/connector:$CI_COMMIT_SHORT_SHA
     - export COMPOSE_PROJECT="rdpgw"
     - export STACK_NAME="$COMPOSE_PROJECT"
+    # Connector enrollment from PROTECTED/MASKED GitLab CI/CD variables (per environment). Supply
+    # ZEROVDI_URL plus either ZEROVDI_AUTH_TOKEN (stateless) or ZEROVDI_REGISTRATION_TOKEN (first-boot
+    # enroll, persisted to the /mnt/data/rdpgw-connector volume). Exported so compose passes them through.
+    - export ZEROVDI_URL="$ZEROVDI_URL"
+    - export ZEROVDI_AUTH_TOKEN="$ZEROVDI_AUTH_TOKEN"
+    - export ZEROVDI_REGISTRATION_TOKEN="$ZEROVDI_REGISTRATION_TOKEN"
     # Credential-keyring passphrase (encrypts stored VM/IPMI/SSH secrets + the NTLM NtHash at rest).
     # Supplied as a PROTECTED, MASKED GitLab CI/CD variable per environment; never committed. Exported
     # so the compose file passes it through to the container as DataProtection__MasterKeyPassphrase.
     # The app refuses to start in Production if it is unset.
     - 'if [ -z "$DataProtection__MasterKeyPassphrase" ]; then echo "ERROR: DataProtection__MasterKeyPassphrase CI/CD variable is not set"; exit 1; fi'
     - export DataProtection__MasterKeyPassphrase="$DataProtection__MasterKeyPassphrase"
-    - docker compose -p $COMPOSE_PROJECT pull api || true
+    - docker compose -p $COMPOSE_PROJECT pull ksol-rdpgw ksol-rdpgw-connector || true
     - docker compose -p $COMPOSE_PROJECT up -d --remove-orphans
     - docker image prune -af
 

@@ -25,6 +25,9 @@ public sealed class DirectTcpTransport : IHostTransport
         try
         {
             await tcp.ConnectAsync(host, port, ct);
+            // RDP is interactive: disable Nagle so small packets go out immediately instead of being held
+            // ~40ms to coalesce (matches the connector path's tuning).
+            tcp.NoDelay = true;
             // Detect a silently dead/half-open target so the relay doesn't hang forever.
             tcp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
             try

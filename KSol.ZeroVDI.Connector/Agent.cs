@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Net.Sockets;
@@ -164,6 +165,9 @@ public sealed class Agent
         try
         {
             tcp = new TcpClient();
+            // RDP is chatty and interactive: disable Nagle so small packets aren't held back ~40ms waiting
+            // to coalesce. Without this the tunnel feels sluggish under keyboard/mouse traffic.
+            tcp.NoDelay = true;
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(10));
             await tcp.ConnectAsync(msg.Host!, msg.Port, cts.Token);
@@ -221,7 +225,7 @@ public sealed class Agent
 
     private static async Task TcpToWsAsync(NetworkStream tcp, ClientWebSocket ws, CancellationToken ct)
     {
-        var buf = new byte[16 * 1024];
+        var buf = ArrayPool<byte>.Shared.Rent(64 * 1024);
         try
         {
             int n;
@@ -229,11 +233,12 @@ public sealed class Agent
                 await ws.SendAsync(buf.AsMemory(0, n), WebSocketMessageType.Binary, true, ct);
         }
         catch { }
+        finally { ArrayPool<byte>.Shared.Return(buf); }
     }
 
     private static async Task WsToTcpAsync(ClientWebSocket ws, NetworkStream tcp, CancellationToken ct)
     {
-        var buf = new byte[16 * 1024];
+        var buf = ArrayPool<byte>.Shared.Rent(64 * 1024);
         try
         {
             while (ws.State == WebSocketState.Open)
@@ -245,6 +250,7 @@ public sealed class Agent
             }
         }
         catch { }
+        finally { ArrayPool<byte>.Shared.Return(buf); }
     }
 
     private async Task SendAsync(ClientWebSocket ws, SemaphoreSlim sendLock, ConnectorMessage msg, CancellationToken ct)

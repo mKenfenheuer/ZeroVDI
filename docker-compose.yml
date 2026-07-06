@@ -20,3 +20,19 @@ services:
     restart: "always"
     volumes:
       - "/mnt/data/rdpgw:/app/Data"
+
+  ksol-rdpgw-connector:
+    container_name: "ksol-rdpgw-connector"
+    image: ${CONNECTOR_IMAGE}
+    hostname: "rdpgw-connector.ksol.it"
+    environment:
+      - "ASPNETCORE_ENVIRONMENT=Production"
+      # Gateway URL and enrollment come from GitLab CI/CD variables (exported by the deploy job).
+      # Supply either ZEROVDI_AUTH_TOKEN (stateless) or ZEROVDI_REGISTRATION_TOKEN (self-enrolls on
+      # first boot and persists to the mounted volume).
+      - "ZEROVDI_URL=${ZEROVDI_URL}"
+      - "ZEROVDI_AUTH_TOKEN=${ZEROVDI_AUTH_TOKEN}"
+      - "ZEROVDI_REGISTRATION_TOKEN=${ZEROVDI_REGISTRATION_TOKEN}"
+    restart: "always"
+    volumes:
+      - "/mnt/data/rdpgw-connector:/data"

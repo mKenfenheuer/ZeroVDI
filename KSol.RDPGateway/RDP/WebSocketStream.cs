@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Net.WebSockets;
 
 namespace KSol.RDPGateway.RDP;
@@ -35,8 +36,9 @@ public sealed class WebSocketStream : Stream
         if (_pending.Count > 0)
             return DrainPending(buffer.Span);
 
-        // Rent a scratch buffer to receive the next frame; carry any overflow into _pending.
-        var scratch = new byte[Math.Max(buffer.Length, 16 * 1024)];
+        // Rent a pooled scratch buffer to receive the next frame; carry any overflow into _pending and
+        // return the buffer to the pool once fully drained (see DrainPending / Dispose).
+        var scratch = ArrayPool<byte>.Shared.Rent(Math.Max(buffer.Length, 64 * 1024));
         while (true)
         {
             WebSocketReceiveResult result;
@@ -46,12 +48,16 @@ public sealed class WebSocketStream : Stream
             }
             catch (WebSocketException)
             {
+                ArrayPool<byte>.Shared.Return(scratch);
                 return 0; // connection dropped → EOF
             }
-            catch (OperationCanceledException) { throw; }
+            catch (OperationCanceledException) { ArrayPool<byte>.Shared.Return(scratch); throw; }
 
             if (result.MessageType == WebSocketMessageType.Close)
+            {
+                ArrayPool<byte>.Shared.Return(scratch);
                 return 0;
+            }
             if (result.Count == 0)
                 continue; // empty frame; keep waiting
 
@@ -64,9 +70,13 @@ public sealed class WebSocketStream : Stream
     {
         int n = Math.Min(dest.Length, _pending.Count);
         _pending.AsSpan(0, n).CopyTo(dest);
-        _pending = n == _pending.Count
-            ? default
-            : new ArraySegment<byte>(_pending.Array!, _pending.Offset + n, _pending.Count - n);
+        if (n == _pending.Count)
+        {
+            ArrayPool<byte>.Shared.Return(_pending.Array!); // frame fully consumed; recycle the scratch buffer
+            _pending = default;
+        }
+        else
+            _pending = new ArraySegment<byte>(_pending.Array!, _pending.Offset + n, _pending.Count - n);
         return n;
     }
 
@@ -105,6 +115,7 @@ public sealed class WebSocketStream : Stream
                         .GetAwaiter().GetResult();
             }
             catch { }
+            if (_pending.Array != null) { ArrayPool<byte>.Shared.Return(_pending.Array); _pending = default; }
             _ws.Dispose();
             _writeLock.Dispose();
             _completion.TrySetResult();
