@@ -13,7 +13,6 @@ services:
       # from the DataProtection__MasterKeyPassphrase GitLab CI/CD variable, exported by the deploy job.
       # The app refuses to start in Production if this is empty.
       - "DataProtection__MasterKeyPassphrase=${DataProtection__MasterKeyPassphrase}"
-    hostname: "rdpgw.ksol.it"
     image: ${APP_IMAGE}
     ports:
       - "0.0.0.0:8084:80/tcp"
@@ -24,7 +23,6 @@ services:
   ksol-rdpgw-connector:
     container_name: "ksol-rdpgw-connector"
     image: ${CONNECTOR_IMAGE}
-    hostname: "rdpgw-connector.ksol.it"
     environment:
       - "ASPNETCORE_ENVIRONMENT=Production"
       # Gateway URL and enrollment come from GitLab CI/CD variables (exported by the deploy job).
