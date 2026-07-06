@@ -45,6 +45,15 @@ public class ProxmoxBackend
     [Display(Name = "Verify TLS certificate")]
     public bool VerifyTls { get; set; } = false;
 
+    /// <summary>
+    /// Optional connector to tunnel the Proxmox API through, for clusters with no direct line-of-sight from
+    /// the gateway. When set, the backend's <see cref="HttpClient"/> opens its TCP socket over the
+    /// connector's WebSocket data channel (see <c>ProxmoxClient.CreateClient</c>). Null = direct.
+    /// </summary>
+    [Display(Name = "Reach via connector")]
+    public string? ConnectorId { get; set; }
+    public Connector? Connector { get; set; }
+
     // --- Per-backend VDI lifecycle policy ---
 
     /// <summary>Default RDP port assigned to discovered VMs.</summary>

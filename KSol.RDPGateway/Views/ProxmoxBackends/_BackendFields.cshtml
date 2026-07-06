@@ -28,6 +28,20 @@
             <input asp-for="VerifyTls" class="form-check" />
             <span>@Html.DisplayNameFor(m => m.VerifyTls)</span>
         </label>
+        @if (ViewBag.Connectors is List<KSol.RDPGateway.Models.Connector> connectors && connectors.Count > 0)
+        {
+            <div class="md:col-span-2">
+                <label asp-for="ConnectorId" class="form-label"></label>
+                <select asp-for="ConnectorId" class="form-input">
+                    <option value="">Direct (no connector)</option>
+                    @foreach (var c in connectors)
+                    {
+                        <option value="@c.Id">@c.Name</option>
+                    }
+                </select>
+                <p class="text-xs text-muted-foreground mt-1">Tunnel the Proxmox API through a connector when this cluster is not directly reachable.</p>
+            </div>
+        }
     </div>
 </div>
 

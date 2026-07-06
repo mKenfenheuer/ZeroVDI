@@ -176,6 +176,11 @@ public class Program
         // Proxmox VE backend (VDI): settings provider, REST client, session tracking, the gateway
         // resource resolver (GUID -> current host, start-on-connect), and the background services
         // that sync the VM inventory and pause idle VMs.
+        // Connectors: remote proxy agents. The hub tracks live control channels + routes TCP/probe over
+        // them; the path selector picks the fastest route (direct vs. connector) per host at connect time.
+        builder.Services.AddSingleton<RDP.ConnectorHub>();
+        builder.Services.AddSingleton<RDP.ConnectorPathSelector>();
+
         builder.Services.AddSingleton<RDP.ProxmoxBackendProvider>();
         builder.Services.AddSingleton<RDP.ProxmoxClient>();
         builder.Services.AddSingleton<RDP.SessionTracker>();
@@ -405,6 +410,9 @@ public class Program
         app.MapRazorPages()
            .WithStaticAssets()
            .RequireRateLimiting("auth");
+
+        // Connector agent surface: token-authenticated register + control/data WebSockets (not cookie auth).
+        app.MapConnectorAgentEndpoints();
 
         app.Run();
     }

@@ -7,6 +7,31 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.10] — 2026-07-06 — Connectors: reach RDP hosts and Proxmox clusters behind NAT
+
+### Added
+- **Connectors** — a new admin-managed proxy agent (the `KSol.ZeroVDI.Connector` console app) that lets
+  the gateway reach RDP hosts and Proxmox clusters in networks it has no direct line of sight to. A
+  connector is deployed inside the remote network and enrolls GitLab-runner style: an admin mints a
+  one-time **registration token** under **Connectors**, the agent redeems it once for a long-lived auth
+  token (only the token's hash is stored), then holds an **outbound** WebSocket control channel open. No
+  inbound firewall rules or public IP are needed at the remote site.
+  - **Tunnelled RDP** — on connect the gateway opens a per-session data channel over which the connector
+    dials the target and relays plain TCP; the existing X.224 / TLS / CredSSP (NLA) pipeline runs over it
+    unchanged.
+  - **Tunnelled Proxmox API** — a Proxmox backend can be set to *reach via connector*, tunnelling its
+    HTTPS API socket over the connector.
+  - **Fastest-path selection** — for each host the gateway probes the direct route and every eligible
+    connector in parallel and uses the lowest round-trip time (cached briefly). A directly reachable host
+    is unaffected; a connector is used only when it wins. Connectors may optionally declare an allow-scope
+    (host names / CIDRs) limiting which hosts they are considered for.
+  - Connect-readiness now treats a host reachable through a connector as reachable (ICMP, which cannot
+    traverse the tunnel, is no longer required for such hosts).
+  - The **Connectors** admin page shows live online/offline status, last-seen time, and remote address,
+    and can re-issue a connector's registration token.
+
+---
+
 ## [0.6.9] — 2026-07-03 — Web client supports arbitrary-size and alpha pointers
 
 ### Fixed

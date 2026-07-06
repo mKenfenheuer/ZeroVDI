@@ -1,0 +1,92 @@
+@model IEnumerable<KSol.RDPGateway.Models.Connector>
+@{
+    ViewData["Title"] = "Connectors";
+    ViewData["Subtitle"] = "Remote proxy agents that tunnel RDP and HTTP over an outbound WebSocket.";
+    var onlineIds = ViewBag.OnlineIds as IReadOnlySet<string> ?? new HashSet<string>();
+    var newToken = TempData["NewRegistrationToken"] as string;
+    var baseUrl = $"{Context.Request.Scheme}://{Context.Request.Host}";
+}
+
+@section PageActions {
+    <a asp-action="Create" class="btn-primary w-fit"><i class="ri-add-line"></i> Add connector</a>
+}
+
+@if (newToken != null)
+{
+    <div class="card-surface p-5 mb-6 border-success/40 bg-success/5">
+        <h3 class="text-sm font-semibold flex items-center gap-2"><i class="ri-key-2-line text-success"></i> Registration token</h3>
+        <p class="text-sm text-muted-foreground mt-1">
+            Copy this now — it is shown only once. Run the connector agent with it to enroll:
+        </p>
+        <pre class="mt-3 p-3 rounded-md bg-muted text-xs overflow-x-auto"><code>connector register --url @baseUrl --token @newToken</code></pre>
+    </div>
+}
+
+@if (!Model.Any())
+{
+    <div class="flex flex-col items-center justify-center text-center py-16 px-4 card-surface border-dashed">
+        <div class="w-14 h-14 rounded-full bg-muted flex items-center justify-center mb-4">
+            <i class="ri-plug-line text-2xl text-muted-foreground"></i>
+        </div>
+        <h3 class="text-lg font-semibold">No connectors</h3>
+        <p class="text-sm text-muted-foreground mt-1">Add a connector to reach RDP hosts and Proxmox clusters in networks the gateway cannot connect to directly.</p>
+        <a asp-action="Create" class="btn-primary mt-4"><i class="ri-add-line"></i> Add connector</a>
+    </div>
+}
+else
+{
+    <table class="table-surface">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Status</th>
+                <th>Scope</th>
+                <th>Last seen</th>
+                <th class="text-right">Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        @foreach (var c in Model)
+        {
+            var online = onlineIds.Contains(c.Id);
+            <tr>
+                <td class="font-medium">
+                    @c.Name
+                    @if (!c.Enabled) { <span class="badge bg-muted text-muted-foreground ml-1">Disabled</span> }
+                    @if (!string.IsNullOrEmpty(c.Description)) { <div class="text-xs text-muted-foreground font-normal">@c.Description</div> }
+                </td>
+                <td>
+                    @if (!c.IsEnrolled)
+                    {
+                        <span class="badge bg-warning/10 text-warning">Not enrolled</span>
+                    }
+                    else if (online)
+                    {
+                        <span class="badge bg-success/10 text-success">Online</span>
+                    }
+                    else
+                    {
+                        <span class="badge bg-muted text-muted-foreground">Offline</span>
+                    }
+                </td>
+                <td class="text-muted-foreground text-xs">@(string.IsNullOrWhiteSpace(c.AllowScope) ? "any host" : "scoped")</td>
+                <td class="text-muted-foreground text-xs">
+                    @(c.LastSeenUtc?.ToLocalTime().ToString("g") ?? "—")
+                    @if (c.LastRemoteAddress != null) { <div>@c.LastRemoteAddress</div> }
+                </td>
+                <td>
+                    <div class="flex items-center justify-end gap-2">
+                        <form asp-action="Regenerate" asp-route-id="@c.Id" method="post" class="inline"
+                              onsubmit="return confirm('Issue a new registration token? The agent will have to re-register and its current token stops working.');">
+                            @Html.AntiForgeryToken()
+                            <button type="submit" class="btn-outline btn-sm">New token</button>
+                        </form>
+                        <a asp-action="Edit" asp-route-id="@c.Id" class="btn-secondary btn-sm">Edit</a>
+                        <a asp-action="Delete" asp-route-id="@c.Id" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Delete</a>
+                    </div>
+                </td>
+            </tr>
+        }
+        </tbody>
+    </table>
+}

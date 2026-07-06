@@ -16,10 +16,12 @@ public record ProxmoxVm(int VmId, string Node, string Name, string Status);
 /// </summary>
 public class ProxmoxClient
 {
+    private readonly ConnectorHub _connectors;
     private readonly ILogger<ProxmoxClient> _logger;
 
-    public ProxmoxClient(ILogger<ProxmoxClient> logger)
+    public ProxmoxClient(ConnectorHub connectors, ILogger<ProxmoxClient> logger)
     {
+        _connectors = connectors;
         _logger = logger;
     }
 
@@ -27,11 +29,18 @@ public class ProxmoxClient
     {
         if (!backend.IsConfigured) return null;
 
-        var handler = new HttpClientHandler();
+        var handler = new SocketsHttpHandler();
         if (!backend.VerifyTls)
         {
-            handler.ServerCertificateCustomValidationCallback =
-                HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
+            handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
+        }
+        // Tunnel the API TCP socket through a connector when the backend is reached via one. HttpClient
+        // still terminates TLS on top of the returned stream, so cert handling above is unaffected.
+        if (!string.IsNullOrEmpty(backend.ConnectorId))
+        {
+            var connectorId = backend.ConnectorId;
+            handler.ConnectCallback = async (ctx, ct) =>
+                await _connectors.OpenTcpAsync(connectorId, ctx.DnsEndPoint.Host, ctx.DnsEndPoint.Port, ct);
         }
 
         var client = new HttpClient(handler)

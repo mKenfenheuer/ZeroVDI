@@ -29,22 +29,29 @@ public sealed class RdpHostConnection
     private readonly int _port;
     private readonly KerberosAuth? _kerberos;
     private readonly ILogger _logger;
+    private readonly IHostTransport _transport;
 
-    public RdpHostConnection(string host, int port, KerberosAuth? kerberos, ILogger logger)
+    /// <param name="transport">
+    /// How to obtain the raw byte stream to the host. Defaults to <see cref="DirectTcpTransport"/> (a plain
+    /// TCP connect); pass a <see cref="ConnectorTcpTransport"/> to tunnel through a connector.
+    /// </param>
+    public RdpHostConnection(string host, int port, KerberosAuth? kerberos, ILogger logger,
+        IHostTransport? transport = null)
     {
         _host = host;
         _port = port;
         _kerberos = kerberos;
         _logger = logger;
+        _transport = transport ?? new DirectTcpTransport(logger);
     }
 
-    /// <summary>The result of a successful connect: the decrypted RDP stream and the owning TCP client.</summary>
-    public sealed record Connected(SslStream Stream, TcpClient Tcp) : IDisposable
+    /// <summary>The result of a successful connect: the decrypted RDP stream over its underlying transport.</summary>
+    public sealed record Connected(SslStream Stream, Stream Inner) : IDisposable
     {
         public void Dispose()
         {
             try { Stream.Dispose(); } catch { }
-            try { Tcp.Dispose(); } catch { }
+            try { Inner.Dispose(); } catch { }
         }
     }
 
@@ -73,29 +80,16 @@ public sealed class RdpHostConnection
         uint requestedProtocols = PROTOCOL_HYBRID | PROTOCOL_SSL, CancellationToken ct = default,
         byte[]? routingToken = null)
     {
-        var tcp = new TcpClient();
+        Stream netStream;
         try
         {
-            await tcp.ConnectAsync(_host, _port, ct);
-            // Detect a silently dead/half-open target so the relay doesn't hang forever. Keepalive
-            // probes surface a dead peer as a read error, which tears down the relay.
-            tcp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
-            try
-            {
-                tcp.Client.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, 15);
-                tcp.Client.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 5);
-                tcp.Client.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 3);
-            }
-            catch (Exception ex) { _logger.LogDebug(ex, "RDP host: TCP keepalive tuning unavailable"); }
+            netStream = await _transport.ConnectAsync(_host, _port, ct);
         }
         catch (Exception ex)
         {
-            tcp.Dispose();
-            _logger.LogWarning(ex, "RDP host: TCP connect to {Host}:{Port} failed", _host, _port);
+            _logger.LogWarning(ex, "RDP host: connect to {Host}:{Port} failed", _host, _port);
             throw new ConnectException($"cannot reach {_host}:{_port}");
         }
-
-        var netStream = tcp.GetStream();
 
         uint selected;
         try
@@ -104,7 +98,7 @@ public sealed class RdpHostConnection
         }
         catch (Exception ex)
         {
-            tcp.Dispose();
+            netStream.Dispose();
             _logger.LogWarning(ex, "RDP host: X.224 negotiation failed");
             throw new ConnectException("RDP negotiation failed");
         }
@@ -129,7 +123,7 @@ public sealed class RdpHostConnection
         }
         catch (Exception ex)
         {
-            tcp.Dispose();
+            netStream.Dispose();
             _logger.LogWarning(ex, "RDP host: TLS handshake failed");
             throw new ConnectException("TLS handshake failed");
         }
@@ -140,7 +134,7 @@ public sealed class RdpHostConnection
         {
             if (serverCert == null)
             {
-                tcp.Dispose();
+                netStream.Dispose();
                 throw new ConnectException("no server certificate for NLA");
             }
             // CredSSP binds the raw public key (the SubjectPublicKey BIT STRING contents), the same bytes
@@ -151,7 +145,7 @@ public sealed class RdpHostConnection
             var result = await credssp.AuthenticateAsync(ct);
             if (!result.Success)
             {
-                tcp.Dispose();
+                netStream.Dispose();
                 throw new ConnectException(result.Error ?? "NLA authentication failed");
             }
 
@@ -166,21 +160,21 @@ public sealed class RdpHostConnection
                 _logger.LogInformation("RDP host: HYBRID_EX early user auth result = {Result}", authResult);
                 if (authResult != 0)
                 {
-                    tcp.Dispose();
+                    netStream.Dispose();
                     throw new ConnectException($"host denied access (early user auth result {authResult})");
                 }
             }
         }
 
         _logger.LogInformation("RDP host: connected {Host}:{Port} (protocol=0x{Proto:X})", _host, _port, selected);
-        return new Connected(ssl, tcp);
+        return new Connected(ssl, netStream);
     }
 
     /// <summary>
     /// Sends the X.224 Connection Request asking for HYBRID|SSL, reads the Connection Confirm, and
     /// returns the protocol the server selected. Throws on a negotiation failure response.
     /// </summary>
-    private async Task<uint> NegotiateX224Async(NetworkStream net, uint requestedProtocols,
+    private async Task<uint> NegotiateX224Async(Stream net, uint requestedProtocols,
         byte[]? routingToken, CancellationToken ct)
     {
         var neg = new byte[8];

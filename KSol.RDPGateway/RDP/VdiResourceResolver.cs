@@ -20,6 +20,7 @@ public class VdiResourceResolver
     private readonly IpmiClient _ipmi;
     private readonly CredentialProtector _credentials;
     private readonly VdiProvisioningService _provisioning;
+    private readonly ConnectorPathSelector _paths;
     private readonly ILogger<VdiResourceResolver> _logger;
 
     public VdiResourceResolver(
@@ -29,6 +30,7 @@ public class VdiResourceResolver
         IpmiClient ipmi,
         CredentialProtector credentials,
         VdiProvisioningService provisioning,
+        ConnectorPathSelector paths,
         ILogger<VdiResourceResolver> logger)
     {
         _scopeFactory = scopeFactory;
@@ -37,6 +39,7 @@ public class VdiResourceResolver
         _ipmi = ipmi;
         _credentials = credentials;
         _provisioning = provisioning;
+        _paths = paths;
         _logger = logger;
     }
 
@@ -140,7 +143,9 @@ public class VdiResourceResolver
                 Report(new ReadinessProgress(ReadinessPhase.WaitingIp, "Waiting for host to come online…"));
                 while (DateTime.UtcNow < wakeDeadline && !ct.IsCancellationRequested)
                 {
-                    if (await PingAsync(res.IpAddress!))
+                    // ICMP OR the connector-aware RDP-port probe — a connector-only host never answers ICMP
+                    // from the gateway, so an open port is an equally valid "host is up" signal.
+                    if (await PingAsync(res.IpAddress!) || await IsPortOpenAsync(res.IpAddress!, port))
                     {
                         hostUp = true;
                         break;
@@ -304,6 +309,9 @@ public class VdiResourceResolver
         await db.SaveChangesAsync();
     }
 
+    // ICMP reachability, best-effort. A host reached only through a connector cannot be ICMP-pinged from
+    // the gateway, so this is NOT treated as authoritative: callers fall through to the connector-aware
+    // port probe, which is what actually decides readiness.
     private static async Task<bool> PingAsync(string host)
     {
         try
@@ -315,18 +323,8 @@ public class VdiResourceResolver
         catch { return false; }
     }
 
-    private static async Task<bool> IsPortOpenAsync(string host, ushort port)
-    {
-        try
-        {
-            using var client = new TcpClient();
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-            await client.ConnectAsync(host, port, cts.Token);
-            return client.Connected;
-        }
-        catch
-        {
-            return false;
-        }
-    }
+    // Connector-aware port reachability: reachable if the port is open directly OR via any online connector
+    // whose scope admits the host. Delegates to the shared path selector.
+    private async Task<bool> IsPortOpenAsync(string host, ushort port)
+        => await _paths.IsReachableAsync(host, port);
 }

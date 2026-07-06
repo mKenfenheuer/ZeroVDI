@@ -1,6 +1,6 @@
 {
   "name": "ksol-rdpgateway-ui",
-  "version": "1.0.0",
+  "version": "0.6.10",
   "private": true,
   "description": "Tailwind CSS build for the KSol.RDPGateway web UI (Cleopatra design system).",
   "scripts": {

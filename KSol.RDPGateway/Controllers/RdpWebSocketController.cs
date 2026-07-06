@@ -29,6 +29,7 @@ public class RdpWebSocketController : Controller
     private readonly IConfiguration _config;
     private readonly IAuditLogger _audit;
     private readonly ResourceAccessService _access;
+    private readonly ConnectorPathSelector _paths;
     private readonly ILogger<RdpWebSocketController> _logger;
 
     public RdpWebSocketController(
@@ -43,6 +44,7 @@ public class RdpWebSocketController : Controller
         IConfiguration config,
         IAuditLogger audit,
         ResourceAccessService access,
+        ConnectorPathSelector paths,
         ILogger<RdpWebSocketController> logger)
     {
         _context = context;
@@ -56,6 +58,7 @@ public class RdpWebSocketController : Controller
         _config = config;
         _audit = audit;
         _access = access;
+        _paths = paths;
         _logger = logger;
     }
 
@@ -207,6 +210,9 @@ public class RdpWebSocketController : Controller
         // Whether THIS leg armed a continuation (redirect/handover). If so, the recording is NOT finalized
         // here — the next leg continues it. The store callback threads the recording id/base dir + next leg.
         bool continuationArmed = false;
+        // Pick the fastest path to the host (direct vs. any online connector). Falls back to direct when
+        // no connector wins or none is configured, so directly-reachable hosts are unaffected.
+        var hostTransport = await _paths.ResolveTransportAsync(host, port, HttpContext.RequestAborted);
         var session = new RdpRelaySession(socket, host, port, kerberos, _logger, presupplied, recorder,
             pending?.Token, redirectCreds,
             redir =>
@@ -215,7 +221,8 @@ public class RdpWebSocketController : Controller
                 _redirections.Store(userId, id,
                     new RedirectionTokenCache.Pending(redir.LoadBalanceInfo!, redir.Username, redir.Domain, redir.Password,
                         recId, baseDir, leg + 1));
-            });
+            },
+            hostTransport);
 
         await _resolver.OnConnectedAsync(userId, id);
         var sessionStartUtc = DateTime.UtcNow;

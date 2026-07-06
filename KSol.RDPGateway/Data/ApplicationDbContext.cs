@@ -36,6 +36,7 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
     public DbSet<VdiPool> VdiPools { get; set; }
     public DbSet<VdiPoolAssignment> VdiPoolAssignments { get; set; }
     public DbSet<VdiInstance> VdiInstances { get; set; }
+    public DbSet<Connector> Connectors { get; set; }
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -121,6 +122,17 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
                 .OnDelete(DeleteBehavior.SetNull);
         });
 
+        // Connectors: remote proxy agents. Unique name; a Proxmox backend may optionally reach through one
+        // (SetNull so deleting a connector reverts its backends to direct rather than blocking the delete).
+        builder.Entity<Connector>(e =>
+        {
+            e.HasIndex(c => c.Name).IsUnique();
+            e.HasIndex(c => c.AuthTokenHash);
+        });
+        builder.Entity<ProxmoxBackend>()
+            .HasOne(b => b.Connector).WithMany().HasForeignKey(b => b.ConnectorId)
+            .OnDelete(DeleteBehavior.SetNull);
+
         // Encrypt sensitive columns at rest. These hold secrets that must never be plaintext in the DB:
         //  - ApplicationUser.NtHash: unsalted MD4 of the gateway password (offline-crackable / PtH if leaked).
         //  - ProxmoxBackend.ApiTokenSecret: full API credential for the Proxmox cluster.
@@ -131,6 +143,7 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
             var encrypt = new EncryptedStringConverter(_protector);
             builder.Entity<ApplicationUser>().Property(u => u.NtHash).HasConversion(encrypt);
             builder.Entity<ProxmoxBackend>().Property(b => b.ApiTokenSecret).HasConversion(encrypt);
+            builder.Entity<Connector>().Property(c => c.RegistrationToken).HasConversion(encrypt);
         }
     }
 }

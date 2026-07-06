@@ -31,17 +31,24 @@ public class ProxmoxBackendsController : Controller
         return View(await _context.ProxmoxBackends.ToListAsync());
     }
 
+    private async Task PopulateConnectorsAsync()
+        => ViewBag.Connectors = await _context.Connectors.OrderBy(c => c.Name).ToListAsync();
+
     // GET: /admin/backends/create
     [HttpGet("create")]
-    public IActionResult Create() => View(new ProxmoxBackend());
+    public async Task<IActionResult> Create()
+    {
+        await PopulateConnectorsAsync();
+        return View(new ProxmoxBackend());
+    }
 
     // POST: /admin/backends/create
     [HttpPost("create")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Create(
-        [Bind("Name,Host,ApiTokenId,ApiTokenSecret,VerifyTls,DefaultRdpPort,IdleTimeoutHours,PauseAction,StartTimeoutSeconds")] ProxmoxBackend backend)
+        [Bind("Name,Host,ApiTokenId,ApiTokenSecret,VerifyTls,ConnectorId,DefaultRdpPort,IdleTimeoutHours,PauseAction,StartTimeoutSeconds")] ProxmoxBackend backend)
     {
-        if (!ModelState.IsValid) return View(backend);
+        if (!ModelState.IsValid) { await PopulateConnectorsAsync(); return View(backend); }
         _context.Add(backend);
         await _context.SaveChangesAsync();
         return RedirectToAction(nameof(Index));
@@ -53,6 +60,7 @@ public class ProxmoxBackendsController : Controller
     {
         var backend = await _context.ProxmoxBackends.FindAsync(id);
         if (backend == null) return NotFound();
+        await PopulateConnectorsAsync();
         return View(backend);
     }
 
@@ -60,13 +68,13 @@ public class ProxmoxBackendsController : Controller
     [HttpPost("edit/{id:int}")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Edit(int id,
-        [Bind("Id,Name,Host,ApiTokenId,ApiTokenSecret,VerifyTls,DefaultRdpPort,IdleTimeoutHours,PauseAction,StartTimeoutSeconds")] ProxmoxBackend input)
+        [Bind("Id,Name,Host,ApiTokenId,ApiTokenSecret,VerifyTls,ConnectorId,DefaultRdpPort,IdleTimeoutHours,PauseAction,StartTimeoutSeconds")] ProxmoxBackend input)
     {
         if (id != input.Id) return NotFound();
 
         var backend = await _context.ProxmoxBackends.FindAsync(id);
         if (backend == null) return NotFound();
-        if (!ModelState.IsValid) return View(input);
+        if (!ModelState.IsValid) { await PopulateConnectorsAsync(); return View(input); }
 
         backend.Name = input.Name;
         backend.Host = input.Host;
@@ -77,6 +85,7 @@ public class ProxmoxBackendsController : Controller
             backend.ApiTokenSecret = input.ApiTokenSecret;
         }
         backend.VerifyTls = input.VerifyTls;
+        backend.ConnectorId = string.IsNullOrEmpty(input.ConnectorId) ? null : input.ConnectorId;
         backend.DefaultRdpPort = input.DefaultRdpPort;
         backend.IdleTimeoutHours = input.IdleTimeoutHours;
         backend.PauseAction = input.PauseAction;

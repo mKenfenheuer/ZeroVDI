@@ -27,6 +27,7 @@ public sealed class RdpRelaySession
     private readonly byte[]? _routingToken;
     private readonly VmCredentials? _redirectCreds;
     private readonly Action<RdpServerRedirection>? _onRedirect;
+    private readonly IHostTransport? _hostTransport;
     private readonly ILogger _logger;
     private bool _redirected;
     // True once a token-bearing session that the HOST disconnected (GNOME "Remote Login" post-auth
@@ -42,9 +43,10 @@ public sealed class RdpRelaySession
     public RdpRelaySession(WebSocket ws, string host, int port, KerberosAuth? kerberos, ILogger logger,
         VmCredentials? presuppliedCreds = null, IRdpMediaSink? mediaSink = null,
         byte[]? routingToken = null, VmCredentials? redirectCreds = null,
-        Action<RdpServerRedirection>? onRedirect = null)
+        Action<RdpServerRedirection>? onRedirect = null, IHostTransport? hostTransport = null)
     {
         _ws = ws;
+        _hostTransport = hostTransport;
         _host = host;
         _port = port;
         _kerberos = kerberos;
@@ -102,7 +104,7 @@ public sealed class RdpRelaySession
         RdpHostConnection.Connected host;
         try
         {
-            host = await new RdpHostConnection(_host, _port, _kerberos, _logger)
+            host = await new RdpHostConnection(_host, _port, _kerberos, _logger, _hostTransport)
                 .ConnectAsync(creds, ct: ct, routingToken: _routingToken);
             if (_routingToken != null)
                 _logger.LogInformation("RDP relay: reconnected with redirection routing token ({Len}B)", _routingToken.Length);
