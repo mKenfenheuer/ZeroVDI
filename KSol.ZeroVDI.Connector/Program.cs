@@ -20,9 +20,12 @@ switch (command)
     {
         var url = opts.GetValueOrDefault("url") ?? Environment.GetEnvironmentVariable("ZEROVDI_URL");
         var token = opts.GetValueOrDefault("token") ?? Environment.GetEnvironmentVariable("ZEROVDI_REGISTRATION_TOKEN");
+        // Prompt for anything not supplied on the command line (or via env).
+        if (string.IsNullOrWhiteSpace(url)) url = Prompt("Please enter the url: ");
+        if (string.IsNullOrWhiteSpace(token)) token = Prompt("Please enter the registration token: ");
         if (string.IsNullOrWhiteSpace(url) || string.IsNullOrWhiteSpace(token))
         {
-            Console.Error.WriteLine("usage: connector register --url <gateway-url> --token <registration-token>");
+            Console.Error.WriteLine("a gateway URL and registration token are required.");
             return 2;
         }
         try
@@ -54,6 +57,12 @@ switch (command)
     default:
         Console.Error.WriteLine($"unknown command '{command}'. Commands: register, run");
         return 2;
+}
+
+static string Prompt(string label)
+{
+    Console.Write(label);
+    return Console.ReadLine()?.Trim() ?? "";
 }
 
 static Dictionary<string, string> ParseOptions(string[] args)

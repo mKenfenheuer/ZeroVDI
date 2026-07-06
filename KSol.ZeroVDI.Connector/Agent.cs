@@ -22,6 +22,8 @@ public sealed class Agent
     /// <summary>POST /agent/register — exchange a registration token for a long-lived auth token.</summary>
     public static async Task<AgentConfig> RegisterAsync(string gatewayUrl, string registrationToken)
     {
+        if (!Uri.TryCreate(gatewayUrl, UriKind.Absolute, out var u) || u.Scheme != "https")
+            throw new InvalidOperationException("the gateway URL must be https:// — connectors use TLS (wss://) only");
         using var http = new HttpClient { BaseAddress = new Uri(gatewayUrl.TrimEnd('/') + "/") };
         var resp = await http.PostAsJsonAsync("agent/register", new { registrationToken });
         if (!resp.IsSuccessStatusCode)
@@ -62,7 +64,15 @@ public sealed class Agent
     private Uri WsUri(string path)
     {
         var b = new UriBuilder(_config.GatewayUrl.TrimEnd('/') + path);
-        b.Scheme = b.Scheme == "https" ? "wss" : "ws";
+        // Enforce TLS: connectors carry the auth token and relay RDP/API traffic, so the transport must be
+        // encrypted end-to-end. Only wss:// (from an https:// gateway URL) is allowed.
+        if (b.Scheme != "https")
+            throw new InvalidOperationException($"insecure gateway URL '{_config.GatewayUrl}': an https:// URL is required (connections use wss:// only)");
+        b.Scheme = "wss";
+        // Also carry the token in the query: some reverse proxies strip the Authorization header on the
+        // WebSocket upgrade. The gateway accepts either.
+        var tokenParam = "token=" + Uri.EscapeDataString(_config.AuthToken);
+        b.Query = string.IsNullOrEmpty(b.Query) ? tokenParam : b.Query.TrimStart('?') + "&" + tokenParam;
         return b.Uri;
     }
 

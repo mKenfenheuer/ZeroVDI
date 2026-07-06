@@ -74,6 +74,20 @@
                     <label asp-for="Resource.Port" class="form-label">RDP port</label>
                     <input asp-for="Resource.Port" name="Port" type="number" class="form-input @(isProxmox ? "opacity-60" : "")" readonly="@isProxmox" />
                 </div>
+                @if (Model.AvailableConnectors.Count > 0)
+                {
+                    <div class="md:col-span-2">
+                        <label asp-for="Resource.ForcedConnectorId" class="form-label">Force connection through connector</label>
+                        <select asp-for="Resource.ForcedConnectorId" name="ForcedConnectorId" class="form-input">
+                            <option value="">Automatic (fastest of direct / connectors)</option>
+                            @foreach (var c in Model.AvailableConnectors)
+                            {
+                                <option value="@c.Id">@c.Name</option>
+                            }
+                        </select>
+                        <p class="text-xs text-muted-foreground mt-1">Pin this resource to a specific connector instead of letting the gateway pick the fastest path.</p>
+                    </div>
+                }
             </div>
 
             @if (isProxmox)

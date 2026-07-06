@@ -60,12 +60,22 @@ public sealed class ConnectorPathSelector
     public async Task<bool> IsReachableAsync(string host, int port, CancellationToken ct = default)
         => await SelectPathAsync(host, port, ct) != null;
 
+    /// <summary>True if host:port is reachable through the given connector (used when a resource pins one).</summary>
+    public async Task<bool> IsReachableViaConnectorAsync(string connectorId, string host, int port, CancellationToken ct = default)
+        => _hub.IsOnline(connectorId) && await _hub.ProbeAsync(connectorId, host, port, ct) != null;
+
     /// <summary>
-    /// Builds a transport for the chosen path. Returns a <see cref="DirectTcpTransport"/> when no cached
-    /// path is available (best-effort direct) so callers always get a usable transport.
+    /// Builds a transport for the chosen path. When <paramref name="forcedConnectorId"/> is set the resource
+    /// pins its connection to that connector and no RTT race is run. Otherwise returns the fastest path,
+    /// falling back to a <see cref="DirectTcpTransport"/> when nothing wins so callers always get a usable
+    /// transport.
     /// </summary>
-    public async Task<IHostTransport> ResolveTransportAsync(string host, int port, CancellationToken ct = default)
+    public async Task<IHostTransport> ResolveTransportAsync(string host, int port,
+        string? forcedConnectorId = null, CancellationToken ct = default)
     {
+        if (!string.IsNullOrEmpty(forcedConnectorId))
+            return new ConnectorTcpTransport(_hub, forcedConnectorId);
+
         var path = await SelectPathAsync(host, port, ct);
         if (path is { IsDirect: false })
             return new ConnectorTcpTransport(_hub, path.ConnectorId!);

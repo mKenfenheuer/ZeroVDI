@@ -106,7 +106,7 @@ public class VdiResourceResolver
 
             // 1) Check if the host is already reachable (ping + RDP). Fast path when already on.
             var hostUp = await PingAsync(res.IpAddress!);
-            if (hostUp && await IsPortOpenAsync(res.IpAddress!, port))
+            if (hostUp && await IsPortOpenAsync(res.IpAddress!, port, res.ForcedConnectorId))
             {
                 res.PowerState = ResourcePowerState.Running;
                 await db.SaveChangesAsync(ct);
@@ -145,7 +145,7 @@ public class VdiResourceResolver
                 {
                     // ICMP OR the connector-aware RDP-port probe — a connector-only host never answers ICMP
                     // from the gateway, so an open port is an equally valid "host is up" signal.
-                    if (await PingAsync(res.IpAddress!) || await IsPortOpenAsync(res.IpAddress!, port))
+                    if (await PingAsync(res.IpAddress!) || await IsPortOpenAsync(res.IpAddress!, port, res.ForcedConnectorId))
                     {
                         hostUp = true;
                         break;
@@ -160,7 +160,7 @@ public class VdiResourceResolver
             Report(new ReadinessProgress(ReadinessPhase.RdpProbe, "Waiting for remote desktop…"));
             while (DateTime.UtcNow < wakeDeadline && !ct.IsCancellationRequested)
             {
-                if (await IsPortOpenAsync(res.IpAddress!, port))
+                if (await IsPortOpenAsync(res.IpAddress!, port, res.ForcedConnectorId))
                 {
                     res.PowerState = ResourcePowerState.Running;
                     await db.SaveChangesAsync(ct);
@@ -252,7 +252,7 @@ public class VdiResourceResolver
 
             Report(new ReadinessProgress(ReadinessPhase.RdpProbe, "Waiting for remote desktop…"));
             probedRdp = true;
-            if (await IsPortOpenAsync(ip, port))
+            if (await IsPortOpenAsync(ip, port, res.ForcedConnectorId))
                 break;
 
             await Task.Delay(2000, ct);
@@ -324,7 +324,11 @@ public class VdiResourceResolver
     }
 
     // Connector-aware port reachability: reachable if the port is open directly OR via any online connector
-    // whose scope admits the host. Delegates to the shared path selector.
-    private async Task<bool> IsPortOpenAsync(string host, ushort port)
-        => await _paths.IsReachableAsync(host, port);
+    // whose scope admits the host. When the resource pins a connector, only that connector is consulted.
+    private async Task<bool> IsPortOpenAsync(string host, ushort port, string? forcedConnectorId = null)
+    {
+        if (!string.IsNullOrEmpty(forcedConnectorId))
+            return await _paths.IsReachableViaConnectorAsync(forcedConnectorId, host, port);
+        return await _paths.IsReachableAsync(host, port);
+    }
 }

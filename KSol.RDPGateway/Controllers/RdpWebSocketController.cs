@@ -212,7 +212,7 @@ public class RdpWebSocketController : Controller
         bool continuationArmed = false;
         // Pick the fastest path to the host (direct vs. any online connector). Falls back to direct when
         // no connector wins or none is configured, so directly-reachable hosts are unaffected.
-        var hostTransport = await _paths.ResolveTransportAsync(host, port, HttpContext.RequestAborted);
+        var hostTransport = await _paths.ResolveTransportAsync(host, port, resource.ForcedConnectorId, HttpContext.RequestAborted);
         var session = new RdpRelaySession(socket, host, port, kerberos, _logger, presupplied, recorder,
             pending?.Token, redirectCreds,
             redir =>

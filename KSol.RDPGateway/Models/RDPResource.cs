@@ -84,6 +84,15 @@ public class RDPResource
     /// <summary>The RDP (TCP) port on the target. Defaults to 3389.</summary>
     public int Port { get; set; } = 3389;
 
+    /// <summary>
+    /// When set, force this resource's connection through the named connector instead of letting the
+    /// gateway pick the fastest path (direct vs. round-trip-time probing). Useful when the host is only
+    /// reachable through one connector, or to pin traffic to a specific egress. Null = automatic selection.
+    /// </summary>
+    public string? ForcedConnectorId { get; set; }
+    [ForeignKey(nameof(ForcedConnectorId))]
+    public Connector? ForcedConnector { get; set; }
+
     public ResourceSource Source { get; set; } = ResourceSource.Manual;
 
     // --- Proxmox linkage (only meaningful when Source == Proxmox) ---

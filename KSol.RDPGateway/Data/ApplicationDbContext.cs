@@ -132,6 +132,9 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
         builder.Entity<ProxmoxBackend>()
             .HasOne(b => b.Connector).WithMany().HasForeignKey(b => b.ConnectorId)
             .OnDelete(DeleteBehavior.SetNull);
+        builder.Entity<RDPResource>()
+            .HasOne(r => r.ForcedConnector).WithMany().HasForeignKey(r => r.ForcedConnectorId)
+            .OnDelete(DeleteBehavior.SetNull);
 
         // Encrypt sensitive columns at rest. These hold secrets that must never be plaintext in the DB:
         //  - ApplicationUser.NtHash: unsalted MD4 of the gateway password (offline-crackable / PtH if leaked).

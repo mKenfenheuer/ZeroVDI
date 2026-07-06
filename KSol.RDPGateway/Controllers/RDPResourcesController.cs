@@ -157,6 +157,7 @@ namespace KSol.RDPGateway.Controllers
                 Access = access,
                 GrantedGroups = grantedGroups,
                 AvailableGroups = availableGroups,
+                AvailableConnectors = await _context.Connectors.OrderBy(c => c.Name).ToListAsync(),
             };
         }
 
@@ -166,7 +167,7 @@ namespace KSol.RDPGateway.Controllers
         // applied; for Manual resources the address, port and RDP options are editable too.
         [HttpPost("edit/{id}")]
         [ValidateAntiForgeryToken]
-        public async Task<IActionResult> Edit(string id, [Bind("Id,Name,Description,IpAddress,Port,OsType,WakeMethod,WolMacAddress,IpmiHost,IpmiUser,ShutdownMethod,SshUser,ShutdownCommand,WindowsUser")] RDPResource input, string? ipmiPassword, string? sshKey, string? windowsPassword)
+        public async Task<IActionResult> Edit(string id, [Bind("Id,Name,Description,IpAddress,Port,OsType,WakeMethod,WolMacAddress,IpmiHost,IpmiUser,ShutdownMethod,SshUser,ShutdownCommand,WindowsUser,ForcedConnectorId")] RDPResource input, string? ipmiPassword, string? sshKey, string? windowsPassword)
         {
             if (id != input.Id)
             {
@@ -203,6 +204,8 @@ namespace KSol.RDPGateway.Controllers
                     if (!string.IsNullOrEmpty(windowsPassword))
                         existing.ProtectedWindowsPassword = _credentials.Protect(windowsPassword);
                 }
+                // Forced connector applies regardless of source (it pins the network path, not the machine).
+                existing.ForcedConnectorId = string.IsNullOrEmpty(input.ForcedConnectorId) ? null : input.ForcedConnectorId;
                 await _context.SaveChangesAsync();
                 TempData["Status"] = "Resource saved.";
                 return RedirectToAction(nameof(Edit), new { id });
@@ -565,5 +568,7 @@ namespace KSol.RDPGateway.Controllers
         public List<UserGroup> GrantedGroups { get; set; } = new();
         /// <summary>Groups that could be granted this resource.</summary>
         public List<UserGroup> AvailableGroups { get; set; } = new();
+        /// <summary>Connectors that can be pinned as this resource's forced connection path.</summary>
+        public List<Connector> AvailableConnectors { get; set; } = new();
     }
 }

@@ -85,14 +85,22 @@ public static class ConnectorAgentEndpoints
         });
     }
 
-    /// <summary>Resolves the connector from the <c>Authorization: Bearer</c> auth token, or null.</summary>
+    /// <summary>
+    /// Resolves the connector from the <c>Authorization: Bearer</c> auth token, falling back to a
+    /// <c>?token=</c> query parameter. The query fallback matters for the WebSocket endpoints: some reverse
+    /// proxies strip the <c>Authorization</c> header on the HTTP upgrade, so agents pass the token in the
+    /// URL for the control/data channels. Returns null when no valid token is present.
+    /// </summary>
     private static async Task<Connector?> AuthenticateAsync(HttpContext ctx, ApplicationDbContext db)
     {
+        string? token = null;
         var header = ctx.Request.Headers.Authorization.ToString();
         const string prefix = "Bearer ";
-        if (!header.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return null;
-        var token = header[prefix.Length..].Trim();
-        if (token.Length == 0) return null;
+        if (header.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            token = header[prefix.Length..].Trim();
+        if (string.IsNullOrEmpty(token))
+            token = ctx.Request.Query["token"].ToString();
+        if (string.IsNullOrEmpty(token)) return null;
 
         var hash = ConnectorTokens.Hash(token);
         var connector = await db.Connectors.FirstOrDefaultAsync(c => c.AuthTokenHash == hash && c.Enabled);
