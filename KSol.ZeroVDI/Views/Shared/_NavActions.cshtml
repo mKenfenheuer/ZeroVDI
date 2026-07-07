@@ -125,7 +125,7 @@
     {
         var name = User.Identity?.Name ?? "Account";
         var initial = string.IsNullOrEmpty(name) ? "?" : name.Substring(0, 1).ToUpper();
-        var isAdmin = User.IsInRole("Admin");
+        var isAdmin = User.IsInRole("Admin") && !KSol.ZeroVDI.RDP.DesktopClient.IsElectron(Context);
         <!-- User menu -->
         <div class="relative ml-1 sm:ml-2" id="user-dropdown-container">
             <button id="user-avatar-btn" type="button" aria-label="Account"

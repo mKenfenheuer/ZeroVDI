@@ -400,6 +400,10 @@ public class Program
         // MFA but have not enrolled to the authenticator setup page before they can use the app.
         app.UseMiddleware<RDP.MfaEnforcementMiddleware>();
 
+        // The Electron desktop client is console-only; block the admin surface for it (404, same as an
+        // unmapped route) regardless of the user's role.
+        app.UseMiddleware<RDP.DesktopAdminBlockMiddleware>();
+
         app.MapStaticAssets();
         app.MapControllerRoute(
             name: "default",
