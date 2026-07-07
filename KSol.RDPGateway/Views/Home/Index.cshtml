@@ -52,7 +52,8 @@ else
                         <div class="w-10 h-10 rounded-xl bg-primary/10 text-primary flex items-center justify-center flex-shrink-0">
                             <i class="@(item.IsPool ? "ri-stack-line" : "ri-computer-line") text-xl"></i>
                         </div>
-                        <h3 class="font-semibold truncate" title="@resource.Name">@resource.Name</h3>
+                        @{ var displayName = item.PoolName ?? resource.Name; }
+                        <h3 class="font-semibold truncate" title="@displayName">@displayName</h3>
                     </div>
                     @if (item.IsPool)
                     {

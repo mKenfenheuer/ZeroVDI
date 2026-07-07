@@ -7,6 +7,40 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.13] — 2026-07-07 — Dashboard cards show the pool name instead of the generated VM name
+
+### Changed
+- **VDI desktops now display their pool's name on the dashboard, not the clone's generated VM name.**
+  Once a user's pooled desktop is provisioned, its card previously surfaced through the concrete
+  clone resource whose name is an auto-generated VM name (e.g. `pool-user-abc123`). The card now
+  shows the friendly pool name for both the pre-provision pool entry point and the provisioned
+  clone, giving the user a stable, recognisable label. Ordinary (non-pool) resources are unaffected.
+
+---
+
+## [0.6.12] — 2026-07-07 — Web console cursor no longer double-sized on HiDPI panels
+
+### Fixed
+- **HiDPI remote cursor rendered at 2× (or scale×) its intended size.** In HiDPI mode the remote
+  desktop is streamed at the panel's device-pixel resolution, so the host sends pointer bitmaps in
+  device pixels (e.g. a 32 px cursor arrives as 64 px on a 200 % panel). A CSS `cursor: url()` has no
+  size parameter and the browser draws the PNG at its natural pixel size, so the cursor appeared at
+  200 % of its correct on-screen size. The cursor bitmap and its hotspot are now downscaled before
+  export so the pointer renders at its true physical size at any scale.
+  - The downscale ratio is measured directly from the canvas — its backing-store (device-pixel) width
+    ÷ its on-screen CSS width — rather than reading `devicePixelRatio` or assuming a fixed 2×, so it
+    always matches the resolution actually in effect (including after live resolution changes).
+
+### Changed
+- **HiDPI desktop resolution is now derived from the canvas, not `devicePixelRatio`.** Once a session
+  exists, the requested desktop resolution and its RDP DesktopScaleFactor are computed from the canvas's
+  own native/logical ratio, so every live resize reuses the scale the panel is actually rendering at.
+  Even the very first connect (before any canvas is laid out) no longer reads the `devicePixelRatio`
+  property: it measures the panel's true ratio with a CSS `(resolution: …dppx)` media-query probe, which
+  stays correct under browser/OS zoom and fractional scales where the property can be rounded or stale.
+  This removes the class of stalls where a mid-resize `devicePixelRatio` momentarily reading 1 sent a
+  spurious scale change to the host.
+
 ## [0.6.11] — 2026-07-06 — Web console HiDPI is now an opt-in setting
 
 ### Added

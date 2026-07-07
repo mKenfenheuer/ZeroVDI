@@ -72,7 +72,7 @@ Client.prototype.chooseDesktopSize = function (wrapEl, hiDpi) {
     // later live resizes (requestResize/maybeResize, which call without it) reuse the session's choice.
     if (hiDpi === undefined) hiDpi = !!this._hiDpi;
     this._hiDpi = !!hiDpi;
-    const dpr = hiDpi ? (window.devicePixelRatio || 1) : 1;
+    const dpr = hiDpi ? this.panelPixelRatio(wrapEl) : 1;
     const cssW = Math.max(1, Math.floor(wrapEl.clientWidth));
     const cssH = Math.max(1, Math.floor(wrapEl.clientHeight));
     let w = Math.round(cssW * dpr);
@@ -91,6 +91,67 @@ Client.prototype.chooseDesktopSize = function (wrapEl, hiDpi) {
 Client.prototype.scaleForSize = function (size) {
     const ratio = (size && size.logicalWidth) ? (size.width / size.logicalWidth) : (window.devicePixelRatio || 1);
     return this.desktopScaleForDpr(ratio);
+};
+
+// The live native/logical ratio of the canvas: its backing-store (device-pixel) width divided by its
+// on-screen CSS width. This is measured directly from the element after _fit() has laid it out, so it
+// reflects the resolution actually in effect — never a hardcoded 2x or a separately-read
+// devicePixelRatio (which can momentarily drift during resizes). Used to size the CSS cursor so a
+// device-pixel cursor bitmap renders at its correct physical size on HiDPI panels.
+Client.prototype.cursorScaleRatio = function () {
+    const rect = this.canvas.getBoundingClientRect ? this.canvas.getBoundingClientRect() : null;
+    const cssW = rect && rect.width ? rect.width : (parseFloat(this.canvas.style.width) || 0);
+    if (this.canvas.width && cssW) return this.canvas.width / cssW;
+    // Pre-layout fallback: derive from the captured session scale (native/logical baked at connect).
+    if (this._sessionScale && this._sessionScale > 0) return this._sessionScale / 100;
+    return 1;
+};
+
+// The device-pixel ratio to request the HiDPI desktop resolution at. Derived from the CANVAS's own
+// native/logical ratio (cursorScaleRatio) whenever a session already exists — i.e. every live resize
+// reuses the resolution the panel is ACTUALLY rendering at, instead of re-reading window.devicePixelRatio
+// (which can momentarily read 1 mid-resize and send a spurious scale change that stalls the host). Only
+// the very FIRST connect, before any canvas has been sized/laid out, is there no surface to measure —
+// and even then the ratio is measured with a CSS resolution probe (probeDevicePixelRatio), not the raw
+// devicePixelRatio property. The captured _sessionScale is preferred over the probe on reconnects so a
+// reconnect stays on the session's established scale.
+Client.prototype.panelPixelRatio = function (wrapEl) {
+    // A canvas that has already been sized and fitted is the ground truth: measure it directly.
+    if (this.canvas.width && this.canvas.height) {
+        const measured = this.cursorScaleRatio();
+        if (measured > 0) return measured;
+    }
+    if (this._sessionScale && this._sessionScale > 0) return this._sessionScale / 100;
+    // First connect: no canvas to measure yet. Probe the real device-pixel ratio via CSS instead of
+    // trusting the window.devicePixelRatio property.
+    return this.probeDevicePixelRatio();
+};
+
+// Measures the panel's device-pixel ratio with a CSS resolution media query instead of reading the
+// window.devicePixelRatio property. `(resolution: <n>dppx)` matches when the display maps CSS pixels to
+// device pixels at exactly that ratio, so a binary search over `(min-resolution)` converges on the true
+// value — a pure CSS/DOM measurement that stays correct under browser/OS zoom and fractional scales
+// where the devicePixelRatio property can be rounded or stale. Falls back to the property only if
+// matchMedia is unavailable. Cached per instance: the ratio doesn't change within a session.
+Client.prototype.probeDevicePixelRatio = function () {
+    if (this._probedDpr) return this._probedDpr;
+    const fallback = window.devicePixelRatio || 1;
+    if (typeof window.matchMedia !== "function") return (this._probedDpr = fallback);
+
+    // dppx == CSS px per device px inverse; a display at 200% reports resolution 2dppx. Bracket the
+    // search around the property's hint but don't depend on its exact value.
+    let lo = 0.5, hi = Math.max(2, Math.ceil(fallback) + 1);
+    if (!window.matchMedia("(min-resolution: " + lo + "dppx)").matches) {
+        return (this._probedDpr = fallback); // sub-0.5 dppx is implausible; trust the property
+    }
+    // 20 iterations resolves to < 0.00001 dppx — far finer than any scale we snap to.
+    for (let i = 0; i < 20; i++) {
+        const mid = (lo + hi) / 2;
+        if (window.matchMedia("(min-resolution: " + mid + "dppx)").matches) lo = mid; else hi = mid;
+    }
+    const ratio = (lo + hi) / 2;
+    // Guard against a degenerate probe (e.g. headless engines that don't honor resolution queries).
+    return (this._probedDpr = (ratio > 0.25 ? ratio : fallback));
 };
 
 // Applies a chosen device-pixel size to the canvas backing store, and fits its on-screen size to the
@@ -1225,18 +1286,41 @@ Client.prototype._cachePointer = function (u, kind) {
     // Hotspot moves with the crop origin; it may legitimately sit in cropped-away padding,
     // so clamp it into the cropped image (CSS requires the hotspot inside the image).
     const img = crop.img;
-    const hotX = Math.min(Math.max(u.x - crop.x, 0), img.width - 1);
-    const hotY = Math.min(Math.max(u.y - crop.y, 0), img.height - 1);
+    const rawHotX = Math.min(Math.max(u.x - crop.x, 0), img.width - 1);
+    const rawHotY = Math.min(Math.max(u.y - crop.y, 0), img.height - 1);
 
-    // Size the cache canvas to the cropped pointer (resizing also clears it, so stale
-    // pixels never bleed through).
-    if (this.pointerCacheCanvas.width !== img.width || this.pointerCacheCanvas.height !== img.height) {
-        this.pointerCacheCanvas.width = img.width;
-        this.pointerCacheCanvas.height = img.height;
+    // In HiDPI mode the desktop is requested at native (device-pixel) resolution, so the host
+    // sends cursor bitmaps in DEVICE pixels — e.g. a 32px cursor arrives as 64px on a 200%
+    // panel. CSS cursor url()/hotspot are measured in CSS pixels and the browser draws the PNG
+    // at its natural pixel size, which would render the cursor at 200% of its intended on-screen
+    // size. There is no size parameter on the CSS cursor, so we downscale the actual bitmap
+    // (and hotspot) by the canvas's measured native/logical ratio before exporting the PNG.
+    const cursorScale = this.cursorScaleRatio() || 1;
+    const dispW = Math.max(1, Math.round(img.width / cursorScale));
+    const dispH = Math.max(1, Math.round(img.height / cursorScale));
+    const hotX = Math.min(Math.round(rawHotX / cursorScale), dispW - 1);
+    const hotY = Math.min(Math.round(rawHotY / cursorScale), dispH - 1);
+
+    // Size the cache canvas to the DISPLAYED pointer size (resizing also clears it, so stale
+    // pixels never bleed through). At 100% scale this equals the native size (identity draw).
+    if (this.pointerCacheCanvas.width !== dispW || this.pointerCacheCanvas.height !== dispH) {
+        this.pointerCacheCanvas.width = dispW;
+        this.pointerCacheCanvas.height = dispH;
     } else {
-        this.pointerCacheCanvasCtx.clearRect(0, 0, img.width, img.height);
+        this.pointerCacheCanvasCtx.clearRect(0, 0, dispW, dispH);
     }
-    this.pointerCacheCanvasCtx.putImageData(img, 0, 0);
+    if (dispW === img.width && dispH === img.height) {
+        this.pointerCacheCanvasCtx.putImageData(img, 0, 0);
+    } else {
+        // putImageData ignores canvas scaling, so stage the native bitmap on a scratch canvas
+        // and drawImage it down (drawImage honors the smoothing needed for a clean shrink).
+        const scratch = this._pointerScaleCanvas || (this._pointerScaleCanvas = document.createElement("canvas"));
+        scratch.width = img.width;
+        scratch.height = img.height;
+        scratch.getContext("2d").putImageData(img, 0, 0);
+        this.pointerCacheCanvasCtx.imageSmoothingEnabled = true;
+        this.pointerCacheCanvasCtx.drawImage(scratch, 0, 0, dispW, dispH);
+    }
     // PNG, not WebP: lossy WebP (which toDataURL produces) drops or flattens the alpha
     // channel in several browsers, which turned anti-aliased pointers (e.g. the text I-beam,
     // whose shape lives entirely in the alpha channel) into an opaque blob. PNG preserves

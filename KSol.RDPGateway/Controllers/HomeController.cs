@@ -63,11 +63,25 @@ public class HomeController : Controller
         // pre-provision, so pool cards carry a placeholder auth and the view hides the settings gear.
         // Pools whose clone already exists are shown via that concrete resource (already in resourceIds
         // above), so skip the pool entry to avoid a duplicate card.
-        var poolsWithOwnClone = await _context.VdiInstances
+        var ownClones = await _context.VdiInstances
             .Where(i => i.OwnerUserId == userId
                 && i.State != VdiInstanceState.Deprovisioning && i.State != VdiInstanceState.Failed)
-            .Select(i => i.PoolId)
+            .Select(i => new { i.PoolId, i.RDPResourceId, PoolName = i.Pool!.Name })
             .ToListAsync();
+        var poolsWithOwnClone = ownClones.Select(c => c.PoolId).ToList();
+
+        // A provisioned clone surfaces as its concrete resource (generated VM name). Show the pool's
+        // name on that card instead so the user sees a stable, friendly label.
+        var cloneResourcePoolNames = ownClones
+            .Where(c => c.RDPResourceId != null)
+            .ToDictionary(c => c.RDPResourceId!, c => c.PoolName);
+        foreach (var vm in items)
+        {
+            if (cloneResourcePoolNames.TryGetValue(vm.Resource.Id, out var poolName))
+            {
+                vm.PoolName = poolName;
+            }
+        }
 
         foreach (var pool in await _access.AccessiblePoolsAsync(userId))
         {
@@ -85,6 +99,7 @@ public class HomeController : Controller
                 },
                 Auth = new RDPResourceUserAuthorization { UserId = userId, RDPResourceId = pool.Id },
                 IsPool = true,
+                PoolName = pool.Name,
             });
         }
 
@@ -182,4 +197,9 @@ public class DashboardResourceViewModel
     /// <summary>True when this card is a VDI pool entry point (clones a desktop on first connect),
     /// not a concrete resource. The view shows a "pool" badge and hides per-user settings.</summary>
     public bool IsPool { get; set; }
+
+    /// <summary>Friendly pool name to show instead of the resource's generated VM name. Set for pool
+    /// entry-point cards and for provisioned clones (whose <see cref="Resource"/> name is a generated
+    /// VM name). Null for ordinary non-pool resources.</summary>
+    public string? PoolName { get; set; }
 }
