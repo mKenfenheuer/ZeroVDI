@@ -24,6 +24,11 @@ const PROJECT_NAME = "rdpweb";
 // turn steers the host's codec choice). Modes:
 //   "off"        — GFX disabled; screen renders via the legacy bitmap fastpath (default)
 //   "clearcodec" — GFX on, advertise up to v8.1 only; on hosts without AVC the host streams ClearCodec
+//   "progressive"— GFX on, advertise v10+ with AVC explicitly DISABLED. Per MS-RDPEGFX, a Windows host
+//                  with GFX negotiated at v10+ but AVC unavailable falls back to RemoteFX Progressive
+//                  (CAPROGRESSIVE) rather than ClearCodec — v8/v8.1-only capsets get ClearCodec instead,
+//                  so this needs its own capset list. GNOME Remote Desktop streams Progressive over
+//                  WIRE_TO_SURFACE_2 regardless of advertised caps, so it's unaffected by this mode.
 //   "avc420"     — GFX on, prefer single-stream H.264 (AVC420). Adds v10 (AVC enabled) so AVC-capable
 //                  hosts engage H.264; falls back to ClearCodec if the host still refuses AVC
 //   "avc444"     — GFX on, allow AVC444 (dual luma+chroma H.264) in addition to AVC420
@@ -41,6 +46,7 @@ function rdpGfxMode() {
     if (v === "0" || v === "false" || v === "off" || v === "") return "off";
     if (v === "1" || v === "true" || v === "auto") return "avc420";
     if (v === "clearcodec" || v === "clear") return "clearcodec";
+    if (v === "progressive" || v === "rfx" || v === "remotefx") return "progressive";
     if (v === "avc420" || v === "h264" || v === "avc") return "avc420";
     if (v === "avc444") return "avc444";
     return "avc420"; // unknown but truthy → try AVC
@@ -2563,7 +2569,7 @@ RdpProtocol.prototype._dvcOnClose = function (r, cbId) {
     }
     if (channelId === this.gfxDvcChannelId) {
         this.gfxDvcChannelId = null;
-        if (this.gfx) { this.gfx.reset(); this.gfx = null; }
+        if (this.gfx) { this.gfx.destroy(); this.gfx = null; }
     }
     delete this._dvcReasm[channelId];
     delete this._dvcZgfx[channelId];

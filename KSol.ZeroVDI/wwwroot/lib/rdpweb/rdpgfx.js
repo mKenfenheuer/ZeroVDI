@@ -84,6 +84,14 @@ const GFX_PIXEL_FORMAT_ARGB_8888 = 0x21;
 // paired with a QOE_FRAME_ACKNOWLEDGE — the combination mstsc uses to keep the host streaming.
 const RDPGFX_QUEUE_DEPTH_UNAVAILABLE = 0x00000000;
 
+// URL of decode-worker.js, resolved relative to THIS script (document.currentScript is only valid while
+// rdpgfx.js is first executing — RdpGfx instances are constructed later, per session, by protocol.js).
+// asp-append-version query strings on the <script> tag are preserved so the worker is cache-busted with
+// the rest of the client bundle.
+var RDPGFX_WORKER_URL = (typeof document !== "undefined" && document.currentScript)
+    ? new URL("decode-worker.js", document.currentScript.src).toString()
+    : null;
+
 // cb: { onLog, onPaint(canvas, sx, sy, sw, sh, dx, dy), onReset(w, h), send(payload) }
 //   onPaint blits a region (sx,sy,sw,sh) of an offscreen surface canvas to output pixel (dx,dy).
 //   onReset announces a new desktop size from RESET_GRAPHICS.
@@ -98,6 +106,10 @@ function RdpGfx(cb) {
     this.outputMap = {};         // surfaceId -> { originX, originY } (MAP_SURFACE_TO_OUTPUT)
     this.confirmedVersion = 0;
     this.decoders = {};          // surfaceId -> H264SurfaceDecoder
+    // ClearCodec and RemoteFX Progressive are pure-JS, CPU-bound, bit-exact ports of FreeRDP that used
+    // to run synchronously on the main thread and could block input/render for hundreds of ms on a big
+    // frame. Both now run in decode-worker.js; this is the main-thread fallback used only if the Worker
+    // can't be constructed (e.g. CSP blocks it) or the browser lacks Worker support.
     this.clear = (typeof ClearDecode !== "undefined") ? new ClearDecode() : null; // shared ClearCodec ctx
     // RemoteFX Progressive (GNOME Remote Desktop streams this over WIRE_TO_SURFACE_2). Per-surface
     // context (holds the persistent per-tile coefficient grids needed for RFX_TILE_DIFFERENCE).
@@ -107,7 +119,45 @@ function RdpGfx(cb) {
     this._dirty = [];            // output rects touched in the current frame, flushed at END_FRAME
     this.outputWidth = 0;
     this.outputHeight = 0;
+
+    this._worker = null;         // decode-worker.js instance (progressive/clear offload), or null
+    this._workerReqId = 0;
+    this._workerPending = {};    // reqId -> { surfaceId, kind: "progressive"|"clear" }
+    this._initWorker();
 }
+
+// Spin up decode-worker.js next to this script. Failure (CSP, no Worker support) is non-fatal — the
+// caller falls back to decoding progressive/clear synchronously on the main thread (the pre-Worker
+// behavior), so a locked-down environment still renders, just with the old blocking-decode tradeoff.
+RdpGfx.prototype._initWorker = function () {
+    if (typeof Worker === "undefined" || !RDPGFX_WORKER_URL) return;
+    try {
+        this._worker = new Worker(RDPGFX_WORKER_URL);
+        const self = this;
+        this._worker.onmessage = function (e) { self._onWorkerMessage(e.data); };
+        this._worker.onerror = function (e) {
+            self._log("rdpgfx: decode worker error, falling back to main-thread decode: " + e.message);
+            self._worker = null;
+        };
+    } catch (e) {
+        this._log("rdpgfx: could not start decode worker, using main-thread decode: " + e);
+        this._worker = null;
+    }
+};
+
+RdpGfx.prototype._onWorkerMessage = function (msg) {
+    if (msg.cmd === "log") { this._log(msg.message); return; }
+    const pending = this._workerPending[msg.reqId];
+    if (!pending) return; // surface was destroyed/reset while this decode was in flight
+    delete this._workerPending[msg.reqId];
+    const surf = this.surfaces[pending.surfaceId];
+    if (!surf) return; // surface destroyed while in flight
+    if (msg.cmd === "progressive-result") {
+        this._finishProgressive(pending.surfaceId, surf, msg);
+    } else if (msg.cmd === "clear-result") {
+        this._finishClear(pending.surfaceId, surf, msg);
+    }
+};
 
 RdpGfx.prototype._log = function (m) { if (this.cb.onLog) this.cb.onLog(m); };
 
@@ -120,6 +170,13 @@ RdpGfx.prototype.reset = function () {
     this._dirty = []; this.confirmedVersion = 0; this.framesDecoded = 0;
     this._qoeT0 = null;
     if (this.clear) this.clear.reset();
+    this._workerPending = {};
+    if (this._worker) this._worker.postMessage({ cmd: "reset" });
+};
+
+// Session teardown (page navigation / client disposed) — actually terminate the worker thread.
+RdpGfx.prototype.destroy = function () {
+    if (this._worker) { this._worker.terminate(); this._worker = null; }
 };
 
 // Build the CAPS_ADVERTISE PDU. The host picks the HIGHEST version it accepts and honors that capset's
@@ -163,6 +220,19 @@ RdpGfx.prototype.buildCapsAdvertise = function () {
             { version: RDPGFX_CAPVERSION_107, flags: SC_NOSCALE, len: 4 },
             { version: RDPGFX_CAPVERSION_111, flags: SC_NOSCALE, len: 4 },
             { version: RDPGFX_CAPVERSION_113, flags: SC_NOSCALE, len: 4 },
+        ];
+    } else if (this.mode === "progressive") {
+        // v10+ with AVC explicitly disabled: per MS-RDPEGFX a Windows host negotiating GFX at v10+
+        // without AVC available falls back to RemoteFX Progressive rather than ClearCodec (which is
+        // what a v8/v8.1-only advertisement gets you — see the "clearcodec" branch below).
+        const AVCOFF = RDPGFX_CAPS_FLAG_AVC_DISABLED;
+        caps = [
+            { version: RDPGFX_CAPVERSION_8, flags: 0, len: 4 },
+            { version: RDPGFX_CAPVERSION_81, flags: 0, len: 4 },
+            { version: RDPGFX_CAPVERSION_10, flags: AVCOFF, len: 4 },
+            { version: RDPGFX_CAPVERSION_102, flags: AVCOFF, len: 4 },
+            { version: RDPGFX_CAPVERSION_103, flags: AVCOFF, len: 4 },
+            { version: RDPGFX_CAPVERSION_104, flags: AVCOFF, len: 4 },
         ];
     } else {
         caps = [
@@ -285,8 +355,10 @@ RdpGfx.prototype._destroySurface = function (surfaceId) {
     delete this.surfaces[surfaceId];
     delete this.outputMap[surfaceId];
     // Drop the progressive per-tile cache too — a recreated surfaceId is a brand-new surface; keeping the
-    // old cache would mis-accumulate (and leak). The next frame must repaint from scratch.
+    // old cache would mis-accumulate (and leak). The next frame must repaint from scratch. The real
+    // per-tile state now lives in the worker (progCtx here is only used by the main-thread fallback path).
     delete this.progCtx[surfaceId];
+    if (this._worker) this._worker.postMessage({ cmd: "destroy-surface", surfaceId: surfaceId });
 };
 
 RdpGfx.prototype._onDeleteSurface = function (r) {
@@ -421,15 +493,21 @@ RdpGfx.prototype._onWireToSurface1 = function (r) {
 };
 
 // WIRE_TO_SURFACE_2 ([MS-RDPEGFX] 2.2.2.2): surfaceId(2), codecId(2), codecContextId(4),
-// pixelFormat(1), then the codec bitstream to end of PDU (no explicit length). Used by the
-// context/stream codecs — on Windows that's RemoteFX Progressive (CAPROGRESSIVE 0x0009). The host
-// switches to this when it decides to stream the desktop progressively instead of as ClearCodec tiles.
+// pixelFormat(1), bitmapDataLength(4), then the codec bitstream. Used by the context/stream codecs —
+// on Windows that's RemoteFX Progressive (CAPROGRESSIVE 0x0009). The host switches to this when it
+// decides to stream the desktop progressively instead of as ClearCodec tiles.
 RdpGfx.prototype._onWireToSurface2 = function (r) {
     const surfaceId = r.u16le();
     const codecId = r.u16le();
     const codecContextId = r.u32le();
     const pixelFormat = r.u8();
-    const bitmapData = r.bytes(r.remaining());
+    // bitmapDataLength (4 bytes, [MS-RDPEGFX] 2.2.2.2) — the codec bitstream length. MUST be read (and
+    // used to bound bitmapData) even though in practice it always covers the rest of the PDU: skipping
+    // it silently shifted the whole bitstream 4 bytes early, corrupting every Progressive tile from
+    // byte 0. findBlockStart's leading-offset scan in progressive.js occasionally papered over this by
+    // finding a plausible-looking block header a few bytes in, which is why it didn't fail loudly.
+    const bitmapDataLength = r.u32le();
+    const bitmapData = r.bytes(Math.min(bitmapDataLength, r.remaining()));
     const surf = this.surfaces[surfaceId];
     if (!surf) { this._log("rdpgfx: WIRE_TO_SURFACE_2 for unknown surface " + surfaceId); return; }
 
@@ -444,13 +522,41 @@ RdpGfx.prototype._onWireToSurface2 = function (r) {
 
 // RemoteFX Progressive (CAPROGRESSIVE): decode the WIRE_TO_SURFACE_2 payload into 64x64 tiles.
 // GNOME Remote Desktop streams the whole desktop this way, often as hundreds of tiles per PDU on
-// slow links (more, smaller partial frames). We used to putImageData() each tile individually —
-// on a full-screen frame that's 500+ synchronous canvas calls (each with its own clip/convert
-// overhead plus an ImageData allocation), which was enough to make the client feel frozen. Instead
-// we composite all tiles for this PDU into one scratch buffer sized to their bounding box and issue
-// a single putImageData at the end. Tile reconstruction (RLGR → dequant → inverse DWT →
-// YCbCr→RGB) lives in progressive.js; here we just place tiles and flush once per PDU.
+// slow links (more, smaller partial frames). Decode (RLGR → dequant → inverse DWT → YCbCr→RGB per
+// tile) runs in decode-worker.js so a big frame can't block input/render; only the final composite +
+// putImageData happens here, in _finishProgressive. Falls back to synchronous main-thread decode
+// (_decodeProgressiveSync) if the worker isn't available.
 RdpGfx.prototype._decodeProgressive = function (surfaceId, surf, bitmapData) {
+    if (!this._worker) { this._decodeProgressiveSync(surfaceId, surf, bitmapData); return; }
+    const reqId = ++this._workerReqId;
+    this._workerPending[reqId] = { surfaceId: surfaceId, kind: "progressive" };
+    // bitmapData is a view into the (about-to-be-reused) ZGFX inflate buffer, so copy it before the
+    // transfer — postMessage with a transfer list detaches the buffer, and we don't own the original.
+    const copy = bitmapData.slice();
+    this._worker.postMessage(
+        { cmd: "progressive", reqId: reqId, surfaceId: surfaceId, surfWidth: surf.width, surfHeight: surf.height, bitmapData: copy.buffer },
+        [copy.buffer]
+    );
+};
+
+// Composite+paint half of progressive decode, run when decode-worker.js posts back a result (or
+// inline from the main-thread fallback path with the same-shaped msg).
+RdpGfx.prototype._finishProgressive = function (surfaceId, surf, msg) {
+    if (!msg.ok) { this._log("rdpgfx: " + msg.error); return; }
+    if (msg.empty) return;
+    try {
+        const frame = new Uint8ClampedArray(msg.buffer);
+        surf.ctx.putImageData(new ImageData(frame, msg.bw, msg.bh), msg.minX, msg.minY);
+        this._afterSurfaceUpdate(surfaceId, surf,
+            [{ left: msg.minX, top: msg.minY, right: msg.minX + msg.bw, bottom: msg.minY + msg.bh }]);
+    } catch (e) {
+        this._log("rdpgfx: progressive paint exception: " + e);
+    }
+};
+
+// Main-thread fallback (no Worker support / Worker construction failed): identical decode+composite
+// logic to decode-worker.js's decodeProgressive, just called and painted synchronously in one pass.
+RdpGfx.prototype._decodeProgressiveSync = function (surfaceId, surf, bitmapData) {
     let ctx = this.progCtx[surfaceId];
     if (!ctx) { ctx = new this.progressive.Context(); this.progCtx[surfaceId] = ctx; }
     const self = this;
@@ -462,16 +568,10 @@ RdpGfx.prototype._decodeProgressive = function (surfaceId, surf, bitmapData) {
     try {
         const res = this.progressive.decode(ctx, bitmapData, function (xIdx, yIdx, rgba) {
             const x = xIdx * 64, y = yIdx * 64;
-            // Clip the 64x64 tile to the surface bounds (edge tiles may overhang). Guard against a
-            // corrupt/garbage tile index that would place the tile entirely outside the surface.
             if (x < 0 || y < 0 || x >= surf.width || y >= surf.height) return;
             const w = Math.min(64, surf.width - x);
             const h = Math.min(64, surf.height - y);
             if (w <= 0 || h <= 0) return;
-            // rgba is scratch owned by progressive.js and reused on the next tile callback, so it
-            // must be copied out now — but into our accumulation buffer, not a fresh ImageData.
-            // rgba is always stride-64 internally; for edge tiles (w/h < 64) copy row-by-row to
-            // repack into a tightly-strided w*h buffer.
             let copy;
             if (w === 64 && h === 64) {
                 copy = rgba.slice(0);
@@ -489,27 +589,23 @@ RdpGfx.prototype._decodeProgressive = function (surfaceId, surf, bitmapData) {
             if (y + h > maxY) maxY = y + h;
         }, function (m) { self._log("rdpgfx: " + m); });
 
-        if (!res) { this._log("rdpgfx: progressive decode failed (" + bitmapData.length + " bytes)"); }
+        if (!res) { this._log("rdpgfx: progressive decode failed (" + bitmapData.length + " bytes)"); return; }
     } catch (e) {
         this._log("rdpgfx: progressive EXCEPTION (" + bitmapData.length + "B): " + (e && e.stack ? e.stack : e));
+        return;
     }
     if (!tiles.length) return;
-    try {
-        const bw = maxX - minX, bh = maxY - minY;
-        const frame = new Uint8ClampedArray(bw * bh * 4);
-        for (const t of tiles) {
-            const ox = t.x - minX, oy = t.y - minY;
-            for (let row = 0; row < t.h; row++) {
-                const src = row * t.w * 4;
-                const dst = ((oy + row) * bw + ox) * 4;
-                frame.set(t.rgba.subarray(src, src + t.w * 4), dst);
-            }
+    const bw = maxX - minX, bh = maxY - minY;
+    const frame = new Uint8ClampedArray(bw * bh * 4);
+    for (const t of tiles) {
+        const ox = t.x - minX, oy = t.y - minY;
+        for (let row = 0; row < t.h; row++) {
+            const src = row * t.w * 4;
+            const dst = ((oy + row) * bw + ox) * 4;
+            frame.set(t.rgba.subarray(src, src + t.w * 4), dst);
         }
-        surf.ctx.putImageData(new ImageData(frame, bw, bh), minX, minY);
-        this._afterSurfaceUpdate(surfaceId, surf, [{ left: minX, top: minY, right: maxX, bottom: maxY }]);
-    } catch (e) {
-        this._log("rdpgfx: progressive paint exception: " + e);
     }
+    this._finishProgressive(surfaceId, surf, { ok: true, minX: minX, minY: minY, bw: bw, bh: bh, buffer: frame.buffer });
 };
 
 // AVC420 bitstream ([MS-RDPEGFX] 2.2.4.4 / 2.2.4.5): an RFX_AVC420_METABLOCK (region rects + quant
@@ -557,16 +653,44 @@ RdpGfx.prototype._decodeAvc444 = function (surfaceId, surf, destRect, data) {
 
 // ClearCodec (0x8): decode the tile into an RGBA buffer and putImageData it onto the surface at the
 // dest rect. ClearCodec carries the full dest-rect pixels (no separate metablock); the dirty region is
-// the dest rect itself.
+// the dest rect itself. Decode runs in decode-worker.js (see _decodeProgressive's comment); falls back
+// to synchronous main-thread decode if the worker isn't available.
+//
+// IMPORTANT: ClearDecode.decode() tracks a strictly-sequential seqNumber per PDU, and its glyph/VBar
+// caches must see PDUs in the exact order the host sent them — the worker guarantees this because the
+// main thread posts one message per PDU, in PDU order, and the worker (single-threaded, no internal
+// reordering) processes and replies in that same order.
 RdpGfx.prototype._decodeClear = function (surfaceId, surf, rect, data) {
+    if (!this._worker) { this._decodeClearSync(surfaceId, surf, rect, data); return; }
+    const reqId = ++this._workerReqId;
+    this._workerPending[reqId] = { surfaceId: surfaceId, kind: "clear" };
+    const copy = data.slice(); // detach-safe copy; data is a view into the reused ZGFX inflate buffer
+    this._worker.postMessage(
+        { cmd: "clear", reqId: reqId, surfaceId: surfaceId, rect: rect, data: copy.buffer },
+        [copy.buffer]
+    );
+};
+
+RdpGfx.prototype._finishClear = function (surfaceId, surf, msg) {
+    if (!msg.ok) { this._log("rdpgfx: " + msg.error); return; }
+    try {
+        const rgba = new Uint8ClampedArray(msg.buffer);
+        const w = msg.rect.right - msg.rect.left, h = msg.rect.bottom - msg.rect.top;
+        surf.ctx.putImageData(new ImageData(rgba, w, h), msg.rect.left, msg.rect.top);
+        this._afterSurfaceUpdate(surfaceId, surf, [msg.rect]);
+    } catch (e) {
+        this._log("rdpgfx: ClearCodec paint exception: " + e);
+    }
+};
+
+RdpGfx.prototype._decodeClearSync = function (surfaceId, surf, rect, data) {
     if (!this.clear) { this._log("rdpgfx: ClearCodec module not loaded"); return; }
     const w = rect.right - rect.left, h = rect.bottom - rect.top;
     if (w <= 0 || h <= 0) return;
     const self = this;
     const res = this.clear.decode(data, w, h, function (m) { self._log("rdpgfx: " + m); });
     if (!res) { this._log("rdpgfx: ClearCodec decode failed (" + w + "x" + h + ", " + data.length + " bytes)"); return; }
-    surf.ctx.putImageData(new ImageData(res.rgba, w, h), rect.left, rect.top);
-    this._afterSurfaceUpdate(surfaceId, surf, [rect]);
+    this._finishClear(surfaceId, surf, { ok: true, rect: rect, buffer: res.rgba.buffer });
 };
 
 RdpGfx.prototype.onDecodedFrame = function (surfaceId, frame, regions) {

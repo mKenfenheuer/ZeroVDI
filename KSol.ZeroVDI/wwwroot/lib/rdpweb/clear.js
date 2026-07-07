@@ -69,8 +69,15 @@ ClearDecode.prototype.decode = function (data, width, height, log) {
 
     if (!this.seqNumber && seqNumber) this.seqNumber = seqNumber;
     if (seqNumber !== this.seqNumber) {
-        if (log) log("clear: seqNumber " + seqNumber + " != expected " + this.seqNumber);
-        return null;
+        // FreeRDP treats this as a fatal decode error and tears down/reconnects the whole session (see
+        // clear_decompress in libfreerdp/codec/clear.c) — we have no equivalent "abort and reconnect on
+        // a bad GFX tile" path, and dropping the PDU here used to mean the destination rect silently
+        // never repaints again: once this.seqNumber diverges from the host (e.g. one lost/reordered
+        // PDU), EVERY later ClearCodec PDU fails this check forever, leaving permanent stale rectangles
+        // on screen. Resync instead: accept the host's seqNumber as the new expected value and keep
+        // decoding this PDU. We lose one frame of validation, not indefinitely broken graphics.
+        if (log) log("clear: seqNumber " + seqNumber + " != expected " + this.seqNumber + " — resyncing");
+        this.seqNumber = seqNumber;
     }
     this.seqNumber = (seqNumber + 1) & 0xff;
 
