@@ -50,11 +50,11 @@ build_connector_image:
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
     - export APP_IMAGE=$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
     - export CONNECTOR_IMAGE=$CI_REGISTRY_IMAGE/connector:$CI_COMMIT_SHORT_SHA
-    - export COMPOSE_PROJECT="rdpgw"
+    - export COMPOSE_PROJECT="zerovdi"
     - export STACK_NAME="$COMPOSE_PROJECT"
     # Connector enrollment from PROTECTED/MASKED GitLab CI/CD variables (per environment). Supply
     # ZEROVDI_URL plus either ZEROVDI_AUTH_TOKEN (stateless) or ZEROVDI_REGISTRATION_TOKEN (first-boot
-    # enroll, persisted to the /mnt/data/rdpgw-connector volume). Exported so compose passes them through.
+    # enroll, persisted to the /mnt/data/zerovdi-connector volume). Exported so compose passes them through.
     - export ZEROVDI_URL="$ZEROVDI_URL"
     - export ZEROVDI_AUTH_TOKEN="$ZEROVDI_AUTH_TOKEN"
     - export ZEROVDI_REGISTRATION_TOKEN="$ZEROVDI_REGISTRATION_TOKEN"
@@ -64,7 +64,7 @@ build_connector_image:
     # The app refuses to start in Production if it is unset.
     - 'if [ -z "$DataProtection__MasterKeyPassphrase" ]; then echo "ERROR: DataProtection__MasterKeyPassphrase CI/CD variable is not set"; exit 1; fi'
     - export DataProtection__MasterKeyPassphrase="$DataProtection__MasterKeyPassphrase"
-    - docker compose -p $COMPOSE_PROJECT pull ksol-rdpgw ksol-rdpgw-connector || true
+    - docker compose -p $COMPOSE_PROJECT pull ksol-zerovdi-app ksol-zerovdi-connector || true
     - docker compose -p $COMPOSE_PROJECT up -d --remove-orphans
     - docker image prune -af
 

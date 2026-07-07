@@ -1,6 +1,6 @@
 services:
-  ksol-rdpgw:
-    container_name: "ksol-rdpgw"
+  ksol-zerovdi-app:
+    container_name: "ksol-zerovdi-app"
     environment:
       - "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
       - "APP_UID=1654"
@@ -20,8 +20,8 @@ services:
     volumes:
       - "/mnt/data/rdpgw:/app/Data"
 
-  ksol-rdpgw-connector:
-    container_name: "ksol-rdpgw-connector"
+  ksol-zerovdi-connector:
+    container_name: "ksol-zerovdi-connector"
     image: ${CONNECTOR_IMAGE}
     environment:
       - "ASPNETCORE_ENVIRONMENT=Production"

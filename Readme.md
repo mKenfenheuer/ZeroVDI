@@ -2,9 +2,9 @@
 
 ---
 
-![GitHub License](https://img.shields.io/github/license/mkenfenheuer/ksol-rdpgw)
-![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/mkenfenheuer/ksol-rdpgw/docker-publish.yml)
-![GitHub last commit (branch)](https://img.shields.io/github/last-commit/mkenfenheuer/ksol-rdpgw/main)
+![GitHub License](https://img.shields.io/github/license/mkenfenheuer/ksol-zerovdi)
+![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/mkenfenheuer/ksol-zerovdi/docker-publish.yml)
+![GitHub last commit (branch)](https://img.shields.io/github/last-commit/mkenfenheuer/ksol-zerovdi/main)
 
 **ZeroVDI** is a self-hosted, **fully browser-based virtual-desktop (VDI) platform** built
 on ASP.NET Core and Proxmox VE. It publishes Windows and Linux desktops to your users
@@ -94,6 +94,6 @@ For commercial or enterprise licensing, contact **maximilian.kenfenheuer@ksol.it
 ## 📞 Support
 
 - Found a bug? Want to suggest a feature? Open an
-  [issue](https://github.com/mKenfenheuer/ksol-rdpgw/issues).
+  [issue](https://github.com/mKenfenheuer/ksol-zerovdi/issues).
 
 Copyright © 2026 KSol.IT. All rights reserved.
