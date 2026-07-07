@@ -1,0 +1,6 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" aria-label="ZeroVDI" role="img">
+  <rect x="230" y="230" width="480" height="340" rx="56" fill="#93c5fd"/>
+  <rect x="330" y="360" width="480" height="340" rx="56" fill="#3b82f6"/>
+  <rect x="430" y="490" width="480" height="340" rx="56" fill="#1d4ed8"/>
+  <ellipse cx="670" cy="660" rx="86" ry="112" fill="none" stroke="#ffffff" stroke-width="46"/>
+</svg>

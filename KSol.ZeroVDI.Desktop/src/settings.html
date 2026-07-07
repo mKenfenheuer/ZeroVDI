@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="blue">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ZeroVDI — Server Settings</title>
+<link rel="icon" type="image/svg+xml" href="assets/img/zerovdi-app-icon.svg" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/remixicon@4.5.0/fonts/remixicon.css" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="assets/css/app.css" />
+<script>
+  // Same pre-paint theme logic as the web app's _ThemeHead, minus the server-forced policy.
+  (function () {
+    try {
+      var theme = localStorage.getItem('rdpgw-theme') || 'blue';
+      var mode = localStorage.getItem('rdpgw-mode') || 'light';
+      document.documentElement.setAttribute('data-theme', theme);
+      document.documentElement.classList.toggle('dark', mode === 'dark');
+    } catch (e) {}
+  })();
+</script>
+<style>
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--background); color: var(--foreground); font-family: 'Inter', -apple-system, sans-serif; }
+  .wrap { display: flex; flex-direction: column; justify-content: center; height: 100%; padding: 0 2.5rem; box-sizing: border-box; }
+  .brand { display: flex; align-items: center; gap: .6rem; margin-bottom: 1.5rem; }
+  .brand img { width: 28px; height: 28px; }
+  .brand span { font-weight: 600; font-size: 1.05rem; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="brand">
+      <img src="assets/img/zerovdi-logo.svg" alt="" />
+      <span>ZeroVDI</span>
+    </div>
+    <h2 class="text-xl font-semibold mb-1">Connect to your gateway</h2>
+    <p class="text-sm text-muted-foreground mb-6">Enter your organization's ZeroVDI server address.</p>
+
+    <div class="space-y-1.5">
+      <label for="serverUrl" class="block text-sm font-medium">Server address</label>
+      <input id="serverUrl" type="text" autocomplete="off" autofocus placeholder="vdi.example.com"
+             class="w-full px-3 py-2 rounded-lg border border-border bg-background text-foreground text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent transition" />
+      <span id="error" class="text-xs text-destructive"></span>
+    </div>
+
+    <button id="connect" type="button"
+            class="mt-5 w-full px-4 py-2.5 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity">
+      Connect
+    </button>
+  </div>
+  <script>
+    const input = document.getElementById('serverUrl');
+    const errorEl = document.getElementById('error');
+
+    window.zerovdiSettings.getServerUrl().then((url) => {
+      if (url) input.value = url;
+    });
+
+    async function connect() {
+      const value = input.value.trim();
+      if (!value) {
+        errorEl.textContent = 'Please enter a server address.';
+        return;
+      }
+      errorEl.textContent = '';
+      await window.zerovdiSettings.saveServerUrl(value);
+    }
+
+    document.getElementById('connect').addEventListener('click', connect);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') connect(); });
+  </script>
+</body>
+</html>

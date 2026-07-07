@@ -84,8 +84,9 @@
             btn.addEventListener('click', function () { setMode(btn.dataset.mode); });
         });
 
-        toggleDropdown('theme-toggle-btn', 'theme-dropdown', ['user-dropdown']);
-        toggleDropdown('user-avatar-btn', 'user-dropdown', ['theme-dropdown']);
+        toggleDropdown('theme-toggle-btn', 'theme-dropdown', ['user-dropdown', 'download-dropdown']);
+        toggleDropdown('user-avatar-btn', 'user-dropdown', ['theme-dropdown', 'download-dropdown']);
+        toggleDropdown('download-toggle-btn', 'download-dropdown', ['theme-dropdown', 'user-dropdown']);
 
         // Mobile sidebar drawer (admin layout).
         var sidebarToggle = document.getElementById('mobile-menu-toggle');

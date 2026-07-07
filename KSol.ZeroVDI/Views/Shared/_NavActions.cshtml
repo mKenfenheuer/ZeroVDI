@@ -28,6 +28,37 @@
             <i class="ri-question-line text-xl"></i>
         </a>
     }
+    @if (SignInManager.IsSignedIn(User))
+    {
+        <!-- Desktop app download -->
+        <div class="relative" id="download-dropdown-container">
+            <button id="download-toggle-btn" type="button" aria-label="Download desktop app" title="Download desktop app"
+                    class="w-10 h-10 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors">
+                <i class="ri-download-2-line text-xl"></i>
+            </button>
+            <div id="download-dropdown"
+                 class="absolute right-0 top-12 w-64 bg-popover text-popover-foreground rounded-xl shadow-xl border border-border z-50 hidden overflow-hidden">
+                <div class="p-3 border-b border-border">
+                    <h4 class="font-semibold text-sm">Desktop app</h4>
+                    <p class="text-xs text-muted-foreground">Connect to VDIs without a browser</p>
+                </div>
+                <div class="py-2">
+                    <a href="/downloads/ZeroVDI-Setup-Windows.exe" download
+                       class="flex items-center gap-3 px-4 py-2.5 text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors">
+                        <i class="ri-windows-fill"></i><span>Windows</span>
+                    </a>
+                    <a href="/downloads/ZeroVDI-macOS.dmg" download
+                       class="flex items-center gap-3 px-4 py-2.5 text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors">
+                        <i class="ri-apple-fill"></i><span>macOS</span>
+                    </a>
+                    <a href="/downloads/ZeroVDI-Linux.AppImage" download
+                       class="flex items-center gap-3 px-4 py-2.5 text-sm text-muted-foreground hover:bg-muted hover:text-foreground transition-colors">
+                        <i class="ri-ubuntu-fill"></i><span>Linux</span>
+                    </a>
+                </div>
+            </div>
+        </div>
+    }
     @{
         var themes = new (string Key, string Label, string Swatch)[]
         {
