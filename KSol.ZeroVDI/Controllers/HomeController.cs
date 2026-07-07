@@ -145,6 +145,12 @@ public class HomeController : Controller
         var devicePolicy = _devicePolicy.Get();
         ViewData["DevicePolicy"] = devicePolicy;
 
+        // Saved session options for THIS connect, applied on every path (manual login too — not just the
+        // SSO/pool auto-connect branches below). Prefer the user's per-resource override, else the
+        // resource-wide default; clamp to the device policy so the popup opens on the effective values.
+        ViewData["Defaults"] = _devicePolicy.Apply(
+            authorization?.ConnectionDefaults ?? resource.DefaultConnectionDefaults ?? new ConnectionDefaults());
+
         // SSO: when VM credentials are stored for this (user, resource), the console auto-connects
         // without the login overlay. NO stored credential (username, password or domain) is EVER sent
         // to the browser. The gateway injects the real credentials entirely server-side for both the
@@ -162,7 +168,7 @@ public class HomeController : Controller
             if (usable)
             {
                 ViewData["AutoConnect"] = true;
-                ViewData["Defaults"] = _devicePolicy.Apply(authorization.ConnectionDefaults ?? new ConnectionDefaults());
+                // Defaults already set above (authorization.ConnectionDefaults, policy-clamped).
                 // StoredUser/StoredPassword/StoredDomain intentionally NOT set.
             }
         }
@@ -176,7 +182,7 @@ public class HomeController : Controller
                 .AnyAsync(p => p.Id == id && p.IdentityMode == VdiIdentityMode.CloudInit && p.GenerateCredentials))
         {
             ViewData["AutoConnect"] = true;
-            ViewData["Defaults"] = _devicePolicy.Apply(resource.DefaultConnectionDefaults ?? new ConnectionDefaults());
+            // Defaults already set above (resource.DefaultConnectionDefaults, policy-clamped).
         }
 
         return View();

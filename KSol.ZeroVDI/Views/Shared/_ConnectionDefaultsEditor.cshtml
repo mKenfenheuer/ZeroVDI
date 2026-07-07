@@ -1,25 +1,43 @@
 @model KSol.ZeroVDI.Models.ConnectionDefaults
 
 @*
-    Editor for the (user, resource) / resource-wide console connect defaults. Bound under the
-    "ConnectionDefaults" prefix so it round-trips into ConnectionDefaults on the owning POST.
+    The single, shared editor for the console "Session options" and the (user, resource) /
+    resource-wide connect defaults. There is ONE option set — this partial renders it everywhere,
+    so the console popup, the resource Create/Edit forms and the home settings drawer can never
+    drift apart.
 
-    This is the SAME option set the console "Session options" popup offers
-    (Views/Home/Console.cshtml) — the two must stay identical. The visual-quality checkboxes are
-    assembled into the single PerformanceFlags bitmask on submit, mirroring the console's logic and
-    the PERF bit table in wwwroot/lib/rdpweb/protocol.js.
+    Two render modes (ViewData["Mode"]):
+
+      "form"    (default) — a POST editor. Bound under the "ConnectionDefaults" prefix (or the
+                 ambient HtmlFieldPrefix) so it round-trips into ConnectionDefaults on the owning
+                 POST. Fields carry name="..."; the visual-quality checkboxes assemble into the
+                 single PerformanceFlags bitmask (hidden .perf-mask) on change/submit.
+
+      "console" — the RDP console popup. No form binding; instead the fields carry the fixed ids
+                 (opt-audio, opt-clipboard, opt-microphone, opt-camera, opt-gfx-mode, opt-hidpi)
+                 and the perf checkboxes use the named RDP_PERF keys that Console.cshtml's connect
+                 handler reads. Also renders the admin Device-policy lock UI and the extra
+                 "progressive" GFX option. Pass ViewData["DevicePolicy"] to drive the locks.
+
+    The PERF bit table mirrors wwwroot/lib/rdpweb/protocol.js. Checkbox semantics: ENABLE_* →
+    checked sets the bit; DISABLE_* (data-invert) → "keep this eye-candy", so UNchecked sets the bit.
 *@
+@using KSol.ZeroVDI.Models
 @{
+    var mode = ViewData["Mode"] as string ?? "form";
+    var console = mode == "console";
+
     // Honour an ambient field prefix when the caller sets one (e.g. "DefaultConnectionDefaults" on
     // the resource Create form); default to "ConnectionDefaults" for the standalone POST actions.
     var prefix = ViewData.TemplateInfo.HtmlFieldPrefix;
     if (string.IsNullOrEmpty(prefix)) prefix = "ConnectionDefaults";
     string Name(string p) => $"{prefix}.{p}";
-    // Unique id base so multiple editors can coexist on one page (per-user + resource-wide).
+    // Unique id base so multiple form editors can coexist on one page (per-user + resource-wide).
     var uid = "cd-" + Guid.NewGuid().ToString("N").Substring(0, 8);
     var mask = Model.PerformanceFlags;
-    // PERF bits (mirror of protocol.js). Checkbox semantics: ENABLE_* → checked sets the bit;
-    // DISABLE_* (data-invert) → "keep this eye-candy", so UNchecked sets the DISABLE bit.
+
+    // PERF bits (mirror of protocol.js). In console mode the data-perf value is the named RDP_PERF
+    // key (the console JS maps it to a bit via window.RDP_PERF); in form mode it is the numeric bit.
     const int FONT_SMOOTHING = 0x00000080;
     const int DESKTOP_COMPOSITION = 0x00000100;
     const int DISABLE_WALLPAPER = 0x00000001;
@@ -30,47 +48,101 @@
     const int DISABLE_CURSORSETTINGS = 0x00000040;
     bool On(int bit) => (mask & bit) != 0;        // ENABLE_* flag is on when its bit is set
     bool Keep(int bit) => (mask & bit) == 0;      // DISABLE_* eye-candy kept when its bit is NOT set
+
+    // Device policy (console mode only): lock the corresponding checkbox to the admin value.
+    var devicePolicy = ViewData["DevicePolicy"] as DevicePolicy ?? new DevicePolicy();
+    var audioLocked = console && DevicePolicy.IsLocked(devicePolicy.Audio);
+    var clipLocked = console && DevicePolicy.IsLocked(devicePolicy.Clipboard);
+    var micLocked = console && DevicePolicy.IsLocked(devicePolicy.Microphone);
+    var camLocked = console && DevicePolicy.IsLocked(devicePolicy.Camera);
 }
 
 @* These are starting preferences only. The tenant Device policy (Admin → Device policy) can force any
    of the device/channel features off or on; a locked feature is clamped to the policy value at connect
    regardless of what is saved here. *@
-<div class="@uid grid grid-cols-1 md:grid-cols-2 gap-6">
+<div class="@uid grid grid-cols-1 @(console ? "" : "md:grid-cols-2") gap-6">
     <div class="space-y-2">
-        <label class="flex items-center gap-2 text-sm cursor-pointer">
-            <input class="form-check" type="checkbox" name="@Name("Audio")" value="true" @(Model.Audio ? "checked" : "") />
-            <input type="hidden" name="@Name("Audio")" value="false" />
+        <label class="flex items-center gap-2 text-sm @(audioLocked ? "opacity-60 cursor-not-allowed" : "cursor-pointer")">
+            @if (console)
+            {
+                <input class="form-check" type="checkbox" id="opt-audio" checked="@Model.Audio" disabled="@audioLocked" />
+            }
+            else
+            {
+                <input class="form-check" type="checkbox" name="@Name("Audio")" value="true" @(Model.Audio ? "checked" : "") />
+                <input type="hidden" name="@Name("Audio")" value="false" />
+            }
             <span>Remote sound</span>
+            @if (audioLocked) { <i class="fa-solid fa-lock text-xs text-muted-foreground" title="Locked by administrator policy"></i> }
         </label>
-        <label class="flex items-center gap-2 text-sm cursor-pointer">
-            <input class="form-check" type="checkbox" name="@Name("Clipboard")" value="true" @(Model.Clipboard ? "checked" : "") />
-            <input type="hidden" name="@Name("Clipboard")" value="false" />
+        <label class="flex items-center gap-2 text-sm @(clipLocked ? "opacity-60 cursor-not-allowed" : "cursor-pointer")">
+            @if (console)
+            {
+                <input class="form-check" type="checkbox" id="opt-clipboard" checked="@Model.Clipboard" disabled="@clipLocked" />
+            }
+            else
+            {
+                <input class="form-check" type="checkbox" name="@Name("Clipboard")" value="true" @(Model.Clipboard ? "checked" : "") />
+                <input type="hidden" name="@Name("Clipboard")" value="false" />
+            }
             <span>Clipboard sync</span>
+            @if (clipLocked) { <i class="fa-solid fa-lock text-xs text-muted-foreground" title="Locked by administrator policy"></i> }
         </label>
-        <label class="flex items-center gap-2 text-sm cursor-pointer">
-            <input class="form-check" type="checkbox" name="@Name("Microphone")" value="true" @(Model.Microphone ? "checked" : "") />
-            <input type="hidden" name="@Name("Microphone")" value="false" />
-            <span>Microphone redirection</span>
+        <label class="flex items-center gap-2 text-sm @(micLocked ? "opacity-60 cursor-not-allowed" : "cursor-pointer")">
+            @if (console)
+            {
+                <input class="form-check" type="checkbox" id="opt-microphone" checked="@Model.Microphone" disabled="@micLocked" />
+            }
+            else
+            {
+                <input class="form-check" type="checkbox" name="@Name("Microphone")" value="true" @(Model.Microphone ? "checked" : "") />
+                <input type="hidden" name="@Name("Microphone")" value="false" />
+            }
+            <span>@(console ? "Microphone (prompts for permission)" : "Microphone redirection")</span>
+            @if (micLocked) { <i class="fa-solid fa-lock text-xs text-muted-foreground" title="Locked by administrator policy"></i> }
         </label>
-        <label class="flex items-center gap-2 text-sm cursor-pointer">
-            <input class="form-check" type="checkbox" name="@Name("Camera")" value="true" @(Model.Camera ? "checked" : "") />
-            <input type="hidden" name="@Name("Camera")" value="false" />
-            <span>Camera redirection</span>
+        <label class="flex items-center gap-2 text-sm @(camLocked ? "opacity-60 cursor-not-allowed" : "cursor-pointer")">
+            @if (console)
+            {
+                <input class="form-check" type="checkbox" id="opt-camera" checked="@Model.Camera" disabled="@camLocked" />
+            }
+            else
+            {
+                <input class="form-check" type="checkbox" name="@Name("Camera")" value="true" @(Model.Camera ? "checked" : "") />
+                <input type="hidden" name="@Name("Camera")" value="false" />
+            }
+            <span>@(console ? "Camera (prompts for permission)" : "Camera redirection")</span>
+            @if (camLocked) { <i class="fa-solid fa-lock text-xs text-muted-foreground" title="Locked by administrator policy"></i> }
         </label>
 
         <div class="pt-1">
-            <label class="form-label" for="@(uid)-gfx">Display mode</label>
-            <select class="form-select" name="@Name("GfxMode")" id="@(uid)-gfx">
+            <label class="form-label" for="@(console ? "opt-gfx-mode" : uid + "-gfx")">Display mode</label>
+            @* GFX graphics pipeline + codec. "Legacy bitmaps" = the classic fastpath path (most
+               compatible). The GFX modes use MS-RDPEGFX surfaces; H.264 needs the host to grant AVC
+               over GFX (server GPU + the "Prioritize H.264/AVC 444" policy), otherwise the host
+               streams ClearCodec, which we also decode. *@
+            <select class="form-select" name="@(console ? null : Name("GfxMode"))" id="@(console ? "opt-gfx-mode" : uid + "-gfx")">
                 <option value="off" selected="@(Model.GfxMode == "off")">Legacy bitmaps (most compatible)</option>
                 <option value="clearcodec" selected="@(Model.GfxMode == "clearcodec")">GFX — ClearCodec</option>
+                @if (console)
+                {
+                    <option value="progressive" selected="@(Model.GfxMode == "progressive")">GFX — RemoteFX Progressive</option>
+                }
                 <option value="avc420" selected="@(Model.GfxMode == "avc420")">GFX — H.264 (AVC420), fallback ClearCodec</option>
                 <option value="avc444" selected="@(Model.GfxMode == "avc444")">GFX — H.264 (AVC444), fallback ClearCodec</option>
             </select>
         </div>
 
         <label class="flex items-center gap-2 text-sm cursor-pointer pt-1">
-            <input class="form-check" type="checkbox" name="@Name("HiDpi")" value="true" @(Model.HiDpi ? "checked" : "") />
-            <input type="hidden" name="@Name("HiDpi")" value="false" />
+            @if (console)
+            {
+                <input class="form-check" type="checkbox" id="opt-hidpi" checked="@Model.HiDpi" />
+            }
+            else
+            {
+                <input class="form-check" type="checkbox" name="@Name("HiDpi")" value="true" @(Model.HiDpi ? "checked" : "") />
+                <input type="hidden" name="@Name("HiDpi")" value="false" />
+            }
             <span>HiDPI (native resolution)</span>
         </label>
         <p class="text-xs text-muted-foreground">
@@ -81,61 +153,69 @@
 
     <div class="space-y-2">
         <div class="text-xs font-medium text-muted-foreground">Visual quality</div>
-        @* The perf checkboxes assemble into the hidden PerformanceFlags field on change/submit.
-           Checked = the named feature is ON (good visuals); see PERF semantics above. *@
-        <input type="hidden" name="@Name("PerformanceFlags")" value="@mask" class="perf-mask" />
+        @* The perf checkboxes assemble into the PerformanceFlags value. In form mode that lands in
+           the hidden .perf-mask field on change/submit; in console mode Console.cshtml's connect
+           handler reads the checkboxes directly (via the named RDP_PERF keys). Checked = the named
+           feature is ON (good visuals); see PERF semantics above. *@
+        @if (!console)
+        {
+            <input type="hidden" name="@Name("PerformanceFlags")" value="@mask" class="perf-mask" />
+        }
         <label class="flex items-center gap-2 text-sm cursor-pointer">
-            <input class="form-check perf-flag" type="checkbox" data-perf="@FONT_SMOOTHING" checked="@On(FONT_SMOOTHING)" />
+            <input class="form-check perf-flag" type="checkbox" data-perf="@(console ? "ENABLE_FONT_SMOOTHING" : FONT_SMOOTHING.ToString())" checked="@On(FONT_SMOOTHING)" />
             <span>Font smoothing (anti-alias)</span>
         </label>
         <label class="flex items-center gap-2 text-sm cursor-pointer">
-            <input class="form-check perf-flag" type="checkbox" data-perf="@DESKTOP_COMPOSITION" checked="@On(DESKTOP_COMPOSITION)" />
+            <input class="form-check perf-flag" type="checkbox" data-perf="@(console ? "ENABLE_DESKTOP_COMPOSITION" : DESKTOP_COMPOSITION.ToString())" checked="@On(DESKTOP_COMPOSITION)" />
             <span>Desktop composition (Aero)</span>
         </label>
         <label class="flex items-center gap-2 text-sm cursor-pointer">
-            <input class="form-check perf-flag" type="checkbox" data-perf="@DISABLE_WALLPAPER" data-invert="1" checked="@Keep(DISABLE_WALLPAPER)" />
+            <input class="form-check perf-flag" type="checkbox" data-perf="@(console ? "DISABLE_WALLPAPER" : DISABLE_WALLPAPER.ToString())" data-invert="1" checked="@Keep(DISABLE_WALLPAPER)" />
             <span>Wallpaper</span>
         </label>
         <label class="flex items-center gap-2 text-sm cursor-pointer">
-            <input class="form-check perf-flag" type="checkbox" data-perf="@DISABLE_THEMING" data-invert="1" checked="@Keep(DISABLE_THEMING)" />
+            <input class="form-check perf-flag" type="checkbox" data-perf="@(console ? "DISABLE_THEMING" : DISABLE_THEMING.ToString())" data-invert="1" checked="@Keep(DISABLE_THEMING)" />
             <span>Themes</span>
         </label>
         <label class="flex items-center gap-2 text-sm cursor-pointer">
-            <input class="form-check perf-flag" type="checkbox" data-perf="@DISABLE_FULLWINDOWDRAG" data-invert="1" checked="@Keep(DISABLE_FULLWINDOWDRAG)" />
+            <input class="form-check perf-flag" type="checkbox" data-perf="@(console ? "DISABLE_FULLWINDOWDRAG" : DISABLE_FULLWINDOWDRAG.ToString())" data-invert="1" checked="@Keep(DISABLE_FULLWINDOWDRAG)" />
             <span>Show window contents while dragging</span>
         </label>
         <label class="flex items-center gap-2 text-sm cursor-pointer">
-            <input class="form-check perf-flag" type="checkbox" data-perf="@DISABLE_MENUANIMATIONS" data-invert="1" checked="@Keep(DISABLE_MENUANIMATIONS)" />
+            <input class="form-check perf-flag" type="checkbox" data-perf="@(console ? "DISABLE_MENUANIMATIONS" : DISABLE_MENUANIMATIONS.ToString())" data-invert="1" checked="@Keep(DISABLE_MENUANIMATIONS)" />
             <span>Menu animations</span>
         </label>
         <label class="flex items-center gap-2 text-sm cursor-pointer">
-            <input class="form-check perf-flag" type="checkbox" data-perf="@DISABLE_CURSOR_SHADOW" data-invert="1" checked="@Keep(DISABLE_CURSOR_SHADOW)" />
+            <input class="form-check perf-flag" type="checkbox" data-perf="@(console ? "DISABLE_CURSOR_SHADOW" : DISABLE_CURSOR_SHADOW.ToString())" data-invert="1" checked="@Keep(DISABLE_CURSOR_SHADOW)" />
             <span>Cursor shadow</span>
         </label>
         <label class="flex items-center gap-2 text-sm cursor-pointer">
-            <input class="form-check perf-flag" type="checkbox" data-perf="@DISABLE_CURSORSETTINGS" data-invert="1" checked="@Keep(DISABLE_CURSORSETTINGS)" />
+            <input class="form-check perf-flag" type="checkbox" data-perf="@(console ? "DISABLE_CURSORSETTINGS" : DISABLE_CURSORSETTINGS.ToString())" data-invert="1" checked="@Keep(DISABLE_CURSORSETTINGS)" />
             <span>Cursor blink</span>
         </label>
     </div>
 </div>
 
-<script>
-    (function () {
-        var root = document.querySelector(".@uid");
-        if (!root) return;
-        var mask = root.querySelector(".perf-mask");
-        function recompute() {
-            var v = 0;
+@if (!console)
+{
+    <script>
+        (function () {
+            var root = document.querySelector(".@uid");
+            if (!root) return;
+            var mask = root.querySelector(".perf-mask");
+            function recompute() {
+                var v = 0;
+                root.querySelectorAll(".perf-flag").forEach(function (cb) {
+                    var bit = parseInt(cb.getAttribute("data-perf"), 10) || 0;
+                    var invert = cb.getAttribute("data-invert") === "1";
+                    if (invert ? !cb.checked : cb.checked) v |= bit;
+                });
+                mask.value = v >>> 0;
+            }
             root.querySelectorAll(".perf-flag").forEach(function (cb) {
-                var bit = parseInt(cb.getAttribute("data-perf"), 10) || 0;
-                var invert = cb.getAttribute("data-invert") === "1";
-                if (invert ? !cb.checked : cb.checked) v |= bit;
+                cb.addEventListener("change", recompute);
             });
-            mask.value = v >>> 0;
-        }
-        root.querySelectorAll(".perf-flag").forEach(function (cb) {
-            cb.addEventListener("change", recompute);
-        });
-        recompute();
-    })();
-</script>
+            recompute();
+        })();
+    </script>
+}

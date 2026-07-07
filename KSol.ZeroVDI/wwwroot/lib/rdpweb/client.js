@@ -1246,6 +1246,9 @@ Client.prototype.handleBitmap = function (r) {
 Client.prototype._onGfxPaint = function (canvas, sx, sy, sw, sh, dx, dy) {
     if (sw <= 0 || sh <= 0) return;
     try {
+        // The source GFX surface canvas is opaque-backed (see _onCreateSurface's getContext alpha:false),
+        // so this source-over drawImage fully replaces the destination rect — no alpha bleed-through of
+        // the previous output frame (per [MS-RDPEGFX], surfaces mapped to output are opaque; alpha ignored).
         this.ctx.drawImage(canvas, sx, sy, sw, sh, dx, dy, sw, sh);
     } catch (e) {
         console.warn("gfx paint failed:", e);

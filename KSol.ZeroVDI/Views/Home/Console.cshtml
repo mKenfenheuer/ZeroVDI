@@ -386,95 +386,20 @@
 
                 <details class="rounded-lg border border-border">
                     <summary class="cursor-pointer select-none px-3 py-2 text-sm font-medium text-foreground">Session options</summary>
-                    <div class="px-3 pb-3 space-y-2">
+                    <div class="px-3 pb-3">
+                        @* The single shared option editor (Views/Shared/_ConnectionDefaultsEditor.cshtml),
+                           rendered in "console" mode: it emits the ids the connect handler reads
+                           (opt-audio, opt-gfx-mode, …) and the named-key perf checkboxes, and reflects the
+                           user's/admin's pre-saved values — checked states come from `defaults`, never
+                           hardcoded. Passing DevicePolicy drives the per-feature admin locks. *@
                         @{
-                            var audioLocked = DevicePolicy.IsLocked(devicePolicy.Audio);
-                            var clipLocked = DevicePolicy.IsLocked(devicePolicy.Clipboard);
-                            var micLocked = DevicePolicy.IsLocked(devicePolicy.Microphone);
-                            var camLocked = DevicePolicy.IsLocked(devicePolicy.Camera);
+                            var consoleVd = new ViewDataDictionary(ViewData)
+                            {
+                                ["Mode"] = "console",
+                                ["DevicePolicy"] = devicePolicy,
+                            };
                         }
-                        <label class="flex items-center gap-2 text-sm @(audioLocked ? "opacity-60 cursor-not-allowed" : "cursor-pointer")">
-                            <input class="form-check" type="checkbox" id="opt-audio" checked="@defaults.Audio" disabled="@audioLocked" />
-                            <span>Remote sound</span>
-                            @if (audioLocked) { <i class="fa-solid fa-lock text-xs text-muted-foreground" title="Locked by administrator policy"></i> }
-                        </label>
-                        <label class="flex items-center gap-2 text-sm @(clipLocked ? "opacity-60 cursor-not-allowed" : "cursor-pointer")">
-                            <input class="form-check" type="checkbox" id="opt-clipboard" checked="@defaults.Clipboard" disabled="@clipLocked" />
-                            <span>Clipboard sync</span>
-                            @if (clipLocked) { <i class="fa-solid fa-lock text-xs text-muted-foreground" title="Locked by administrator policy"></i> }
-                        </label>
-                        <label class="flex items-center gap-2 text-sm @(micLocked ? "opacity-60 cursor-not-allowed" : "cursor-pointer")">
-                            <input class="form-check" type="checkbox" id="opt-microphone" checked="@defaults.Microphone" disabled="@micLocked"/>
-                            <span>Microphone (prompts for permission)</span>
-                            @if (micLocked) { <i class="fa-solid fa-lock text-xs text-muted-foreground" title="Locked by administrator policy"></i> }
-                        </label>
-                        <label class="flex items-center gap-2 text-sm @(camLocked ? "opacity-60 cursor-not-allowed" : "cursor-pointer")">
-                            <input class="form-check" type="checkbox" id="opt-camera" checked="@defaults.Camera" disabled="@camLocked"/>
-                            <span>Camera (prompts for permission)</span>
-                            @if (camLocked) { <i class="fa-solid fa-lock text-xs text-muted-foreground" title="Locked by administrator policy"></i> }
-                        </label>
-
-                        <div class="pt-1">
-                            <label for="opt-gfx-mode" class="form-label">Display mode</label>
-                            @* GFX graphics pipeline + codec. "Legacy bitmaps" = the classic fastpath path
-                               (most compatible). The GFX modes use MS-RDPEGFX surfaces; H.264 needs the host
-                               to grant AVC over GFX (server GPU + the "Prioritize H.264/AVC 444" policy),
-                               otherwise the host streams ClearCodec, which we also decode. *@
-                            @{ var gfxMode = defaults?.GfxMode ?? "avc420"; }
-                            <select class="form-select" id="opt-gfx-mode">
-                                <option value="off" selected="@(gfxMode == "off")">Legacy bitmaps (most compatible)</option>
-                                <option value="clearcodec" selected="@(gfxMode == "clearcodec")">GFX — ClearCodec</option>
-                                <option value="progressive" selected="@(gfxMode == "progressive")">GFX — RemoteFX Progressive</option>
-                                <option value="avc420" selected="@(gfxMode == "avc420")">GFX — H.264 (AVC420), fallback ClearCodec</option>
-                                <option value="avc444" selected="@(gfxMode == "avc444")">GFX — H.264 (AVC444), fallback ClearCodec</option>
-                            </select>
-                        </div>
-
-                        <label class="flex items-center gap-2 text-sm cursor-pointer pt-2">
-                            <input class="form-check" type="checkbox" id="opt-hidpi" checked="@(defaults?.HiDpi ?? false)" />
-                            <span>HiDPI (native resolution)</span>
-                        </label>
-                        <p class="text-xs text-muted-foreground">
-                            Render at your display's full pixel density for a crisp picture on Retina/HiDPI
-                            screens. Off is faster (less data to stream); default off.
-                        </p>
-
-                        <div class="pt-1 text-xs font-medium text-muted-foreground">Visual quality</div>
-                        @* Performance flags. Checked = the named eye-candy / quality feature is ON.
-                           Defaults below favour better visuals (font smoothing + composition, all
-                           eye-candy left on). The data-perf attribute holds the RDP flag bit. *@
-                        <label class="flex items-center gap-2 text-sm cursor-pointer">
-                            <input class="form-check perf-flag" type="checkbox" id="perf-font" data-perf="ENABLE_FONT_SMOOTHING" checked />
-                            <span>Font smoothing (anti-alias)</span>
-                        </label>
-                        <label class="flex items-center gap-2 text-sm cursor-pointer">
-                            <input class="form-check perf-flag" type="checkbox" id="perf-comp" data-perf="ENABLE_DESKTOP_COMPOSITION" checked />
-                            <span>Desktop composition (Aero)</span>
-                        </label>
-                        <label class="flex items-center gap-2 text-sm cursor-pointer">
-                            <input class="form-check perf-flag" type="checkbox" id="perf-wallpaper" data-perf="DISABLE_WALLPAPER" data-invert="1" checked />
-                            <span>Wallpaper</span>
-                        </label>
-                        <label class="flex items-center gap-2 text-sm cursor-pointer">
-                            <input class="form-check perf-flag" type="checkbox" id="perf-theming" data-perf="DISABLE_THEMING" data-invert="1" checked />
-                            <span>Themes</span>
-                        </label>
-                        <label class="flex items-center gap-2 text-sm cursor-pointer">
-                            <input class="form-check perf-flag" type="checkbox" id="perf-drag" data-perf="DISABLE_FULLWINDOWDRAG" data-invert="1" checked />
-                            <span>Show window contents while dragging</span>
-                        </label>
-                        <label class="flex items-center gap-2 text-sm cursor-pointer">
-                            <input class="form-check perf-flag" type="checkbox" id="perf-menu" data-perf="DISABLE_MENUANIMATIONS" data-invert="1" checked />
-                            <span>Menu animations</span>
-                        </label>
-                        <label class="flex items-center gap-2 text-sm cursor-pointer">
-                            <input class="form-check perf-flag" type="checkbox" id="perf-cursorshadow" data-perf="DISABLE_CURSOR_SHADOW" data-invert="1" checked />
-                            <span>Cursor shadow</span>
-                        </label>
-                        <label class="flex items-center gap-2 text-sm cursor-pointer">
-                            <input class="form-check perf-flag" type="checkbox" id="perf-cursorsettings" data-perf="DISABLE_CURSORSETTINGS" data-invert="1" checked />
-                            <span>Cursor blink</span>
-                        </label>
+                        <partial name="_ConnectionDefaultsEditor" model="defaults" view-data="consoleVd" />
                     </div>
                 </details>
 

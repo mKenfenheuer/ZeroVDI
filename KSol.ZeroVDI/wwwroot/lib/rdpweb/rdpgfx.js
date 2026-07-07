@@ -131,6 +131,12 @@ function RdpGfx(cb) {
 // behavior), so a locked-down environment still renders, just with the old blocking-decode tradeoff.
 RdpGfx.prototype._initWorker = function () {
     if (typeof Worker === "undefined" || !RDPGFX_WORKER_URL) return;
+    // Diagnostic escape hatch: window.RDP_GFX_NO_WORKER = true forces synchronous main-thread decode
+    // (the pre-Worker path) so we can A/B whether an async decode race is behind a rendering artifact.
+    if (typeof window !== "undefined" && window.RDP_GFX_NO_WORKER) {
+        this._log("rdpgfx: decode worker disabled by RDP_GFX_NO_WORKER — using main-thread decode");
+        return;
+    }
     try {
         this._worker = new Worker(RDPGFX_WORKER_URL);
         const self = this;
@@ -340,7 +346,13 @@ RdpGfx.prototype._onCreateSurface = function (r) {
     const canvas = (typeof OffscreenCanvas !== "undefined")
         ? new OffscreenCanvas(width, height)
         : Object.assign(document.createElement("canvas"), { width: width, height: height });
-    const ctx = canvas.getContext("2d");
+      // alpha:false — a GFX surface is opaque desktop content ([MS-RDPEGFX] 3.3.8.x: when mapped to output
+    // the alpha channel MUST be ignored). An opaque-backed canvas initializes to opaque black instead of
+    // transparent, so surface regions no codec has written yet don't blend the previous output frame
+    // through when the surface is drawImage'd to the visible canvas — that translucent bleed-through was
+    // the "ghost of the last frame" artifact. Our decoders already write A=0xff, so real content is
+    // unaffected; this only forces the untouched/edge pixels opaque.
+    const ctx = canvas.getContext("2d", { alpha: false });
     // `touched` flips true on the first content write (_afterSurfaceUpdate). Untouched surfaces are
     // never blitted to the output (see _paintSurface) — painting a brand-new empty surface would wipe
     // the last good frame during a host-side reconfigure (GNOME RD deletes+recreates its surface and
@@ -873,7 +885,9 @@ RdpGfx.prototype._onSurfaceToCache = function (r) {
         const canvas = (typeof OffscreenCanvas !== "undefined")
             ? new OffscreenCanvas(w, h)
             : Object.assign(document.createElement("canvas"), { width: w, height: h });
-        slot = this.cache[cacheSlot] = { canvas, ctx: canvas.getContext("2d"), w, h };
+        // alpha:false to match surfaces — cache slots hold opaque surface snapshots; keeping them opaque
+        // stops any alpha from sneaking back onto a surface via CACHE_TO_SURFACE (same ghost mechanism).
+        slot = this.cache[cacheSlot] = { canvas, ctx: canvas.getContext("2d", { alpha: false }), w, h };
     }
     slot.ctx.drawImage(surf.canvas, left, top, w, h, 0, 0, w, h);
 };

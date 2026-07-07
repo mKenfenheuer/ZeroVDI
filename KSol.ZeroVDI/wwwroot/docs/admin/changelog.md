@@ -7,6 +7,24 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.15] — 2026-07-07 — Console session options honour saved/admin defaults via one shared editor
+
+### Fixed
+- **Console "Session options" now reflect the saved and admin-enforced defaults.** The visual-quality
+  (performance-flag) checkboxes in the RDP console popup were hard-coded to all-on, so a manual login
+  ignored the user's/resource's stored `PerformanceFlags` and only auto-connect sessions applied them.
+  The popup now renders every checkbox — device toggles, display mode, HiDPI and all perf flags — from
+  the pre-saved connection defaults (clamped by tenant Device policy), never hardcoded.
+
+### Changed
+- **Single shared connection-defaults editor.** `Views/Shared/_ConnectionDefaultsEditor.cshtml` gained a
+  `"console"` render mode (`ViewData["Mode"]`) so the console popup and the resource Create/Edit/home
+  settings forms render from the *same* partial and can no longer drift. Console mode emits the ids the
+  connect handler reads, the named `RDP_PERF` perf keys, the admin per-feature lock UI, and the extra
+  RemoteFX Progressive display option; form mode is unchanged.
+
+---
+
 ## [0.6.14] — 2026-07-07 — Connector admin documentation, custom license, repositioned README
 
 ### Added
