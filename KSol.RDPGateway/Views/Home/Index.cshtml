@@ -55,7 +55,7 @@ else
                         @{ var displayName = item.PoolName ?? resource.Name; }
                         <h3 class="font-semibold truncate" title="@displayName">@displayName</h3>
                     </div>
-                    @if (item.IsPool)
+                    @if (item.IsPool || item.PoolName != null)
                     {
                         <span class="badge bg-info/10 text-info" title="A personal desktop is created the first time you connect."><i class="ri-stack-line"></i> Pool</span>
                     }
