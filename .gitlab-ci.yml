@@ -8,20 +8,23 @@ stages:
 build_amd64_image:
   stage: build
   needs:
-    - build_desktop_windows_linux
-  #  - build_desktop_macos
+    - job: build_desktop_windows_linux
+      optional: true
+    - job: build_desktop_macos
+      optional: true
   tags:
     - docker
     - build
     - shell
   script:
-    # Bundle the desktop client installers into the image so the dashboard can offer them for
-    # direct download — staged into wwwroot/downloads before build so `dotnet publish` picks them
-    # up as static content, same as any other wwwroot asset.
+    # Desktop client installers are no longer built on every pipeline (see build_desktop_*
+    # jobs' `rules: changes`). Instead, pull the latest already-published installers from the
+    # generic package registry so the dashboard can always offer a download, independent of
+    # whether this pipeline touched the desktop client.
     - mkdir -p KSol.ZeroVDI/wwwroot/downloads
-    - cp KSol.ZeroVDI.Desktop/dist/*.exe KSol.ZeroVDI/wwwroot/downloads/ZeroVDI-Setup-Windows.exe
-    - cp KSol.ZeroVDI.Desktop/dist/*.AppImage KSol.ZeroVDI/wwwroot/downloads/ZeroVDI-Linux.AppImage
-    - cp KSol.ZeroVDI.Desktop/dist/*.dmg KSol.ZeroVDI/wwwroot/downloads/ZeroVDI-macOS.dmg || true
+    - 'curl --fail --location --header "JOB-TOKEN: $CI_JOB_TOKEN" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/desktop-client/latest/ZeroVDI-Setup-Windows.exe" -o KSol.ZeroVDI/wwwroot/downloads/ZeroVDI-Setup-Windows.exe'
+    - 'curl --fail --location --header "JOB-TOKEN: $CI_JOB_TOKEN" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/desktop-client/latest/ZeroVDI-Linux.AppImage" -o KSol.ZeroVDI/wwwroot/downloads/ZeroVDI-Linux.AppImage'
+    - 'curl --fail --location --header "JOB-TOKEN: $CI_JOB_TOKEN" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/desktop-client/latest/ZeroVDI-macOS.dmg" -o KSol.ZeroVDI/wwwroot/downloads/ZeroVDI-macOS.dmg || true'
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
     - docker build -t $CI_COMMIT_BRANCH .
     - docker image tag $CI_COMMIT_BRANCH $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
@@ -44,11 +47,15 @@ build_connector_image:
 
 # Desktop client (Electron wrapper around the web console). Windows and Linux targets are built
 # cross-platform via electron-builder on the existing Linux runner; macOS needs Apple's own
-# tooling (codesign/hdiutil) so it runs on the macOS runner instead. Artifacts are kept as GitLab
-# job artifacts rather than pushed anywhere — pull them from the pipeline until a release process
-# for the desktop client exists.
+# tooling (codesign/hdiutil) so it runs on the macOS runner instead. Only runs when files under
+# KSol.ZeroVDI.Desktop change, so unrelated pipelines don't pay for an Electron rebuild. Installers
+# are pushed to the generic package registry under the `latest` version so build_amd64_image (and
+# anyone else) can grab the newest build without needing this job to have run.
 build_desktop_windows_linux:
   stage: build
+  rules:
+    - changes:
+        - KSol.ZeroVDI.Desktop/**/*
   tags:
     - docker
     - build
@@ -58,25 +65,31 @@ build_desktop_windows_linux:
     - cd KSol.ZeroVDI.Desktop
     - npm ci
     - npx electron-builder --linux --win
+    - 'curl --fail --location --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file dist/*.exe "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/desktop-client/latest/ZeroVDI-Setup-Windows.exe"'
+    - 'curl --fail --location --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file dist/*.AppImage "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/desktop-client/latest/ZeroVDI-Linux.AppImage"'
   artifacts:
     paths:
       - KSol.ZeroVDI.Desktop/dist/*.AppImage
       - KSol.ZeroVDI.Desktop/dist/*.exe
     expire_in: 30 days
 
-#build_desktop_macos:
-#  stage: build
-#  tags:
-#    - shell
-#    - macos
-#  script:
-#    - cd KSol.ZeroVDI.Desktop
-#    - npm ci
-#    - npx electron-builder --mac
- # artifacts:
- #   paths:
- #     - KSol.ZeroVDI.Desktop/dist/*.dmg
- #   expire_in: 30 days
+build_desktop_macos:
+  stage: build
+  rules:
+    - changes:
+        - KSol.ZeroVDI.Desktop/**/*
+  tags:
+    - shell
+    - macos
+  script:
+    - cd KSol.ZeroVDI.Desktop
+    - npm ci
+    - npx electron-builder --mac
+    - 'curl --fail --location --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file dist/*.dmg "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/desktop-client/latest/ZeroVDI-macOS.dmg"'
+  artifacts:
+    paths:
+      - KSol.ZeroVDI.Desktop/dist/*.dmg
+    expire_in: 30 days
 
 # Shared deploy logic. Prod and dev run as two isolated compose projects on the
 # same host: distinct project names give each its own pgdata + keys volumes, so
