@@ -28,9 +28,9 @@
             <i class="ri-question-line text-xl"></i>
         </a>
     }
-    @if (SignInManager.IsSignedIn(User))
+    @if (SignInManager.IsSignedIn(User) && !KSol.ZeroVDI.RDP.DesktopClient.IsElectron(Context))
     {
-        <!-- Desktop app download -->
+        <!-- Desktop app download (hidden inside the desktop app itself) -->
         <div class="relative" id="download-dropdown-container">
             <button id="download-toggle-btn" type="button" aria-label="Download desktop app" title="Download desktop app"
                     class="w-10 h-10 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors">
