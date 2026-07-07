@@ -67,11 +67,6 @@ build_desktop_windows_linux:
     - npx electron-builder --linux --win
     - 'curl --fail --location --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file dist/*.exe "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/desktop-client/latest/ZeroVDI-Setup-Windows.exe"'
     - 'curl --fail --location --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file dist/*.AppImage "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/desktop-client/latest/ZeroVDI-Linux.AppImage"'
-  artifacts:
-    paths:
-      - KSol.ZeroVDI.Desktop/dist/*.AppImage
-      - KSol.ZeroVDI.Desktop/dist/*.exe
-    expire_in: 30 days
 
 build_desktop_macos:
   stage: build
@@ -86,10 +81,6 @@ build_desktop_macos:
     - npm ci
     - npx electron-builder --mac
     - 'curl --fail --location --header "JOB-TOKEN: $CI_JOB_TOKEN" --upload-file dist/*.dmg "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/desktop-client/latest/ZeroVDI-macOS.dmg"'
-  artifacts:
-    paths:
-      - KSol.ZeroVDI.Desktop/dist/*.dmg
-    expire_in: 30 days
 
 # Shared deploy logic. Prod and dev run as two isolated compose projects on the
 # same host: distinct project names give each its own pgdata + keys volumes, so
