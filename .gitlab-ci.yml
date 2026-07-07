@@ -9,6 +9,7 @@ build_amd64_image:
   stage: build
   needs:
     - build_desktop_windows_linux
+    - build_desktop_macos
   tags:
     - docker
     - build
@@ -20,7 +21,7 @@ build_amd64_image:
     - mkdir -p KSol.ZeroVDI/wwwroot/downloads
     - cp KSol.ZeroVDI.Desktop/dist/*.exe KSol.ZeroVDI/wwwroot/downloads/ZeroVDI-Setup-Windows.exe
     - cp KSol.ZeroVDI.Desktop/dist/*.AppImage KSol.ZeroVDI/wwwroot/downloads/ZeroVDI-Linux.AppImage
-    #- cp KSol.ZeroVDI.Desktop/dist/*.dmg KSol.ZeroVDI/wwwroot/downloads/ZeroVDI-macOS.dmg
+    - cp KSol.ZeroVDI.Desktop/dist/*.dmg KSol.ZeroVDI/wwwroot/downloads/ZeroVDI-macOS.dmg
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
     - docker build -t $CI_COMMIT_BRANCH .
     - docker image tag $CI_COMMIT_BRANCH $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
@@ -51,7 +52,7 @@ build_desktop_windows_linux:
   tags:
     - docker
     - build
-    - shell
+    - dind
   image: electronuserland/builder:wine
   script:
     - cd KSol.ZeroVDI.Desktop
@@ -63,19 +64,19 @@ build_desktop_windows_linux:
       - KSol.ZeroVDI.Desktop/dist/*.exe
     expire_in: 30 days
 
-#build_desktop_macos:
-#  stage: build
-#  tags:
-#    - shell
-#    - macos
-#  script:
-#    - cd KSol.ZeroVDI.Desktop
-#    - npm ci
-#    - npx electron-builder --mac
-#  artifacts:
-#    paths:
-#      - KSol.ZeroVDI.Desktop/dist/*.dmg
-#    expire_in: 30 days
+build_desktop_macos:
+  stage: build
+  tags:
+    - shell
+    - macos
+  script:
+    - cd KSol.ZeroVDI.Desktop
+    - npm ci
+    - npx electron-builder --mac
+  artifacts:
+    paths:
+      - KSol.ZeroVDI.Desktop/dist/*.dmg
+    expire_in: 30 days
 
 # Shared deploy logic. Prod and dev run as two isolated compose projects on the
 # same host: distinct project names give each its own pgdata + keys volumes, so
