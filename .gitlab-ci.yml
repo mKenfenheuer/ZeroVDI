@@ -9,7 +9,6 @@ build_amd64_image:
   stage: build
   needs:
     - build_desktop_windows_linux
-    - build_desktop_macos
   tags:
     - docker
     - build
