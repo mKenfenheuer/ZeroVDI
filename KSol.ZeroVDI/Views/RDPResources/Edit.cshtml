@@ -1,0 +1,606 @@
+@model KSol.ZeroVDI.Controllers.ResourceEditViewModel
+@using KSol.ZeroVDI.Models
+
+@{
+    var r = Model.Resource;
+    ViewData["Title"] = r.Name;
+    ViewData["Subtitle"] = "Edit resource";
+    var isProxmox = r.Source == ResourceSource.Proxmox;
+    var isManual = r.Source == ResourceSource.Manual;
+
+    var tabs = new (string Id, string Label, string Icon)[]
+    {
+        ("general", "General", "ri-settings-3-line"),
+        ("backend", "Backend & VM", "ri-server-line"),
+        ("access", "Users & access", "ri-shield-user-line"),
+        ("defaults", "Connection", "ri-slideshow-line"),
+        ("audit", "Audit", "ri-film-line"),
+    };
+}
+
+@section PageActions {
+    <div class="flex items-center gap-2">
+        <span class="@(isProxmox ? "badge-primary" : "badge-muted")">@r.Source</span>
+        <partial name="_PowerStateBadge" model="r.PowerState" />
+        @if (r.PowerState == ResourcePowerState.Running || r.PowerState == ResourcePowerState.Starting)
+        {
+            <form asp-action="Stop" asp-route-id="@r.Id" method="post"
+                  data-confirm="Shut down this resource now?">
+                @Html.AntiForgeryToken()
+                <button type="submit" class="btn-outline text-destructive border-destructive/40 hover:bg-destructive/10">
+                    <i class="ri-shut-down-line"></i> Shut down
+                </button>
+            </form>
+        }
+        <a asp-action="Index" class="btn-secondary"><i class="ri-arrow-left-line"></i> Back</a>
+    </div>
+}
+
+<div class="max-w-4xl" x-tabs>
+    <!-- Tab bar -->
+    <div class="flex flex-wrap gap-1 border-b border-border mb-6" role="tablist">
+        @foreach (var (id, label, icon) in tabs)
+        {
+            <button type="button" data-tab="@id" role="tab"
+                    class="tab-btn flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-muted-foreground hover:text-foreground transition-colors -mb-px">
+                <i class="@icon"></i> @label
+            </button>
+        }
+    </div>
+
+    <!-- General -->
+    <section data-panel="general" class="space-y-6">
+        <form asp-action="Edit" asp-route-id="@r.Id" class="card-surface p-6 space-y-6">
+            <div asp-validation-summary="ModelOnly"></div>
+            <input type="hidden" asp-for="Resource.Id" name="Id" />
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label asp-for="Resource.Name" class="form-label">Name</label>
+                    <input asp-for="Resource.Name" name="Name" class="form-input" />
+                </div>
+                <div>
+                    <label asp-for="Resource.Description" class="form-label">Description</label>
+                    <input asp-for="Resource.Description" name="Description" class="form-input" />
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div class="md:col-span-2">
+                    <label asp-for="Resource.IpAddress" class="form-label">IP address / host</label>
+                    <input asp-for="Resource.IpAddress" name="IpAddress" class="form-input @(isProxmox ? "opacity-60" : "")" readonly="@isProxmox" />
+                </div>
+                <div>
+                    <label asp-for="Resource.Port" class="form-label">RDP port</label>
+                    <input asp-for="Resource.Port" name="Port" type="number" class="form-input @(isProxmox ? "opacity-60" : "")" readonly="@isProxmox" />
+                </div>
+                @if (Model.AvailableConnectors.Count > 0)
+                {
+                    <div class="md:col-span-2">
+                        <label asp-for="Resource.ForcedConnectorId" class="form-label">Force connection through connector</label>
+                        <select asp-for="Resource.ForcedConnectorId" name="ForcedConnectorId" class="form-input">
+                            <option value="">Automatic (fastest of direct / connectors)</option>
+                            @foreach (var c in Model.AvailableConnectors)
+                            {
+                                <option value="@c.Id">@c.Name</option>
+                            }
+                        </select>
+                        <p class="text-xs text-muted-foreground mt-1">Pin this resource to a specific connector instead of letting the gateway pick the fastest path.</p>
+                    </div>
+                }
+            </div>
+
+            @if (isProxmox)
+            {
+                <p class="text-sm text-muted-foreground">Address is synced from the VM notes and not editable here. Session options live in the "Connection" tab.</p>
+            }
+
+            @if (isManual)
+            {
+                <div class="border-t border-border pt-4 space-y-4">
+                    <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide">Lifecycle</h2>
+
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                            <label class="form-label">OS type</label>
+                            <select name="OsType" class="form-select">
+                                <option value="0" selected="@(r.OsType == OsType.Windows)">Windows</option>
+                                <option value="1" selected="@(r.OsType == OsType.WindowsServer)">Windows Server</option>
+                                <option value="2" selected="@(r.OsType == OsType.Linux)">Linux</option>
+                                <option value="3" selected="@(r.OsType == OsType.MacOS)">macOS</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="form-label">Wake method</label>
+                            <select name="WakeMethod" id="wake-method" class="form-select">
+                                <option value="0" selected="@(r.WakeMethod == WakeMethod.None)">None</option>
+                                <option value="1" selected="@(r.WakeMethod == WakeMethod.WakeOnLan)">Wake-on-LAN</option>
+                                <option value="2" selected="@(r.WakeMethod == WakeMethod.Ipmi)">IPMI</option>
+                            </select>
+                        </div>
+                        <div id="wol-fields" class="@(r.WakeMethod != WakeMethod.WakeOnLan ? "hidden" : "")">
+                            <label class="form-label">MAC address</label>
+                            <input name="WolMacAddress" value="@r.WolMacAddress" class="form-input" placeholder="AA:BB:CC:DD:EE:FF" />
+                        </div>
+                    </div>
+
+                    <div id="ipmi-fields" class="grid grid-cols-1 md:grid-cols-3 gap-4 @(r.WakeMethod != WakeMethod.Ipmi ? "hidden" : "")">
+                        <div>
+                            <label class="form-label">IPMI host</label>
+                            <input name="IpmiHost" value="@r.IpmiHost" class="form-input" placeholder="10.0.0.100" />
+                        </div>
+                        <div>
+                            <label class="form-label">IPMI user</label>
+                            <input name="IpmiUser" value="@r.IpmiUser" class="form-input" />
+                        </div>
+                        <div>
+                            <label class="form-label">IPMI password</label>
+                            <input name="ipmiPassword" type="password" class="form-input" placeholder="@(string.IsNullOrEmpty(r.ProtectedIpmiPassword) ? "" : "••••••••")" autocomplete="new-password" />
+                            <p class="form-hint">Leave blank to keep existing.</p>
+                        </div>
+                    </div>
+
+                    <div class="border-t border-border pt-4 space-y-4">
+                        <div class="flex items-end gap-4">
+                            <div class="md:w-1/3">
+                                <label class="form-label">Shutdown method</label>
+                                <select name="ShutdownMethod" id="shutdown-method" class="form-select">
+                                    <option value="0" selected="@(r.ShutdownMethod == ShutdownMethod.None)">None</option>
+                                    <option value="1" selected="@(r.ShutdownMethod == ShutdownMethod.Ssh)">SSH (Linux/macOS)</option>
+                                    <option value="2" selected="@(r.ShutdownMethod == ShutdownMethod.Ipmi)">IPMI (ACPI soft off)</option>
+                                    <option value="3" selected="@(r.ShutdownMethod == ShutdownMethod.Windows)">Windows (net rpc)</option>
+                                </select>
+                            </div>
+                            <p class="form-hint pb-2">IPMI reuses the wake IPMI host &amp; credentials above.</p>
+                        </div>
+
+                        <div id="shutdown-ssh-fields" class="grid grid-cols-1 md:grid-cols-3 gap-4 @(r.ShutdownMethod != ShutdownMethod.Ssh ? "hidden" : "")">
+                            <div>
+                                <label class="form-label">SSH user</label>
+                                <input name="SshUser" value="@r.SshUser" class="form-input" placeholder="root" />
+                            </div>
+                            <div>
+                                <label class="form-label">SSH private key</label>
+                                <textarea name="sshKey" class="form-input" rows="2" placeholder="@(string.IsNullOrEmpty(r.ProtectedSshKey) ? "Paste private key content" : "Key stored — leave blank to keep")"></textarea>
+                            </div>
+                            <div>
+                                <label class="form-label">Shutdown command</label>
+                                <input name="ShutdownCommand" value="@r.ShutdownCommand" class="form-input" placeholder="shutdown -h now" />
+                            </div>
+                        </div>
+
+                        <div id="shutdown-windows-fields" class="grid grid-cols-1 md:grid-cols-3 gap-4 @(r.ShutdownMethod != ShutdownMethod.Windows ? "hidden" : "")">
+                            <div>
+                                <label class="form-label">Windows user</label>
+                                <input name="WindowsUser" value="@r.WindowsUser" class="form-input" placeholder="Administrator" />
+                                <p class="form-hint">Local or DOMAIN\\user with shutdown rights.</p>
+                            </div>
+                            <div>
+                                <label class="form-label">Windows password</label>
+                                <input name="windowsPassword" type="password" class="form-input" placeholder="@(string.IsNullOrEmpty(r.ProtectedWindowsPassword) ? "" : "••••••••")" autocomplete="new-password" />
+                                <p class="form-hint">Leave blank to keep existing.</p>
+                            </div>
+                        </div>
+
+                        <p id="shutdown-ipmi-note" class="form-hint @(r.ShutdownMethod != ShutdownMethod.Ipmi ? "hidden" : "")">
+                            Sends an ACPI soft power-off to the IPMI host configured under "Wake method".
+                        </p>
+                    </div>
+                </div>
+            }
+
+            <div class="flex items-center gap-2 pt-2 border-t border-border">
+                <button type="submit" class="btn-primary">Save changes</button>
+            </div>
+        </form>
+    </section>
+
+    <!-- Backend & VM -->
+    <section data-panel="backend" class="hidden">
+        <div class="card-surface p-6">
+            <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-4">Backend & VM information</h2>
+            @if (isProxmox)
+            {
+                <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-3 text-sm">
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Backend</dt><dd>@(Model.Backend?.Name ?? "—")</dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Node</dt><dd>@(r.ProxmoxNode ?? "—")</dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">VMID</dt><dd>@(r.ProxmoxVmId?.ToString() ?? "—")</dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Current state</dt><dd><partial name="_PowerStateBadge" model="r.PowerState" /></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Address</dt><dd>@(string.IsNullOrEmpty(r.IpAddress) ? "—" : $"{r.IpAddress}:{r.Port}")</dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Last activity</dt><dd>@(r.LastActivityUtc?.ToString("u") ?? "—")</dd></div>
+                </dl>
+                @if (!string.IsNullOrEmpty(r.ConfigJson))
+                {
+                    <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mt-6 mb-2">VM notes (config)</h3>
+                    <pre class="text-xs bg-muted rounded-lg p-3 overflow-x-auto">@r.ConfigJson</pre>
+                }
+                @if (r.ProxmoxVmId != null)
+                {
+                    <div id="rrd-charts" class="mt-6 space-y-4">
+                        <h3 class="text-xs font-medium text-muted-foreground uppercase tracking-wide">Performance (last hour)</h3>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div class="bg-muted rounded-lg p-3"><span class="text-xs text-muted-foreground">CPU</span><canvas id="chart-cpu" height="80" class="w-full mt-1"></canvas></div>
+                            <div class="bg-muted rounded-lg p-3"><span class="text-xs text-muted-foreground">Memory</span><canvas id="chart-mem" height="80" class="w-full mt-1"></canvas></div>
+                            <div class="bg-muted rounded-lg p-3"><span class="text-xs text-muted-foreground">Network I/O</span><canvas id="chart-net" height="80" class="w-full mt-1"></canvas></div>
+                            <div class="bg-muted rounded-lg p-3"><span class="text-xs text-muted-foreground">Disk I/O</span><canvas id="chart-disk" height="80" class="w-full mt-1"></canvas></div>
+                        </div>
+                    </div>
+                }
+            }
+            else
+            {
+                <dl class="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-3 text-sm">
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Source</dt><dd>Manual</dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">OS type</dt><dd>@r.OsType</dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Address</dt><dd>@(string.IsNullOrEmpty(r.IpAddress) ? "—" : $"{r.IpAddress}:{r.Port}")</dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Current state</dt><dd><partial name="_PowerStateBadge" model="r.PowerState" /></dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Wake method</dt><dd>@r.WakeMethod</dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Last activity</dt><dd>@(r.LastActivityUtc?.ToString("u") ?? "—")</dd></div>
+                </dl>
+            }
+        </div>
+    </section>
+
+    <!-- Users & access -->
+    <section data-panel="access" class="hidden space-y-4">
+        <!-- Group grants -->
+        <div class="card-surface p-6">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="font-medium">Granted groups</h2>
+                <span class="text-sm text-muted-foreground">@Model.GrantedGroups.Count granted</span>
+            </div>
+            <p class="text-sm text-muted-foreground mb-4">Every member of a granted group can connect to this resource. Personal SSO credentials stay per-user.</p>
+            <div class="mb-4">
+                @{
+                    var groupPicker = new AccessPickerModel
+                    {
+                        FormAction = "GrantGroup",
+                        FormController = "RDPResources",
+                        RouteId = r.Id,
+                        FieldName = "groupId",
+                        Placeholder = "Grant a group…",
+                        ButtonLabel = "Grant",
+                        Candidates = Model.AvailableGroups.Select(g => (g.Id, g.Name)),
+                    };
+                }
+                <partial name="_AccessPicker" model="groupPicker" />
+            </div>
+            @if (!Model.GrantedGroups.Any())
+            {
+                <p class="text-sm text-muted-foreground">No groups granted.</p>
+            }
+            else
+            {
+                <ul class="space-y-1">
+                    @foreach (var g in Model.GrantedGroups)
+                    {
+                        <li class="flex items-center justify-between text-sm py-2 border-b border-border last:border-0">
+                            <a asp-controller="UserGroups" asp-action="Manage" asp-route-id="@g.Id" class="hover:underline">
+                                <i class="ri-group-line text-muted-foreground"></i> @g.Name
+                            </a>
+                            <form asp-action="RevokeGroup" asp-route-id="@r.Id" method="post" class="inline"
+                                  data-confirm="Revoke group “@g.Name” from this resource? Members lose access granted only through this group.">
+                                @Html.AntiForgeryToken()
+                                <input type="hidden" name="groupId" value="@g.Id" />
+                                <button type="submit" class="text-destructive hover:underline text-xs">Revoke</button>
+                            </form>
+                        </li>
+                    }
+                </ul>
+            }
+        </div>
+
+        <!-- Users with access via a group (read-only; revoke on the group) -->
+        @{ var viaGroupUsers = Model.Access.Where(a => !a.Direct && a.ViaGroups.Any()).ToList(); }
+        @if (viaGroupUsers.Any())
+        {
+            <div class="card-surface p-6">
+                <h2 class="font-medium mb-1">Users via group</h2>
+                <p class="text-sm text-muted-foreground mb-4">These users inherit access through a group. Manage them on the group, not here.</p>
+                <ul class="space-y-1">
+                    @foreach (var a in viaGroupUsers)
+                    {
+                        <li class="flex items-center justify-between text-sm py-2 border-b border-border last:border-0">
+                            <span class="flex items-center gap-2">
+                                <span class="w-7 h-7 rounded-full bg-muted text-muted-foreground text-xs font-semibold flex items-center justify-center">
+                                    @((a.User.UserName ?? "?").Substring(0, 1).ToUpper())
+                                </span>
+                                @a.User.UserName
+                            </span>
+                            <partial name="_AccessBadges" model="new AccessBadgesModel(a.Direct, a.ViaGroups)" />
+                        </li>
+                    }
+                </ul>
+            </div>
+        }
+
+        <!-- Direct grants (with per-user credentials & connection defaults) -->
+        <div class="card-surface p-6">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="font-medium">Directly assigned users</h2>
+                <span class="text-sm text-muted-foreground">@Model.Authorizations.Count assigned</span>
+            </div>
+
+            @if (Model.AvailableUsers.Any())
+            {
+                <form asp-action="Grant" asp-route-id="@r.Id" method="post" class="flex items-end gap-2 mb-5">
+                    @Html.AntiForgeryToken()
+                    <div class="flex-1">
+                        <label class="form-label" for="grant-user">Grant access to</label>
+                        <select name="userId" id="grant-user" class="form-select">
+                            <option value="">Select a user…</option>
+                            @foreach (var u in Model.AvailableUsers)
+                            {
+                                <option value="@u.Id">@u.UserName</option>
+                            }
+                        </select>
+                    </div>
+                    <button type="submit" class="btn-primary"><i class="ri-add-line"></i> Grant</button>
+                </form>
+            }
+
+            @if (!Model.Authorizations.Any())
+            {
+                <p class="text-sm text-muted-foreground">No users assigned yet.</p>
+            }
+            else
+            {
+                <div class="space-y-3">
+                    @foreach (var a in Model.Authorizations)
+                    {
+                        <details class="border border-border rounded-xl">
+                            <summary class="flex items-center justify-between gap-3 px-4 py-3 cursor-pointer select-none">
+                                <div class="flex items-center gap-3 min-w-0">
+                                    <div class="w-8 h-8 rounded-full bg-primary text-primary-foreground text-xs font-semibold flex items-center justify-center">
+                                        @((a.User?.UserName ?? "?").Substring(0, 1).ToUpper())
+                                    </div>
+                                    <span class="font-medium truncate">@a.User?.UserName</span>
+                                    @if (a.HasStoredCredentials)
+                                    {
+                                        <span class="badge bg-success/10 text-success"><i class="ri-key-2-line"></i> SSO</span>
+                                    }
+                                </div>
+                                <div class="flex items-center gap-2">
+                                    <i class="ri-settings-3-line text-muted-foreground"></i>
+                                    <i class="ri-arrow-down-s-line text-muted-foreground"></i>
+                                </div>
+                            </summary>
+                            <div class="px-4 pb-4 pt-1 border-t border-border space-y-4">
+                                <!-- Connection defaults -->
+                                <div>
+                                    <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Connection defaults</h4>
+                                    <form asp-action="SetConnectionDefaults" asp-route-id="@r.Id" asp-route-authId="@a.Id" method="post">
+                                        @Html.AntiForgeryToken()
+                                        @{ await Html.RenderPartialAsync("_ConnectionDefaultsEditor", a.ConnectionDefaults ?? new ConnectionDefaults()); }
+                                        <div class="mt-3">
+                                            <button type="submit" class="btn-primary btn-sm">Save defaults</button>
+                                        </div>
+                                    </form>
+                                </div>
+                                <!-- Stored credentials -->
+                                <div class="pt-3 border-t border-border">
+                                    <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Stored credentials (SSO)</h4>
+                                    @if (a.HasStoredCredentials)
+                                    {
+                                        <div class="flex items-center gap-3 mb-3">
+                                            <span class="text-sm text-success">Credentials stored — console auto-connects.</span>
+                                            <form asp-action="ClearCredentials" asp-route-id="@r.Id" asp-route-authId="@a.Id" method="post">
+                                                @Html.AntiForgeryToken()
+                                                <button type="submit" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Clear</button>
+                                            </form>
+                                        </div>
+                                    }
+                                    <form asp-action="SetCredentials" asp-route-id="@r.Id" asp-route-authId="@a.Id" method="post" class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                        @Html.AntiForgeryToken()
+                                        <input class="form-input" name="username" placeholder="Username" autocomplete="off" />
+                                        <input class="form-input" name="password" type="password" placeholder="Password" autocomplete="new-password" />
+                                        <input class="form-input" name="domain" placeholder="Domain (optional)" autocomplete="off" />
+                                        <div class="md:col-span-3">
+                                            <button type="submit" class="btn-primary btn-sm">@(a.HasStoredCredentials ? "Replace credentials" : "Store credentials")</button>
+                                        </div>
+                                    </form>
+                                </div>
+                                <!-- Revoke -->
+                                <div class="pt-3 border-t border-border">
+                                    <form asp-action="Revoke" asp-route-id="@r.Id" asp-route-authId="@a.Id" method="post"
+                                          data-confirm="Revoke this user's access?">
+                                        @Html.AntiForgeryToken()
+                                        <button type="submit" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10"><i class="ri-shield-cross-line"></i> Revoke access</button>
+                                    </form>
+                                </div>
+                            </div>
+                        </details>
+                    }
+                </div>
+            }
+        </div>
+    </section>
+
+    <!-- Connection defaults (resource-wide) -->
+    <section data-panel="defaults" class="hidden">
+        <div class="card-surface p-6">
+            <h2 class="font-medium mb-1">Resource-wide connection defaults</h2>
+            <p class="text-sm text-muted-foreground mb-4">These defaults are inherited by newly granted users. Per-user overrides are configured in the "Users &amp; access" tab.</p>
+            <form asp-action="SetResourceDefaults" asp-route-id="@r.Id" method="post">
+                @Html.AntiForgeryToken()
+                @{ await Html.RenderPartialAsync("_ConnectionDefaultsEditor", r.DefaultConnectionDefaults ?? new ConnectionDefaults()); }
+                <div class="flex items-center gap-2 pt-4 border-t border-border mt-4">
+                    <button type="submit" class="btn-primary">Save defaults</button>
+                </div>
+            </form>
+        </div>
+    </section>
+
+    <!-- Audit -->
+    <section data-panel="audit" class="hidden">
+        <div class="card-surface p-6">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="font-medium">Recent recordings</h2>
+                <a asp-controller="Recordings" asp-action="Index" class="text-sm text-primary hover:underline">All recordings</a>
+            </div>
+            @if (!Model.Recordings.Any())
+            {
+                <p class="text-sm text-muted-foreground">No recordings for this resource.</p>
+            }
+            else
+            {
+                <table class="table-surface">
+                    <thead>
+                        <tr><th>Started (UTC)</th><th>User</th><th>Duration</th><th>Status</th></tr>
+                    </thead>
+                    <tbody>
+                    @foreach (var rec in Model.Recordings)
+                    {
+                        <tr>
+                            <td>@rec.StartedUtc.ToString("yyyy-MM-dd HH:mm:ss")</td>
+                            <td>@(rec.User?.UserName ?? rec.UserId)</td>
+                            <td>@(rec.EndedUtc is { } e ? (e - rec.StartedUtc).ToString(@"hh\:mm\:ss") : "—")</td>
+                            <td>@rec.Status</td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            }
+        </div>
+    </section>
+</div>
+
+@section Scripts {
+    <partial name="_ValidationScripts" />
+    <partial name="_ConfirmModal" />
+    <script src="~/js/access-picker.js" asp-append-version="true"></script>
+    <script>
+        (function () {
+            // Tab logic
+            var root = document.querySelector('[x-tabs]');
+            if (!root) return;
+            var btns = root.querySelectorAll('.tab-btn');
+            var panels = root.querySelectorAll('[data-panel]');
+            function activate(id) {
+                btns.forEach(function (b) {
+                    var on = b.dataset.tab === id;
+                    b.classList.toggle('border-primary', on);
+                    b.classList.toggle('text-foreground', on);
+                    b.classList.toggle('text-muted-foreground', !on);
+                });
+                panels.forEach(function (p) { p.classList.toggle('hidden', p.dataset.panel !== id); });
+                history.replaceState(null, '', '#' + id);
+                if (id === 'backend' && !rrdLoaded) loadRrd();
+            }
+            btns.forEach(function (b) { b.addEventListener('click', function () { activate(b.dataset.tab); }); });
+            var initial = (location.hash || '').replace('#', '') || 'general';
+            activate(btns.length && [].some.call(btns, function (b) { return b.dataset.tab === initial; }) ? initial : 'general');
+
+            // Wake method toggle
+            var wakeSelect = document.getElementById('wake-method');
+            if (wakeSelect) {
+                wakeSelect.addEventListener('change', function () {
+                    var v = this.value;
+                    var wolFields = document.getElementById('wol-fields');
+                    var ipmiFields = document.getElementById('ipmi-fields');
+                    if (wolFields) wolFields.classList.toggle('hidden', v !== '1');
+                    if (ipmiFields) ipmiFields.classList.toggle('hidden', v !== '2');
+                });
+            }
+
+            // Shutdown method toggle
+            var shutdownSelect = document.getElementById('shutdown-method');
+            if (shutdownSelect) {
+                shutdownSelect.addEventListener('change', function () {
+                    var v = this.value;
+                    var sshFields = document.getElementById('shutdown-ssh-fields');
+                    var winFields = document.getElementById('shutdown-windows-fields');
+                    var ipmiNote = document.getElementById('shutdown-ipmi-note');
+                    if (sshFields) sshFields.classList.toggle('hidden', v !== '1');
+                    if (winFields) winFields.classList.toggle('hidden', v !== '3');
+                    if (ipmiNote) ipmiNote.classList.toggle('hidden', v !== '2');
+                });
+            }
+
+            // RRD sparkline charts
+            var rrdLoaded = false;
+            function drawSparkline(canvasId, values, color, fillColor) {
+                var canvas = document.getElementById(canvasId);
+                if (!canvas || !values || values.length < 2) return;
+                var ctx = canvas.getContext('2d');
+                var w = canvas.offsetWidth; var h = canvas.offsetHeight;
+                canvas.width = w * (window.devicePixelRatio || 1);
+                canvas.height = h * (window.devicePixelRatio || 1);
+                ctx.scale(window.devicePixelRatio || 1, window.devicePixelRatio || 1);
+
+                var max = Math.max.apply(null, values.filter(function(v){return v!=null;})) || 1;
+                var step = w / (values.length - 1);
+
+                ctx.beginPath();
+                ctx.moveTo(0, h);
+                for (var i = 0; i < values.length; i++) {
+                    var v = values[i] == null ? 0 : values[i];
+                    var y = h - (v / max) * (h - 4);
+                    if (i === 0) ctx.lineTo(0, y); else ctx.lineTo(i * step, y);
+                }
+                ctx.lineTo(w, h);
+                ctx.closePath();
+                ctx.fillStyle = fillColor || 'rgba(59,130,246,0.15)';
+                ctx.fill();
+
+                ctx.beginPath();
+                for (var i = 0; i < values.length; i++) {
+                    var v = values[i] == null ? 0 : values[i];
+                    var y = h - (v / max) * (h - 4);
+                    if (i === 0) ctx.moveTo(0, y); else ctx.lineTo(i * step, y);
+                }
+                ctx.strokeStyle = color || '#3b82f6';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+            }
+
+            function drawDualSparkline(canvasId, v1, v2, c1, c2) {
+                var canvas = document.getElementById(canvasId);
+                if (!canvas) return;
+                var all = (v1||[]).concat(v2||[]).filter(function(v){return v!=null;});
+                var max = Math.max.apply(null, all) || 1;
+                var ctx = canvas.getContext('2d');
+                var w = canvas.offsetWidth; var h = canvas.offsetHeight;
+                canvas.width = w * (window.devicePixelRatio || 1);
+                canvas.height = h * (window.devicePixelRatio || 1);
+                ctx.scale(window.devicePixelRatio || 1, window.devicePixelRatio || 1);
+                var step = w / (Math.max((v1||[]).length, (v2||[]).length) - 1 || 1);
+
+                [v1,v2].forEach(function(vals,idx) {
+                    if (!vals) return;
+                    ctx.beginPath();
+                    for (var i = 0; i < vals.length; i++) {
+                        var v = vals[i] == null ? 0 : vals[i];
+                        var y = h - (v / max) * (h - 4);
+                        if (i === 0) ctx.moveTo(0, y); else ctx.lineTo(i * step, y);
+                    }
+                    ctx.strokeStyle = idx === 0 ? (c1||'#3b82f6') : (c2||'#f97316');
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                });
+            }
+
+            function loadRrd() {
+                rrdLoaded = true;
+                var id = '@r.Id';
+                fetch('/admin/resources/' + encodeURIComponent(id) + '/rrddata')
+                    .then(function(r){return r.json();})
+                    .then(function(data) {
+                        if (!data || !data.length) return;
+                        var cpuPct = data.map(function(d){return d.cpu!=null && d.maxcpu ? (d.cpu/d.maxcpu)*100 : null;});
+                        var memPct = data.map(function(d){return d.mem!=null && d.maxmem ? (d.mem/d.maxmem)*100 : null;});
+                        var netin = data.map(function(d){return d.netin;});
+                        var netout = data.map(function(d){return d.netout;});
+                        var diskr = data.map(function(d){return d.diskread;});
+                        var diskw = data.map(function(d){return d.diskwrite;});
+
+                        drawSparkline('chart-cpu', cpuPct, '#3b82f6', 'rgba(59,130,246,0.15)');
+                        drawSparkline('chart-mem', memPct, '#8b5cf6', 'rgba(139,92,246,0.15)');
+                        drawDualSparkline('chart-net', netin, netout, '#10b981', '#f97316');
+                        drawDualSparkline('chart-disk', diskr, diskw, '#06b6d4', '#f43f5e');
+                    })
+                    .catch(function(){});
+            }
+        })();
+    </script>
+}

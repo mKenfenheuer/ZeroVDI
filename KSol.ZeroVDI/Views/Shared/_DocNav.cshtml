@@ -1,0 +1,40 @@
+@model (List<KSol.ZeroVDI.RDP.DocNavNode> Nodes, string CurrentUrl, string UrlBase)
+@{
+    bool IsActive(string? url) => url != null &&
+        string.Equals(url.Trim('/'), Model.CurrentUrl.Trim('/'), StringComparison.OrdinalIgnoreCase);
+}
+<ul class="doc-nav-list">
+    @foreach (var node in Model.Nodes)
+    {
+        <li>
+            @if (node.Url != null)
+            {
+                <a href="@Model.UrlBase/@node.Url"
+                   class="doc-nav-link @(IsActive(node.Url) ? "doc-nav-active" : "")">
+                    @if (node.IsFolder)
+                    {
+                        <i class="ri-folder-3-line text-sm opacity-60"></i>
+                    }
+                    else
+                    {
+                        <i class="ri-file-text-line text-sm opacity-60"></i>
+                    }
+                    <span>@node.Title</span>
+                </a>
+            }
+            else
+            {
+                <span class="doc-nav-header">
+                    <i class="ri-folder-3-line text-sm opacity-60"></i>
+                    <span>@node.Title</span>
+                </span>
+            }
+            @if (node.Children.Any())
+            {
+                <div class="doc-nav-children">
+                    <partial name="_DocNav" model="@((node.Children, Model.CurrentUrl, Model.UrlBase))" />
+                </div>
+            }
+        </li>
+    }
+</ul>

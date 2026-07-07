@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>aspnet-KSol.ZeroVDI.-250bca5b-7027-4c51-90d4-0bba1f01bd40</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Update="app.db" CopyToOutputDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Kerberos.NET" Version="4.6.146" />
+    <PackageReference Include="MailKit" Version="4.17.0" />
+    <PackageReference Include="Markdig" Version="0.42.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Diagnostics.EntityFrameworkCore" Version="9.0.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="9.0.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Identity.UI" Version="9.0.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Razor.RuntimeCompilation" Version="9.0.17" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.0.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="9.0.0">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.VisualStudio.Web.CodeGeneration.Design" Version="9.0.0" />
+    <PackageReference Include="SSH.NET" Version="2025.1.0" />
+  </ItemGroup>
+
+  <!-- node_modules and the Tailwind input sources are not part of the web content payload. -->
+  <ItemGroup>
+    <Content Remove="node_modules\**" />
+    <None Remove="node_modules\**" />
+    <Content Remove="Styles\**" />
+  </ItemGroup>
+
+  <!-- Rebuild the Tailwind CSS bundle on build when Node is available. The compiled output
+       (wwwroot/css/app.css) is committed, so deploys without Node still work — this target is
+       skipped gracefully when node_modules is missing (CI/publish) or SkipTailwindBuild=true. -->
+  <Target Name="BuildTailwindCss" BeforeTargets="BeforeBuild" Condition="'$(SkipTailwindBuild)' != 'true' and Exists('node_modules')">
+    <Exec Command="npm run build:css" ContinueOnError="true" />
+  </Target>
+
+</Project>

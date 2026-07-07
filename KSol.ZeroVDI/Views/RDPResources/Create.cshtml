@@ -1,0 +1,157 @@
+@model KSol.ZeroVDI.Models.RDPResource
+@using KSol.ZeroVDI.Models
+
+@{
+    ViewData["Title"] = "New resource";
+    ViewData["Subtitle"] = "Define a manual remote desktop.";
+}
+
+@section PageActions {
+    <a asp-action="Index" class="btn-secondary w-fit"><i class="ri-arrow-left-line"></i> Back to list</a>
+}
+
+<form asp-action="Create" class="card-surface p-6 max-w-3xl space-y-8">
+    <div asp-validation-summary="ModelOnly"></div>
+
+    <div>
+        <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">General</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label asp-for="Name" class="form-label"></label>
+                <input asp-for="Name" class="form-input" />
+                <span asp-validation-for="Name" class="form-error"></span>
+            </div>
+            <div>
+                <label asp-for="Description" class="form-label"></label>
+                <input asp-for="Description" class="form-input" />
+                <span asp-validation-for="Description" class="form-error"></span>
+            </div>
+        </div>
+    </div>
+
+    <div>
+        <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">Connection</h2>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div class="md:col-span-2">
+                <label asp-for="IpAddress" class="form-label">IP address / host</label>
+                <input asp-for="IpAddress" class="form-input" placeholder="10.0.0.10" />
+                <span asp-validation-for="IpAddress" class="form-error"></span>
+            </div>
+            <div>
+                <label asp-for="Port" class="form-label">RDP port</label>
+                <input asp-for="Port" class="form-input" type="number" />
+                <span asp-validation-for="Port" class="form-error"></span>
+            </div>
+        </div>
+    </div>
+
+    <div>
+        <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">Session options</h2>
+        @{
+            // Resource-wide connection defaults inherited by newly granted users. Same editor the
+            // console "Session options" popup uses; bound under DefaultConnectionDefaults.
+            await Html.RenderPartialAsync("_ConnectionDefaultsEditor",
+                Model.DefaultConnectionDefaults ?? new ConnectionDefaults(),
+                new ViewDataDictionary(ViewData) { TemplateInfo = { HtmlFieldPrefix = "DefaultConnectionDefaults" } });
+        }
+    </div>
+
+    <div>
+        <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">Lifecycle</h2>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+                <label class="form-label">OS type</label>
+                <select name="OsType" class="form-select">
+                    <option value="0">Windows</option>
+                    <option value="1">Windows Server</option>
+                    <option value="2">Linux</option>
+                    <option value="3">macOS</option>
+                </select>
+            </div>
+            <div>
+                <label class="form-label">Wake method</label>
+                <select name="WakeMethod" id="wake-method" class="form-select">
+                    <option value="0">None</option>
+                    <option value="1">Wake-on-LAN</option>
+                    <option value="2">IPMI</option>
+                </select>
+            </div>
+            <div id="wol-fields" class="hidden">
+                <label class="form-label">MAC address</label>
+                <input name="WolMacAddress" class="form-input" placeholder="AA:BB:CC:DD:EE:FF" />
+            </div>
+        </div>
+        <div id="ipmi-fields" class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4 hidden">
+            <div>
+                <label class="form-label">IPMI host</label>
+                <input name="IpmiHost" class="form-input" placeholder="10.0.0.100" />
+            </div>
+            <div>
+                <label class="form-label">IPMI user</label>
+                <input name="IpmiUser" class="form-input" />
+            </div>
+            <div>
+                <label class="form-label">IPMI password</label>
+                <input name="ipmiPassword" type="password" class="form-input" autocomplete="new-password" />
+            </div>
+        </div>
+        <div class="flex items-end gap-4 mt-4">
+            <div class="md:w-1/3">
+                <label class="form-label">Shutdown method</label>
+                <select name="ShutdownMethod" id="shutdown-method" class="form-select">
+                    <option value="0">None</option>
+                    <option value="1">SSH (Linux/macOS)</option>
+                    <option value="2">IPMI (ACPI soft off)</option>
+                    <option value="3">Windows (net rpc)</option>
+                </select>
+            </div>
+            <p class="form-hint pb-2">IPMI reuses the wake IPMI host &amp; credentials above.</p>
+        </div>
+        <div id="shutdown-ssh-fields" class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4 hidden">
+            <div>
+                <label class="form-label">SSH user</label>
+                <input name="SshUser" class="form-input" placeholder="root" />
+            </div>
+            <div>
+                <label class="form-label">SSH private key</label>
+                <textarea name="sshKey" class="form-input" rows="2" placeholder="Paste private key content"></textarea>
+            </div>
+            <div>
+                <label class="form-label">Shutdown command</label>
+                <input name="ShutdownCommand" class="form-input" placeholder="shutdown -h now" />
+            </div>
+        </div>
+        <div id="shutdown-windows-fields" class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4 hidden">
+            <div>
+                <label class="form-label">Windows user</label>
+                <input name="WindowsUser" class="form-input" placeholder="Administrator" />
+                <p class="form-hint">Local or DOMAIN\\user with shutdown rights.</p>
+            </div>
+            <div>
+                <label class="form-label">Windows password</label>
+                <input name="windowsPassword" type="password" class="form-input" autocomplete="new-password" />
+            </div>
+        </div>
+    </div>
+
+    <div class="flex items-center gap-2 pt-2 border-t border-border">
+        <button type="submit" class="btn-primary">Create resource</button>
+        <a asp-action="Index" class="btn-ghost">Cancel</a>
+    </div>
+</form>
+
+@section Scripts {
+    <partial name="_ValidationScripts" />
+    <script>
+        document.getElementById('wake-method').addEventListener('change', function () {
+            var v = this.value;
+            document.getElementById('wol-fields').classList.toggle('hidden', v !== '1');
+            document.getElementById('ipmi-fields').classList.toggle('hidden', v !== '2');
+        });
+        document.getElementById('shutdown-method').addEventListener('change', function () {
+            var v = this.value;
+            document.getElementById('shutdown-ssh-fields').classList.toggle('hidden', v !== '1');
+            document.getElementById('shutdown-windows-fields').classList.toggle('hidden', v !== '3');
+        });
+    </script>
+}

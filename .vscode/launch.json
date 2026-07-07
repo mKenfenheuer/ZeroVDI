@@ -5,10 +5,10 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "C#: KSol.RDPGateway Debug",
+            "name": "C#: KSol.ZeroVDI. Debug",
             "type": "dotnet",
             "request": "launch",
-            "projectPath": "${workspaceFolder}/KSol.RDPGateway/KSol.RDPGateway.csproj"
+            "projectPath": "${workspaceFolder}/KSol.ZeroVDI/KSol.ZeroVDI.csproj"
         }
     ]
 }

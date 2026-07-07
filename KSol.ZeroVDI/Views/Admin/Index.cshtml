@@ -1,0 +1,120 @@
+@model KSol.ZeroVDI.Controllers.AdminDashboardViewModel
+@using KSol.ZeroVDI.Models
+@{
+    ViewData["Title"] = "Dashboard";
+    ViewData["Subtitle"] = "Overview of your gateway.";
+
+    var stats = new (string Label, int Value, string Icon, string Tint, string Controller)[]
+    {
+        ("Resources", Model.ResourceCount, "ri-computer-line", "text-chart-1", "RDPResources"),
+        ("Running now", Model.RunningCount, "ri-play-circle-line", "text-success", "RDPResources"),
+        ("Backends", Model.BackendCount, "ri-server-line", "text-chart-2", "ProxmoxBackends"),
+        ("Users", Model.UserCount, "ri-team-line", "text-chart-3", "Users"),
+        ("Access grants", Model.AuthorizationCount, "ri-shield-user-line", "text-chart-4", "RDPResourceUserAuthorizations"),
+        ("Recordings", Model.RecordingCount, "ri-film-line", "text-chart-5", "Recordings"),
+    };
+}
+
+<div class="grid grid-cols-2 lg:grid-cols-3 gap-4">
+    @foreach (var s in stats)
+    {
+        <a asp-controller="@s.Controller" asp-action="Index"
+           class="card-surface p-5 hover:shadow-md transition-shadow group">
+            <div class="flex items-center justify-between">
+                <span class="text-sm text-muted-foreground">@s.Label</span>
+                <i class="@s.Icon text-xl @s.Tint"></i>
+            </div>
+            <div class="mt-2 text-3xl font-semibold tracking-tight">@s.Value</div>
+        </a>
+    }
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-6">
+    <div class="card-surface p-6 lg:col-span-2">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="font-medium">Recently active resources</h2>
+            <a asp-controller="RDPResources" asp-action="Index" class="text-sm text-primary hover:underline">View all</a>
+        </div>
+        @if (!Model.RecentResources.Any())
+        {
+            <p class="text-sm text-muted-foreground">No resources yet.</p>
+        }
+        else
+        {
+            <ul class="divide-y divide-border">
+                @foreach (var r in Model.RecentResources)
+                {
+                    <li class="flex items-center justify-between py-3">
+                        <div class="flex items-center gap-3 min-w-0">
+                            <div class="w-9 h-9 rounded-lg bg-primary/10 text-primary flex items-center justify-center flex-shrink-0">
+                                <i class="ri-computer-line"></i>
+                            </div>
+                            <div class="min-w-0">
+                                <a asp-controller="RDPResources" asp-action="Edit" asp-route-id="@r.Id" class="font-medium hover:underline truncate block">@r.Name</a>
+                                <span class="text-xs text-muted-foreground">@(r.LastActivityUtc?.ToString("u") ?? "never used")</span>
+                            </div>
+                        </div>
+                        <partial name="_PowerStateBadge" model="r.PowerState" />
+                    </li>
+                }
+            </ul>
+        }
+    </div>
+
+    <div class="card-surface p-6">
+        <h2 class="font-medium mb-4">Quick actions</h2>
+        <div class="flex flex-col gap-2">
+            <a asp-controller="RDPResources" asp-action="Create" class="btn-secondary justify-start"><i class="ri-add-line"></i> New resource</a>
+            <a asp-controller="ProxmoxBackends" asp-action="Create" class="btn-secondary justify-start"><i class="ri-server-line"></i> Add backend</a>
+            <a asp-controller="Users" asp-action="Create" class="btn-secondary justify-start"><i class="ri-user-add-line"></i> Add user</a>
+            <a asp-controller="Users" asp-action="Index" class="btn-secondary justify-start"><i class="ri-shield-user-line"></i> Grant access</a>
+        </div>
+    </div>
+</div>
+
+<!-- Backends status -->
+<div class="card-surface p-6 mt-6">
+    <div class="flex items-center justify-between mb-4">
+        <h2 class="font-medium">Backends</h2>
+        <a asp-controller="ProxmoxBackends" asp-action="Index" class="text-sm text-primary hover:underline">Manage</a>
+    </div>
+    <div id="backend-status">
+        <p class="text-sm text-muted-foreground"><i class="ri-loader-4-line animate-spin inline-block mr-1"></i> Loading backend status…</p>
+    </div>
+</div>
+
+@section Scripts {
+<script>
+(function () {
+    fetch('/admin/api/backends/status')
+        .then(function (r) { return r.json(); })
+        .then(function (backends) {
+            var el = document.getElementById('backend-status');
+            if (!backends || !backends.length) {
+                el.innerHTML = '<p class="text-sm text-muted-foreground">No backends configured.</p>';
+                return;
+            }
+            var html = '<div class="space-y-3">';
+            backends.forEach(function (b) {
+                var badge = b.isOnline
+                    ? '<span class="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-success/10 text-success"><i class="ri-checkbox-circle-fill"></i> Online</span>'
+                    : '<span class="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-destructive/10 text-destructive"><i class="ri-close-circle-fill"></i> Offline</span>';
+                var detail = b.isOnline
+                    ? '<span class="text-xs text-muted-foreground">' + b.totalVms + ' VMs, ' + b.runningVms + ' running</span>'
+                    : '<span class="text-xs text-destructive">' + (b.error || 'Unreachable') + '</span>';
+                html += '<div class="flex items-center justify-between py-2 border-b border-border last:border-0">'
+                    + '<div class="flex items-center gap-3 min-w-0">'
+                    + '<div class="w-9 h-9 rounded-lg bg-muted flex items-center justify-center flex-shrink-0"><i class="ri-server-line text-muted-foreground"></i></div>'
+                    + '<div class="min-w-0"><div class="font-medium text-sm truncate">' + b.name + '</div>'
+                    + '<div class="text-xs text-muted-foreground truncate">' + (b.hostUrl || '—') + '</div></div></div>'
+                    + '<div class="flex flex-col items-end gap-1">' + badge + detail + '</div></div>';
+            });
+            html += '</div>';
+            el.innerHTML = html;
+        })
+        .catch(function () {
+            document.getElementById('backend-status').innerHTML = '<p class="text-sm text-destructive">Failed to load backend status.</p>';
+        });
+})();
+</script>
+}

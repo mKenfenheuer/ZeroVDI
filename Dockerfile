@@ -9,11 +9,11 @@ FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 WORKDIR /src
 COPY . .
 WORKDIR "/src/"
-RUN dotnet restore "KSol.RDPGateway/KSol.RDPGateway.csproj"
-RUN dotnet build "KSol.RDPGateway/KSol.RDPGateway.csproj" -c Release -o /app/build
+RUN dotnet restore "KSol.ZeroVDI/KSol.ZeroVDI.csproj"
+RUN dotnet build "KSol.ZeroVDI/KSol.ZeroVDI.csproj" -c Release -o /app/build
 
 FROM build AS publish
-RUN dotnet publish "KSol.RDPGateway/KSol.RDPGateway.csproj" -c Release -o /app/publish
+RUN dotnet publish "KSol.ZeroVDI/KSol.ZeroVDI.csproj" -c Release -o /app/publish
 
 FROM base AS final
 WORKDIR /app
@@ -30,4 +30,4 @@ ENV ASPNETCORE_HTTP_PORTS=80
 # DataProtection keyring (stored VM credentials), and session recordings — all under /app/Data so they
 # survive container restarts/recreation.
 VOLUME ["/app/Data"]
-ENTRYPOINT ["dotnet", "KSol.RDPGateway.dll"]
+ENTRYPOINT ["dotnet", "KSol.ZeroVDI.dll"]

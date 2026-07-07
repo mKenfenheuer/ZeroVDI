@@ -1,0 +1,35 @@
+@model KSol.ZeroVDI.Models.AccessPickerModel
+@{
+    // Unique id so several pickers can coexist on one page (e.g. add-to-group + grant-resource).
+    var uid = "ap-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+    // These controllers are attribute-routed (e.g. [Route("admin/groups")]). Link generation for the
+    // POST action therefore needs an explicit controller; falling back to an empty asp-controller makes
+    // the tag helper resolve against the conventional {controller}/{action}/{id} route and post to the
+    // wrong place (e.g. /Home/AddResource → 405). Default to the ambient controller when unset.
+    var formController = string.IsNullOrEmpty(Model.FormController)
+        ? (string?)ViewContext.RouteData.Values["controller"]
+        : Model.FormController;
+}
+@if (Model.Candidates.Any())
+{
+    <form asp-action="@Model.FormAction" asp-controller="@formController" asp-route-id="@Model.RouteId"
+          method="post" class="flex gap-2" data-access-picker="@uid">
+        @Html.AntiForgeryToken()
+        <div class="relative flex-1">
+            <input type="text" placeholder="Filter…" data-ap-filter
+                   class="form-input" autocomplete="off" />
+            <select name="@Model.FieldName" data-ap-select class="form-select mt-2" required size="1">
+                <option value="">@Model.Placeholder</option>
+                @foreach (var (value, label) in Model.Candidates)
+                {
+                    <option value="@value">@label</option>
+                }
+            </select>
+        </div>
+        <button type="submit" class="btn-secondary btn-sm"><i class="ri-add-line"></i> @Model.ButtonLabel</button>
+    </form>
+}
+else
+{
+    <p class="text-sm text-muted-foreground">Nothing left to add.</p>
+}

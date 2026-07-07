@@ -1,7 +1,0 @@
-@model KSol.RDPGateway.ViewComponents.DocsNavModel
-@if (Model.Nodes.Any())
-{
-    <nav class="doc-nav px-1">
-        <partial name="_DocNav" model="@((Model.Nodes, Model.CurrentUrl, Model.UrlBase))" />
-    </nav>
-}

@@ -1,0 +1,22 @@
+@model KSol.ZeroVDI.Models.Connector
+
+@{
+    ViewData["Title"] = "Edit connector";
+    ViewData["Subtitle"] = Model.Name;
+}
+
+@section PageActions {
+    <a asp-action="Index" class="btn-secondary w-fit"><i class="ri-arrow-left-line"></i> Back to list</a>
+}
+
+<form asp-action="Edit" asp-route-id="@Model.Id" class="card-surface p-6 max-w-3xl space-y-8">
+    <div asp-validation-summary="ModelOnly"></div>
+    <input type="hidden" asp-for="Id" />
+    <partial name="_ConnectorFields" model="Model" />
+    <div class="flex items-center gap-2 pt-2 border-t border-border">
+        <button type="submit" class="btn-primary">Save</button>
+        <a asp-action="Index" class="btn-ghost">Cancel</a>
+    </div>
+</form>
+
+@section Scripts { <partial name="_ValidationScripts" /> }

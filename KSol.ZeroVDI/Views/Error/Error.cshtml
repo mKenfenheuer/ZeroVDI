@@ -1,0 +1,52 @@
+@model KSol.ZeroVDI.Controllers.ErrorPageViewModel
+@{
+    Layout = null;
+    ViewData["Title"] = $"{Model.StatusCode} — {Model.Title}";
+}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@Model.StatusCode — @Model.Title — ZeroVDI</title>
+    <partial name="_ThemeHead" />
+</head>
+<body class="bg-background text-foreground min-h-screen flex items-center justify-center p-4">
+    <div class="w-full max-w-md text-center">
+        <div class="flex justify-center mb-6">
+            <partial name="_Logo" model="@("h-9")" />
+        </div>
+
+        <div class="card-surface p-8 sm:p-10">
+            <div class="w-16 h-16 mx-auto rounded-full bg-destructive/10 text-destructive flex items-center justify-center mb-5">
+                <i class="@Model.Icon text-3xl"></i>
+            </div>
+
+            <p class="text-5xl font-bold tracking-tight">@Model.StatusCode</p>
+            <h1 class="text-xl font-semibold mt-2">@Model.Title</h1>
+            <p class="text-muted-foreground mt-2 text-sm">@Model.Message</p>
+
+            @if (Model.ShowRequestId)
+            {
+                <p class="mt-5 text-xs text-muted-foreground">
+                    Request ID:
+                    <code class="px-2 py-0.5 rounded bg-muted font-mono">@Model.RequestId</code>
+                </p>
+            }
+
+            <div class="flex flex-col sm:flex-row gap-3 justify-center mt-7">
+                <a href="/" class="btn-primary">
+                    <i class="ri-home-4-line"></i><span>Go home</span>
+                </a>
+                <button type="button" onclick="history.back()" class="btn-secondary">
+                    <i class="ri-arrow-left-line"></i><span>Go back</span>
+                </button>
+            </div>
+        </div>
+
+        <p class="text-center text-xs text-muted-foreground mt-6">&copy; @DateTime.UtcNow.Year KSol.IT</p>
+    </div>
+
+    <script src="~/js/theme.js" asp-append-version="true"></script>
+</body>
+</html>

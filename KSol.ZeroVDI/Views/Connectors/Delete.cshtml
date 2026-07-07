@@ -1,0 +1,21 @@
+@model KSol.ZeroVDI.Models.Connector
+
+@{
+    ViewData["Title"] = "Delete connector";
+}
+
+<div class="card-surface p-6 max-w-2xl">
+    <div class="w-12 h-12 rounded-full bg-destructive/10 text-destructive flex items-center justify-center mb-4">
+        <i class="ri-delete-bin-line text-2xl"></i>
+    </div>
+    <h1 class="text-xl font-semibold">Delete “@Model.Name”?</h1>
+    <div class="alert-warning my-4">
+        <i class="ri-alert-line text-warning text-lg"></i>
+        <p class="text-sm flex-1">The agent will no longer be able to connect, and any Proxmox backends reaching through this connector revert to a direct connection. Hosts reachable only via this connector will become unreachable.</p>
+    </div>
+    <form asp-action="Delete" asp-route-id="@Model.Id" class="flex items-center gap-2">
+        <input type="hidden" asp-for="Id" />
+        <button type="submit" class="btn-destructive">Delete connector</button>
+        <a asp-action="Index" class="btn-ghost">Cancel</a>
+    </form>
+</div>

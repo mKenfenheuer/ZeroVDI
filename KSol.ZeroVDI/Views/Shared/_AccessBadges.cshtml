@@ -1,0 +1,19 @@
+@model KSol.ZeroVDI.Models.AccessBadgesModel
+@*
+    Renders the provenance of an access entry: a Direct badge and/or one "via Group" badge per group
+    (each linking to the group's manage page). Shared by the user page and the resource page so the
+    Direct/via-Group language is identical in both directions.
+*@
+<div class="flex flex-wrap items-center gap-1">
+    @if (Model.Direct)
+    {
+        <span class="badge-primary"><i class="ri-user-line"></i> Direct</span>
+    }
+    @foreach (var (id, name) in Model.ViaGroups)
+    {
+        <a asp-controller="UserGroups" asp-action="Manage" asp-route-id="@id"
+           class="badge bg-muted text-muted-foreground hover:bg-muted/70" title="Granted via group">
+            <i class="ri-group-line"></i> via @name
+        </a>
+    }
+</div>

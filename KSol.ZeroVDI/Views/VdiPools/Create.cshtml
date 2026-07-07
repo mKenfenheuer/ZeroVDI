@@ -1,0 +1,97 @@
+@model KSol.ZeroVDI.Models.VdiPool
+@{
+    ViewData["Title"] = "New VDI Pool";
+    ViewData["Subtitle"] = "Pick a template to clone and how desktops are handed out.";
+    var backends = ViewBag.Backends as IEnumerable<KSol.ZeroVDI.Models.ProxmoxBackend> ?? Enumerable.Empty<KSol.ZeroVDI.Models.ProxmoxBackend>();
+}
+
+<form asp-action="Create" method="post" class="max-w-2xl space-y-5">
+    @Html.AntiForgeryToken()
+    <div asp-validation-summary="ModelOnly" class="text-sm text-destructive"></div>
+
+    <div>
+        <label class="form-label" asp-for="Name">Name</label>
+        <input class="form-input" asp-for="Name" autocomplete="off" />
+        <span asp-validation-for="Name" class="text-sm text-destructive"></span>
+    </div>
+
+    <div>
+        <label class="form-label" asp-for="Description">Description</label>
+        <input class="form-input" asp-for="Description" autocomplete="off" />
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+            <label class="form-label" asp-for="ProxmoxBackendId">Backend</label>
+            <select class="form-input" asp-for="ProxmoxBackendId" id="backend-select">
+                <option value="">— choose —</option>
+                @foreach (var b in backends)
+                {
+                    <option value="@b.Id">@b.Name</option>
+                }
+            </select>
+            <span asp-validation-for="ProxmoxBackendId" class="text-sm text-destructive"></span>
+        </div>
+        <div>
+            <label class="form-label" asp-for="TemplateVmId">Template</label>
+            <select class="form-input" asp-for="TemplateVmId" id="template-select" disabled>
+                <option value="">— choose a backend first —</option>
+            </select>
+            <span asp-validation-for="TemplateVmId" class="text-sm text-destructive"></span>
+        </div>
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div>
+            <label class="form-label" asp-for="Kind">Kind</label>
+            <select class="form-input" asp-for="Kind" asp-items="Html.GetEnumSelectList<KSol.ZeroVDI.Models.VdiPoolKind>()"></select>
+        </div>
+        <div>
+            <label class="form-label" asp-for="CloneMode">Clone mode</label>
+            <select class="form-input" asp-for="CloneMode" asp-items="Html.GetEnumSelectList<KSol.ZeroVDI.Models.CloneMode>()"></select>
+        </div>
+        <div>
+            <label class="form-label" asp-for="OsType">OS type</label>
+            <select class="form-input" asp-for="OsType" asp-items="Html.GetEnumSelectList<KSol.ZeroVDI.Models.OsType>()"></select>
+        </div>
+    </div>
+
+    <div class="w-32">
+        <label class="form-label" asp-for="Port">RDP port</label>
+        <input class="form-input" asp-for="Port" type="number" />
+    </div>
+
+    <div class="flex items-center gap-2 pt-2">
+        <button type="submit" class="btn-primary">Create pool</button>
+        <a asp-action="Index" class="btn-ghost">Cancel</a>
+    </div>
+    <p class="form-hint">More options (naming, identity/customization, floating size, VMID range) are available after creating the pool.</p>
+</form>
+
+@section Scripts {
+<script>
+(function () {
+    var backendSel = document.getElementById('backend-select');
+    var tplSel = document.getElementById('template-select');
+
+    function loadTemplates(backendId) {
+        tplSel.disabled = true;
+        tplSel.innerHTML = '<option value="">Loading…</option>';
+        if (!backendId) { tplSel.innerHTML = '<option value="">— choose a backend first —</option>'; return; }
+        fetch('/admin/vdi-pools/templates/' + encodeURIComponent(backendId))
+            .then(function (r) { if (!r.ok) throw new Error(); return r.json(); })
+            .then(function (list) {
+                if (!list.length) { tplSel.innerHTML = '<option value="">No templates on this backend</option>'; return; }
+                tplSel.innerHTML = '<option value="">— choose —</option>' +
+                    list.map(function (t) {
+                        return '<option value="' + t.vmId + '">' + (t.name || ('vm-' + t.vmId)) + ' (#' + t.vmId + ', ' + t.node + ')</option>';
+                    }).join('');
+                tplSel.disabled = false;
+            })
+            .catch(function () { tplSel.innerHTML = '<option value="">Failed to load templates</option>'; });
+    }
+
+    backendSel.addEventListener('change', function () { loadTemplates(backendSel.value); });
+})();
+</script>
+}

@@ -1,0 +1,59 @@
+@model IEnumerable<KSol.ZeroVDI.Models.RDPResourceUserAuthorization>
+
+@{
+    ViewData["Title"] = "Access grants";
+    ViewData["Subtitle"] = "Read-only overview of every direct user → resource grant. Manage access on the user or resource page.";
+}
+
+@if (!Model.Any())
+{
+    <div class="flex flex-col items-center justify-center text-center py-16 px-4 card-surface border-dashed">
+        <div class="w-14 h-14 rounded-full bg-muted flex items-center justify-center mb-4">
+            <i class="ri-shield-user-line text-2xl text-muted-foreground"></i>
+        </div>
+        <h3 class="text-lg font-semibold">No direct grants</h3>
+        <p class="text-sm text-muted-foreground mt-1">Grant a user a resource from their <a asp-controller="Users" asp-action="Index" class="text-primary hover:underline">user page</a>, or grant a group from a resource.</p>
+    </div>
+}
+else
+{
+    <table class="table-surface">
+        <thead>
+            <tr>
+                <th>User</th>
+                <th>Resource</th>
+                <th>SSO credentials</th>
+                <th class="text-right">Manage</th>
+            </tr>
+        </thead>
+        <tbody>
+        @foreach (var item in Model)
+        {
+            <tr>
+                <td class="font-medium">
+                    <a asp-controller="Users" asp-action="Manage" asp-route-id="@item.UserId" asp-fragment="access" class="hover:underline">@item.User?.UserName</a>
+                </td>
+                <td>
+                    <a asp-controller="RDPResources" asp-action="Edit" asp-route-id="@item.RDPResourceId" asp-fragment="access" class="hover:underline">@(item.RDPResource?.Name ?? item.RDPResourceId)</a>
+                </td>
+                <td>
+                    @if (item.HasStoredCredentials)
+                    {
+                        <span class="badge bg-success/10 text-success"><i class="ri-key-2-line"></i> Stored</span>
+                    }
+                    else
+                    {
+                        <span class="badge-muted">None</span>
+                    }
+                </td>
+                <td>
+                    <div class="flex items-center justify-end gap-2">
+                        <a asp-controller="RDPResources" asp-action="Edit" asp-route-id="@item.RDPResourceId" asp-fragment="access" class="btn-ghost btn-sm">On resource</a>
+                        <a asp-controller="Users" asp-action="Manage" asp-route-id="@item.UserId" asp-fragment="access" class="btn-ghost btn-sm">On user</a>
+                    </div>
+                </td>
+            </tr>
+        }
+        </tbody>
+    </table>
+}

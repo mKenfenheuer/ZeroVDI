@@ -1,0 +1,254 @@
+@model KSol.ZeroVDI.Models.VdiPool
+@using KSol.ZeroVDI.Models
+@{
+    ViewData["Title"] = Model.Name;
+    ViewData["Subtitle"] = "Configure the pool, assign users and groups, and manage provisioned desktops.";
+    var users = ViewBag.UnassignedUsers as IEnumerable<ApplicationUser> ?? Enumerable.Empty<ApplicationUser>();
+    var groups = ViewBag.UnassignedGroups as IEnumerable<UserGroup> ?? Enumerable.Empty<UserGroup>();
+    var templates = ViewBag.Templates as IEnumerable<KSol.ZeroVDI.RDP.ProxmoxVm> ?? Enumerable.Empty<KSol.ZeroVDI.RDP.ProxmoxVm>();
+}
+
+@if (TempData["Status"] is string ok) { <div class="mb-4 p-3 rounded-lg bg-success/10 text-success text-sm">@ok</div> }
+@if (TempData["Error"] is string err) { <div class="mb-4 p-3 rounded-lg bg-destructive/10 text-destructive text-sm">@err</div> }
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <!-- Configuration -->
+    <section class="card-surface p-5 space-y-5 lg:col-span-2">
+        <h2 class="text-lg font-semibold">Configuration</h2>
+        <form asp-action="Update" asp-route-id="@Model.Id" method="post" class="space-y-5">
+            @Html.AntiForgeryToken()
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                    <label class="form-label" asp-for="Name">Name</label>
+                    <input class="form-input" asp-for="Name" autocomplete="off" />
+                </div>
+                <div>
+                    <label class="form-label" asp-for="Description">Description</label>
+                    <input class="form-input" asp-for="Description" autocomplete="off" />
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                    <label class="form-label" asp-for="TemplateVmId">Template</label>
+                    <select class="form-input" asp-for="TemplateVmId">
+                        @foreach (var t in templates)
+                        {
+                            <option value="@t.VmId" selected="@(t.VmId == Model.TemplateVmId)">@t.Name (#@t.VmId, @t.Node)</option>
+                        }
+                        @if (!templates.Any(t => t.VmId == Model.TemplateVmId))
+                        {
+                            <option value="@Model.TemplateVmId" selected>#@Model.TemplateVmId (not found)</option>
+                        }
+                    </select>
+                </div>
+                <div>
+                    <label class="form-label" asp-for="Kind">Kind</label>
+                    <select class="form-input" asp-for="Kind" asp-items="Html.GetEnumSelectList<VdiPoolKind>()"></select>
+                </div>
+                <div>
+                    <label class="form-label" asp-for="CloneMode">Clone mode</label>
+                    <select class="form-input" asp-for="CloneMode" asp-items="Html.GetEnumSelectList<CloneMode>()"></select>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-4 gap-4">
+                <div>
+                    <label class="form-label" asp-for="OsType">OS type</label>
+                    <select class="form-input" asp-for="OsType" asp-items="Html.GetEnumSelectList<OsType>()"></select>
+                </div>
+                <div>
+                    <label class="form-label" asp-for="Port">RDP port</label>
+                    <input class="form-input" asp-for="Port" type="number" />
+                </div>
+                <div>
+                    <label class="form-label" asp-for="TargetNode">Target node</label>
+                    <input class="form-input" asp-for="TargetNode" placeholder="same as template" autocomplete="off" />
+                </div>
+                <div>
+                    <label class="form-label" asp-for="TargetStorage">Target storage</label>
+                    <input class="form-input" asp-for="TargetStorage" placeholder="default" autocomplete="off" />
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-4 gap-4">
+                <div>
+                    <label class="form-label" asp-for="NamePattern">Name pattern</label>
+                    <input class="form-input" asp-for="NamePattern" autocomplete="off" />
+                    <p class="form-hint">Tokens: {pool} {user} {n}</p>
+                </div>
+                <div>
+                    <label class="form-label" asp-for="VmidRangeStart">VMID from</label>
+                    <input class="form-input" asp-for="VmidRangeStart" type="number" placeholder="auto" />
+                </div>
+                <div>
+                    <label class="form-label" asp-for="VmidRangeEnd">VMID to</label>
+                    <input class="form-input" asp-for="VmidRangeEnd" type="number" placeholder="auto" />
+                </div>
+                <div>
+                    <label class="form-label" asp-for="MaxSize">Max desktops (floating)</label>
+                    <input class="form-input" asp-for="MaxSize" type="number" />
+                </div>
+            </div>
+
+            <!-- Identity / customization -->
+            <div class="border-t border-border pt-4 space-y-4">
+                <h3 class="font-medium">Per-clone identity</h3>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                        <label class="form-label" asp-for="IdentityMode">Identity mode</label>
+                        <select class="form-input" asp-for="IdentityMode" asp-items="Html.GetEnumSelectList<VdiIdentityMode>()"></select>
+                        <p class="form-hint">None = template self-customizes. CloudInit = Linux/cloudbase-init. GuestAgent = Windows rename/join.</p>
+                    </div>
+                    <div>
+                        <label class="form-label" asp-for="HostnamePattern">Hostname pattern</label>
+                        <input class="form-input" asp-for="HostnamePattern" autocomplete="off" />
+                    </div>
+                </div>
+                <div>
+                    <label class="form-label inline-flex items-center gap-2">
+                        <input type="checkbox" asp-for="GenerateCredentials" value="true" />
+                        Generate a unique user &amp; password per clone
+                    </label>
+                    <p class="form-hint">CloudInit mode. Derives a random local account from each owner's user data and stores it as their SSO login. When on, the shared cloud-init user/password below are ignored.</p>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div>
+                        <label class="form-label" asp-for="CiUser">Cloud-init user</label>
+                        <input class="form-input" asp-for="CiUser" autocomplete="off" />
+                    </div>
+                    <div>
+                        <label class="form-label">Cloud-init password</label>
+                        <input class="form-input" name="ProtectedCiPassword" type="password" autocomplete="new-password"
+                               placeholder="@(string.IsNullOrEmpty(Model.ProtectedCiPassword) ? "" : "•••••• (keep)")" />
+                    </div>
+                    <div>
+                        <label class="form-label" asp-for="CiSshKeys">Cloud-init SSH keys</label>
+                        <input class="form-input" asp-for="CiSshKeys" autocomplete="off" />
+                    </div>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-4 gap-4">
+                    <div>
+                        <label class="form-label" asp-for="DomainName">Domain</label>
+                        <input class="form-input" asp-for="DomainName" placeholder="no join" autocomplete="off" />
+                    </div>
+                    <div>
+                        <label class="form-label" asp-for="DomainOu">OU</label>
+                        <input class="form-input" asp-for="DomainOu" autocomplete="off" />
+                    </div>
+                    <div>
+                        <label class="form-label" asp-for="DomainJoinUser">Join user</label>
+                        <input class="form-input" asp-for="DomainJoinUser" autocomplete="off" />
+                    </div>
+                    <div>
+                        <label class="form-label">Join password</label>
+                        <input class="form-input" name="ProtectedDomainJoinPassword" type="password" autocomplete="new-password"
+                               placeholder="@(string.IsNullOrEmpty(Model.ProtectedDomainJoinPassword) ? "" : "•••••• (keep)")" />
+                    </div>
+                </div>
+                <p class="form-hint">Passwords are stored encrypted and never shown again. Leave blank to keep the current value.</p>
+            </div>
+
+            <div class="flex items-center gap-2">
+                <button type="submit" class="btn-primary">Save configuration</button>
+            </div>
+        </form>
+    </section>
+
+    <!-- Assignments -->
+    <section class="card-surface p-5 space-y-4">
+        <h2 class="text-lg font-semibold">Assignments</h2>
+        <p class="text-sm text-muted-foreground">Assigned users and group members each get a desktop on first connect.</p>
+
+        @if (!Model.Assignments.Any())
+        {
+            <p class="text-sm text-muted-foreground">No users or groups assigned yet.</p>
+        }
+        else
+        {
+            <ul class="divide-y divide-border">
+            @foreach (var a in Model.Assignments)
+            {
+                <li class="flex items-center justify-between py-2">
+                    <span class="flex items-center gap-2 text-sm">
+                        @if (a.UserId != null)
+                        {
+                            <i class="ri-user-line text-muted-foreground"></i> <span>@(a.User?.UserName ?? a.UserId)</span>
+                        }
+                        else
+                        {
+                            <i class="ri-group-line text-muted-foreground"></i> <span>@(a.Group?.Name ?? a.GroupId)</span>
+                            <span class="badge bg-muted text-muted-foreground">group</span>
+                        }
+                    </span>
+                    <form asp-action="RemoveAssignment" asp-route-id="@Model.Id" method="post" class="inline">
+                        @Html.AntiForgeryToken()
+                        <input type="hidden" name="assignmentId" value="@a.Id" />
+                        <button type="submit" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Remove</button>
+                    </form>
+                </li>
+            }
+            </ul>
+        }
+
+        <form asp-action="AddAssignment" asp-route-id="@Model.Id" method="post" class="flex items-end gap-2 pt-2 border-t border-border">
+            @Html.AntiForgeryToken()
+            <div class="flex-1">
+                <label class="form-label">Add user</label>
+                <select class="form-input" name="userId">
+                    <option value="">— user —</option>
+                    @foreach (var u in users) { <option value="@u.Id">@u.UserName</option> }
+                </select>
+            </div>
+            <button type="submit" class="btn-secondary btn-sm">Add</button>
+        </form>
+        <form asp-action="AddAssignment" asp-route-id="@Model.Id" method="post" class="flex items-end gap-2">
+            @Html.AntiForgeryToken()
+            <div class="flex-1">
+                <label class="form-label">Add group</label>
+                <select class="form-input" name="groupId">
+                    <option value="">— group —</option>
+                    @foreach (var g in groups) { <option value="@g.Id">@g.Name</option> }
+                </select>
+            </div>
+            <button type="submit" class="btn-secondary btn-sm">Add</button>
+        </form>
+    </section>
+
+    <!-- Provisioned desktops -->
+    <section class="card-surface p-5 space-y-4">
+        <h2 class="text-lg font-semibold">Provisioned desktops</h2>
+        @if (!Model.Instances.Any())
+        {
+            <p class="text-sm text-muted-foreground">No desktops have been provisioned yet.</p>
+        }
+        else
+        {
+            <table class="table-surface">
+                <thead>
+                    <tr><th>VMID</th><th>Owner</th><th>State</th><th>Created</th><th class="text-right"></th></tr>
+                </thead>
+                <tbody>
+                @foreach (var i in Model.Instances.OrderBy(x => x.CreatedUtc))
+                {
+                    <tr>
+                        <td class="font-medium">@i.ProxmoxVmId</td>
+                        <td class="text-muted-foreground">@(i.OwnerUser?.UserName ?? (i.OwnerUserId == null ? "— free —" : i.OwnerUserId))</td>
+                        <td><span class="badge bg-muted text-muted-foreground">@i.State</span></td>
+                        <td class="text-muted-foreground">@i.CreatedUtc.ToLocalTime().ToString("g")</td>
+                        <td class="text-right">
+                            <form asp-action="Deprovision" asp-route-id="@Model.Id" method="post" class="inline"
+                                  onsubmit="return confirm('Destroy desktop #@i.ProxmoxVmId? The VM and its disks are deleted.');">
+                                @Html.AntiForgeryToken()
+                                <input type="hidden" name="instanceId" value="@i.Id" />
+                                <button type="submit" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Deprovision</button>
+                            </form>
+                        </td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+        }
+    </section>
+</div>

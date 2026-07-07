@@ -1,0 +1,33 @@
+@model KSol.ZeroVDI.Models.ApplicationUser
+
+@{
+    ViewData["Title"] = "Add user";
+}
+
+@section PageActions {
+    <a asp-action="Index" class="btn-secondary w-fit"><i class="ri-arrow-left-line"></i> Back to list</a>
+}
+
+<form asp-action="Create" method="post" class="card-surface p-6 max-w-lg space-y-4">
+    <div asp-validation-summary="ModelOnly"></div>
+    <div>
+        <label asp-for="UserName" class="form-label">Username</label>
+        <input asp-for="UserName" class="form-input" />
+        <span asp-validation-for="UserName" class="form-error"></span>
+    </div>
+    <div>
+        <label asp-for="Email" class="form-label">Email</label>
+        <input asp-for="Email" class="form-input" type="email" />
+        <span asp-validation-for="Email" class="form-error"></span>
+    </div>
+    <div>
+        <label for="password" class="form-label">Password</label>
+        <input id="password" name="password" class="form-input" type="password" required />
+    </div>
+    <div class="flex items-center gap-2 pt-2 border-t border-border">
+        <button type="submit" class="btn-primary">Create user</button>
+        <a asp-action="Index" class="btn-ghost">Cancel</a>
+    </div>
+</form>
+
+@section Scripts { <partial name="_ValidationScripts" /> }
