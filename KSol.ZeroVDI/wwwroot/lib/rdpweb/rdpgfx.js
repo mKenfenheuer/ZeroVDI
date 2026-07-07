@@ -442,15 +442,20 @@ RdpGfx.prototype._onWireToSurface2 = function (r) {
     }
 };
 
-// RemoteFX Progressive (CAPROGRESSIVE): decode the WIRE_TO_SURFACE_2 payload into 64x64 tiles and
-// putImageData each onto the surface at (xIdx*64, yIdx*64). GNOME Remote Desktop streams the whole
-// desktop this way. Each tile reconstruction (RLGR → dequant → inverse DWT → YCbCr→RGB) lives in
-// progressive.js; here we just place tiles and mark them dirty so they paint at END_FRAME flush.
+// RemoteFX Progressive (CAPROGRESSIVE): decode the WIRE_TO_SURFACE_2 payload into 64x64 tiles.
+// GNOME Remote Desktop streams the whole desktop this way, often as hundreds of tiles per PDU on
+// slow links (more, smaller partial frames). We used to putImageData() each tile individually —
+// on a full-screen frame that's 500+ synchronous canvas calls (each with its own clip/convert
+// overhead plus an ImageData allocation), which was enough to make the client feel frozen. Instead
+// we composite all tiles for this PDU into one scratch buffer sized to their bounding box and issue
+// a single putImageData at the end. Tile reconstruction (RLGR → dequant → inverse DWT →
+// YCbCr→RGB) lives in progressive.js; here we just place tiles and flush once per PDU.
 RdpGfx.prototype._decodeProgressive = function (surfaceId, surf, bitmapData) {
     let ctx = this.progCtx[surfaceId];
     if (!ctx) { ctx = new this.progressive.Context(); this.progCtx[surfaceId] = ctx; }
     const self = this;
-    const dirty = [];
+    const tiles = [];
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     // NOTE: this whole body is guarded — a single bad frame must NEVER throw out of the GFX dispatch
     // loop (that would silently stop ALL further rendering and freeze the screen). On any error we log
     // and bail on just this PDU.
@@ -463,24 +468,48 @@ RdpGfx.prototype._decodeProgressive = function (surfaceId, surf, bitmapData) {
             const w = Math.min(64, surf.width - x);
             const h = Math.min(64, surf.height - y);
             if (w <= 0 || h <= 0) return;
+            // rgba is scratch owned by progressive.js and reused on the next tile callback, so it
+            // must be copied out now — but into our accumulation buffer, not a fresh ImageData.
+            // rgba is always stride-64 internally; for edge tiles (w/h < 64) copy row-by-row to
+            // repack into a tightly-strided w*h buffer.
+            let copy;
             if (w === 64 && h === 64) {
-                surf.ctx.putImageData(new ImageData(rgba.slice(0), 64, 64), x, y);
+                copy = rgba.slice(0);
             } else {
-                const sub = new Uint8ClampedArray(w * h * 4);
+                copy = new Uint8ClampedArray(w * h * 4);
                 for (let row = 0; row < h; row++) {
                     const src = row * 64 * 4;
-                    sub.set(rgba.subarray(src, src + w * 4), row * w * 4);
+                    copy.set(rgba.subarray(src, src + w * 4), row * w * 4);
                 }
-                surf.ctx.putImageData(new ImageData(sub, w, h), x, y);
             }
-            dirty.push({ left: x, top: y, right: x + w, bottom: y + h });
+            tiles.push({ x, y, w, h, rgba: copy });
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (x + w > maxX) maxX = x + w;
+            if (y + h > maxY) maxY = y + h;
         }, function (m) { self._log("rdpgfx: " + m); });
 
         if (!res) { this._log("rdpgfx: progressive decode failed (" + bitmapData.length + " bytes)"); }
     } catch (e) {
         this._log("rdpgfx: progressive EXCEPTION (" + bitmapData.length + "B): " + (e && e.stack ? e.stack : e));
     }
-    if (dirty.length) { try { this._afterSurfaceUpdate(surfaceId, surf, dirty); } catch (e) { this._log("rdpgfx: progressive paint exception: " + e); } }
+    if (!tiles.length) return;
+    try {
+        const bw = maxX - minX, bh = maxY - minY;
+        const frame = new Uint8ClampedArray(bw * bh * 4);
+        for (const t of tiles) {
+            const ox = t.x - minX, oy = t.y - minY;
+            for (let row = 0; row < t.h; row++) {
+                const src = row * t.w * 4;
+                const dst = ((oy + row) * bw + ox) * 4;
+                frame.set(t.rgba.subarray(src, src + t.w * 4), dst);
+            }
+        }
+        surf.ctx.putImageData(new ImageData(frame, bw, bh), minX, minY);
+        this._afterSurfaceUpdate(surfaceId, surf, [{ left: minX, top: minY, right: maxX, bottom: maxY }]);
+    } catch (e) {
+        this._log("rdpgfx: progressive paint exception: " + e);
+    }
 };
 
 // AVC420 bitstream ([MS-RDPEGFX] 2.2.4.4 / 2.2.4.5): an RFX_AVC420_METABLOCK (region rects + quant
