@@ -1,0 +1,1 @@
+KSol.ZeroVDI/wwwroot/docs/admin/changelog.md

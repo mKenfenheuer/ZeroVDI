@@ -302,7 +302,7 @@ public class Program
                 // Bootstrap the first admin. The email and password may be supplied out-of-band via
                 // Bootstrap:AdminEmail / Bootstrap:AdminPassword (env: Bootstrap__AdminPassword). If no
                 // password is configured we generate a cryptographically-random one and log it ONCE — we
-                // never ship a known default password (the previous hardcoded "rdpgateway" let anyone log
+                // never ship a known default password (the previous hardcoded "zerovdi" let anyone log
                 // into a fresh deployment as Admin). Lockout is left ENABLED so the account is brute-force
                 // protected like any other.
                 var bootstrapEmail = builder.Configuration["Bootstrap:AdminEmail"] ?? "admin@example.com";
