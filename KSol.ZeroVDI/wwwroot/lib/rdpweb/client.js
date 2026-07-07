@@ -1,5 +1,8 @@
 // Protocol/GFX diagnostic logging is OFF by default (set window.RDP_LOG = 1 in devtools to enable).
 // console.error/console.warn for real failures always fire regardless of this flag.
+// RDP_LOG = 2 additionally turns on verbose per-tile GFX decode tracing (ClearCodec/Progressive cache
+// hits, region/tile headers, quant indices) — noisy, but the fastest way to chase a specific black or
+// stale tile back to the PDU that produced it. Use 1 for normal diagnostic logging.
 window.RDP_LOG = window.RDP_LOG || 0;
 // client.js — browser RDP client over the gateway WebSocket relay.
 //
@@ -446,7 +449,7 @@ Client.prototype._refineKeyboardLayout = function () {
         }
         if (refined && refined !== current) {
             self.keyboardLayout = refined;
-            if (window.RDP_LOG == 1) console.log("rdp: keyboard layout refined to 0x" + refined.toString(16));
+            if (window.RDP_LOG >= 1) console.log("rdp: keyboard layout refined to 0x" + refined.toString(16));
         }
     }).catch(function () { /* keep the locale-based guess */ });
 };
@@ -485,7 +488,7 @@ Client.prototype._startProtocol = function () {
         onActive: function () { self._onActive(); },
         onError: function (m) { console.error("rdp:", m); self._status("error", m); },
         onClose: function (graceful, m) { self._onProtocolClose(graceful, m); },
-        onLog: function (m) { if(window.RDP_LOG == 1) console.log("rdp:", m); },
+        onLog: function (m) { if(window.RDP_LOG >= 1) console.log("rdp:", m); },
         onResize: function (w, h) { self._onRemoteResize(w, h); },
         onDisplayControlReady: function () { self._displayControlReady = true; self._applyInitialScale(); },
         onAudio: function (fmt, pcm) { self._playPcm(fmt, pcm); },
@@ -1274,16 +1277,22 @@ Client.prototype._onGfxDirectFrame = function (frame, surfaceId, map) {
 Client.prototype._onGfxReset = function (w, h) {
     if (!w || !h) return;
     if (this.canvas.width !== w || this.canvas.height !== h) {
+        // Setting canvas.width/height clears the ENTIRE backing store (HTML spec), even though only the
+        // dimensions changed — the previously-composited desktop is now gone from the output canvas.
+        // The GFX surfaces (protocol.js's RdpGfx) still hold the real decoded content, so repaint them
+        // in full afterward or every static area (anything not immediately re-sent by the host) shows as
+        // black until it happens to get its own fresh update.
         this.canvas.width = w;
         this.canvas.height = h;
         if (this._wrapEl) this._fit(this._wrapEl);
+        if (this.proto && this.proto.gfx) this.proto.gfx.repaintAll();
     }
 };
 
-// Gated pointer-update tracing. Off unless window.RDP_LOG == 1 (see top of file), so the
+// Gated pointer-update tracing. Off unless window.RDP_LOG >= 1 (see top of file), so the
 // hot path stays quiet in production but pointer-cache issues (e.g. reverting to the OS
 // default cursor) can be diagnosed by flipping the flag in devtools.
-function PTR_LOG(msg) { if (window.RDP_LOG == 1) console.log("rdp: pointer " + msg); }
+function PTR_LOG(msg) { if (window.RDP_LOG >= 1) console.log("rdp: pointer " + msg); }
 
 // Select the active RDP cursor by swapping the single pointer-cache-* class on cursorEl.
 // Only that class is touched, so any other classes on the element are preserved. Pass null

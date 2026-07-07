@@ -564,7 +564,7 @@ function findBlockStart(data, dv, len) {
     return -1;
 }
 
-function decodeStream(ctx, data, onTile, log) {
+function decodeStream(ctx, data, onTile, log, verbose) {
     var dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
     var pos = 0, len = data.length;
     var tilesOut = 0, frames = 0;
@@ -608,8 +608,12 @@ function decodeStream(ctx, data, onTile, log) {
             case WBT_REGION: {
                 region = parseRegion(data, pos, blockEnd, dv);
                 if (!region) { if (log) log("progressive: region parse failed"); return null; }
+                if (verbose && log) {
+                    log("progressive: region flags=0x" + region.flags.toString(16) + " numTiles=" + region.numTiles +
+                        " numQuant=" + region.numQuant + " numProgQuant=" + region.numProgQuant);
+                }
                 // parseRegion advanced pos to the tile data; process tiles inline.
-                processTiles(ctx, region, contextFlags, onTile, log);
+                processTiles(ctx, region, contextFlags, onTile, log, verbose);
                 tilesOut += region.tileCount;
                 pos = blockEnd; break;
             }
@@ -660,7 +664,7 @@ function parseRegion(data, start, end, dv) {
 }
 
 // Walk the tile-data blocks of a region and reconstruct each SIMPLE/FIRST tile.
-function processTiles(ctx, region, contextFlags, onTile, log) {
+function processTiles(ctx, region, contextFlags, onTile, log, verbose) {
     var data = ctx._streamData;
     var dv = ctx._streamDv;
     var p = region.tileDataStart;
@@ -691,12 +695,19 @@ function processTiles(ctx, region, contextFlags, onTile, log) {
             var crData = p; p += crLen;
             /* tailData */ p += tailLen;
 
+            if (verbose && log) {
+                log("progressive: tile " + (simple ? "SIMPLE" : "FIRST") + " x=" + xIdx + " y=" + yIdx +
+                    " quality=" + quality + " diff=" + ((tflags & RFX_TILE_DIFFERENCE) !== 0) +
+                    " yLen=" + yLen + " cbLen=" + cbLen + " crLen=" + crLen);
+            }
             if (quantIdxY < region.numQuant && quantIdxCb < region.numQuant && quantIdxCr < region.numQuant) {
                 reconstructTile(ctx, region, xIdx, yIdx, tflags, quality,
                     region.quants[quantIdxY], region.quants[quantIdxCb], region.quants[quantIdxCr],
                     data, yData, yLen, cbData, cbLen, crData, crLen, extrapolate, onTile, log);
             } else if (log) {
-                log("progressive: tile quantIdx out of range");
+                log("progressive: tile " + xIdx + "," + yIdx + " quantIdx out of range (Y=" + quantIdxY +
+                    " Cb=" + quantIdxCb + " Cr=" + quantIdxCr + " numQuant=" + region.numQuant +
+                    ") — tile SKIPPED, will be BLACK/stale");
             }
             p = bEnd;
         } else if (blockType === WBT_TILE_UPGRADE) {
@@ -712,6 +723,10 @@ function processTiles(ctx, region, contextFlags, onTile, log) {
             var cbRaw = p; p += cbRawLen;
             var crSrl = p; p += crSrlLen;
             var crRaw = p; p += crRawLen;
+            if (verbose && log) {
+                log("progressive: tile UPGRADE x=" + uX + " y=" + uY + " quality=" + uQuality +
+                    " ySrl=" + ySrlLen + " yRaw=" + yRawLen);
+            }
             if (uQY < region.numQuant && uQCb < region.numQuant && uQCr < region.numQuant && p <= bEnd) {
                 ctx._blobs[0] = ySrl;  ctx._blobs[1] = ySrlLen;  ctx._blobs[2] = yRaw;  ctx._blobs[3] = yRawLen;
                 ctx._blobs[4] = cbSrl; ctx._blobs[5] = cbSrlLen; ctx._blobs[6] = cbRaw; ctx._blobs[7] = cbRawLen;
@@ -719,6 +734,9 @@ function processTiles(ctx, region, contextFlags, onTile, log) {
                 upgradeTile(ctx, region, uX, uY, uQuality,
                     region.quants[uQY], region.quants[uQCb], region.quants[uQCr],
                     data, ctx._blobs, extrapolate, onTile, log);
+            } else if (log) {
+                log("progressive: UPGRADE tile " + uX + "," + uY + " quantIdx out of range or truncated (p=" + p +
+                    " bEnd=" + bEnd + ") — upgrade SKIPPED, tile stays at prior quality");
             }
             p = bEnd;
         } else {
@@ -731,7 +749,10 @@ function reconstructTile(ctx, region, xIdx, yIdx, tflags, quality, qY, qCb, qCr,
                          data, yOff, yLen, cbOff, cbLen, crOff, crLen, extrapolate, onTile, log) {
     var coeffDiff = (tflags & RFX_TILE_DIFFERENCE) !== 0;
     var prog = progQuantFor(region, quality, log);
-    if (prog === undefined) return;
+    if (prog === undefined) {
+        if (log) log("progressive: tile " + xIdx + "," + yIdx + " invalid progQuant — SKIPPED, tile will be BLACK/stale");
+        return;
+    }
     var pY = prog ? prog.y : QUANT_ZERO, pCb = prog ? prog.cb : QUANT_ZERO, pCr = prog ? prog.cr : QUANT_ZERO;
     var shY = quantShift(qY, pY), shCb = quantShift(qCb, pCb), shCr = quantShift(qCr, pCr);
     var cell = ctx._tileCell(xIdx, yIdx);
@@ -852,11 +873,20 @@ function upgradeComponent(ctx, shift, numBits, srcDst, current, sign, data, srlO
 function upgradeTile(ctx, region, xIdx, yIdx, quality, qY, qCb, qCr, data, blobs, extrapolate, onTile, log) {
     var cell = ctx._tileCell(xIdx, yIdx);
     if (!cell.bitPos) {
-        if (log && !ctx._loggedUpgNoFirst) { ctx._loggedUpgNoFirst = 1; log("progressive: UPGRADE for tile " + xIdx + "," + yIdx + " without FIRST — skipped"); }
+        // Logged per-tile-cell (not just once globally) — an UPGRADE with no prior FIRST leaves this
+        // specific tile stuck at whatever it last rendered (often nothing = black), so seeing which
+        // coordinates repeatedly hit this is the key signal for chasing stale tiles.
+        if (log && !cell._loggedUpgNoFirst) {
+            cell._loggedUpgNoFirst = 1;
+            log("progressive: UPGRADE for tile " + xIdx + "," + yIdx + " without FIRST — skipped, tile stays BLACK/stale");
+        }
         return;
     }
     var prog = progQuantFor(region, quality, log);
-    if (prog === undefined) return;
+    if (prog === undefined) {
+        if (log) log("progressive: UPGRADE tile " + xIdx + "," + yIdx + " invalid progQuant — skipped");
+        return;
+    }
     var progs = [prog ? prog.y : QUANT_ZERO, prog ? prog.cb : QUANT_ZERO, prog ? prog.cr : QUANT_ZERO];
     var quants = [qY, qCb, qCr];
     var scratch = [ctx.scratchY, ctx.scratchCb, ctx.scratchCr];
@@ -874,12 +904,14 @@ function upgradeTile(ctx, region, xIdx, yIdx, quality, qY, qCb, qCr, data, blobs
 
 global.RfxProgressive = {
     Context: ProgressiveContext,
-    // decode(ctx, payload Uint8Array, onTile(xIdx,yIdx,rgbaUint8ClampedArray), log) -> {tiles,frames}|null
-    decode: function (ctx, payload, onTile, log) {
+    // decode(ctx, payload Uint8Array, onTile(xIdx,yIdx,rgbaUint8ClampedArray), log, verbose) -> {tiles,frames}|null
+    // `verbose` enables per-tile/per-region tracing (block headers, quant indices, cache state) on top
+    // of the always-on error logging, for chasing a specific black/stale tile back to its cause.
+    decode: function (ctx, payload, onTile, log, verbose) {
         ctx._streamData = payload;
         ctx._streamDv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
         try {
-            return decodeStream(ctx, payload, onTile, log);
+            return decodeStream(ctx, payload, onTile, log, verbose);
         } catch (e) {
             if (log) log("progressive: decode exception: " + (e && e.message ? e.message : e));
             return null;

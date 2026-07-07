@@ -34,14 +34,19 @@ ByteReader.prototype.skip = function (n) { this.o += n; };
 importScripts("clear.js", "progressive.js");
 
 const clear = new ClearDecode();
-const progCtx = {}; // surfaceId -> RfxProgressive.Context
+const progCtx = {}; // "surfaceId:codecContextId" -> RfxProgressive.Context
 
 function log(m) { postMessage({ cmd: "log", message: m }); }
 
 function decodeProgressive(msg) {
-    const { reqId, surfaceId, surfWidth, surfHeight } = msg;
-    let ctx = progCtx[surfaceId];
-    if (!ctx) { ctx = new RfxProgressive.Context(); progCtx[surfaceId] = ctx; }
+    const { reqId, surfaceId, codecContextId, surfWidth, surfHeight } = msg;
+    // Keyed by surfaceId+codecContextId — see the matching comment in rdpgfx.js's
+    // _decodeProgressiveSync: the host can multiplex multiple independent progressive streams onto one
+    // surface, and sharing one Context between them corrupts tile coefficient state and dirty-rect
+    // tracking across contexts, leaving stale/black regions where one context's paint doesn't reach.
+    const key = surfaceId + ":" + codecContextId;
+    let ctx = progCtx[key];
+    if (!ctx) { ctx = new RfxProgressive.Context(); progCtx[key] = ctx; }
 
     const tiles = [];
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -68,7 +73,7 @@ function decodeProgressive(msg) {
             if (y < minY) minY = y;
             if (x + w > maxX) maxX = x + w;
             if (y + h > maxY) maxY = y + h;
-        }, log);
+        }, log, msg.verbose);
     } catch (e) {
         error = "progressive EXCEPTION (" + msg.bitmapData.byteLength + "B): " + (e && e.stack ? e.stack : e);
     }
@@ -83,19 +88,34 @@ function decodeProgressive(msg) {
         return;
     }
 
+    // Composite only into the bounding box, but ONLY where a tile actually landed. A region's changed
+    // tiles are frequently a sparse/non-rectangular set (GNOME RD only sends tiles that actually changed
+    // — an L-shaped or scattered dirty area is normal), so minX/minY/maxX/maxY can span 64x64 cells that
+    // never got an onTile() call this PDU. Those previously got left as zero-filled (opaque black) in a
+    // single bounding-box buffer and blitted straight over whatever good pixels were already there —
+    // that's what was punching black holes into freshly-exposed windows. Track which cells were actually
+    // written and skip re-blitting any that weren't.
     const bw = maxX - minX, bh = maxY - minY;
     const frame = new Uint8ClampedArray(bw * bh * 4);
+    const colTiles = Math.ceil(bw / 64), rowTiles = Math.ceil(bh / 64);
+    const written = new Uint8Array(colTiles * rowTiles);
     for (const t of tiles) {
         const ox = t.x - minX, oy = t.y - minY;
+        written[(oy / 64 | 0) * colTiles + (ox / 64 | 0)] = 1;
         for (let row = 0; row < t.h; row++) {
             const src = row * t.w * 4;
             const dst = ((oy + row) * bw + ox) * 4;
             frame.set(t.rgba.subarray(src, src + t.w * 4), dst);
         }
     }
+    let holes = false;
+    for (let i = 0; i < written.length; i++) if (!written[i]) { holes = true; break; }
     postMessage(
-        { cmd: "progressive-result", reqId, surfaceId, ok: true, minX, minY, bw, bh, buffer: frame.buffer },
-        [frame.buffer]
+        holes
+            ? { cmd: "progressive-result", reqId, surfaceId, ok: true, sparse: true,
+                tiles: tiles.map(function (t) { return { x: t.x, y: t.y, w: t.w, h: t.h, buffer: t.rgba.buffer }; }) }
+            : { cmd: "progressive-result", reqId, surfaceId, ok: true, minX, minY, bw, bh, buffer: frame.buffer },
+        holes ? tiles.map(function (t) { return t.rgba.buffer; }) : [frame.buffer]
     );
 }
 
@@ -108,7 +128,7 @@ function decodeClear(msg) {
     }
     let res = null, error = null;
     try {
-        res = clear.decode(new Uint8Array(msg.data), w, h, log);
+        res = clear.decode(new Uint8Array(msg.data), w, h, log, msg.verbose);
     } catch (e) {
         error = "ClearCodec EXCEPTION: " + (e && e.stack ? e.stack : e);
     }
@@ -130,9 +150,11 @@ self.onmessage = function (e) {
             for (const k in progCtx) delete progCtx[k];
             clear.reset();
             break;
-        case "destroy-surface":
-            delete progCtx[msg.surfaceId];
+        case "destroy-surface": {
+            const prefix = msg.surfaceId + ":";
+            for (const k in progCtx) if (k.indexOf(prefix) === 0) delete progCtx[k];
             break;
+        }
         default:
             log("decode-worker: unknown cmd " + msg.cmd);
     }

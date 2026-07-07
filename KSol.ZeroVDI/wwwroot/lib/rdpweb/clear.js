@@ -61,7 +61,10 @@ function packRGBA(r, g, b, a) { return ((a << 24) | (b << 16) | (g << 8) | r) >>
 
 // Decode a ClearCodec bitmap into an RGBA Uint8ClampedArray sized width*height*4 (top-down). Returns
 // { rgba, width, height } or null on error. `data` is the WIRE_TO_SURFACE bitmapData (Uint8Array).
-ClearDecode.prototype.decode = function (data, width, height, log) {
+// `verbose`, when truthy, additionally logs per-tile cache hit/miss and layer composition detail — this
+// is the tracing needed to root-cause a specific black/stale tile (which layer/cache slot produced it),
+// as opposed to the always-on error logging below which only fires on malformed/unexpected data.
+ClearDecode.prototype.decode = function (data, width, height, log, verbose) {
     const r = new ByteReader(data);
     if (r.remaining() < 2) return null;
     const glyphFlags = r.u8();
@@ -104,9 +107,11 @@ ClearDecode.prototype.decode = function (data, width, height, log) {
                 const e = this.glyphCache[glyphIndex];
                 const count = width * height;
                 if (!e || !e.pixels || count > e.count) {
-                    if (log) log("clear: glyph hit miss/too-small idx=" + glyphIndex);
+                    if (log) log("clear: glyph hit miss/too-small idx=" + glyphIndex + " " + width + "x" + height +
+                        " cached=" + (e ? e.count : "none") + " — tile will be BLACK");
                     return null;
                 }
+                if (verbose && log) log("clear: glyph HIT idx=" + glyphIndex + " " + width + "x" + height);
                 out32.set(e.pixels.subarray(0, count));
                 return { rgba: out, width, height };
             }
@@ -116,6 +121,7 @@ ClearDecode.prototype.decode = function (data, width, height, log) {
             if (!e || count > e.size) { e = { pixels: new Uint32Array(count), count, size: count }; this.glyphCache[glyphIndex] = e; }
             e.count = count;
             glyphEntry = e;
+            if (verbose && log) log("clear: glyph STORE idx=" + glyphIndex + " " + width + "x" + height);
         }
     }
 
@@ -133,9 +139,14 @@ ClearDecode.prototype.decode = function (data, width, height, log) {
     const bandsByteCount = r.u32le();
     const subcodecByteCount = r.u32le();
 
+    if (verbose && log) {
+        log("clear: tile " + width + "x" + height + " seq=" + seqNumber +
+            " residual=" + residualByteCount + " bands=" + bandsByteCount + " subcodec=" + subcodecByteCount);
+    }
+
     if (residualByteCount > 0 && !this._residual(r, residualByteCount, width, height, out32, log)) return null;
-    if (bandsByteCount > 0 && !this._bands(r, bandsByteCount, width, height, out32, log)) return null;
-    if (subcodecByteCount > 0 && !this._subcodecs(r, subcodecByteCount, width, height, out, out32, log)) return null;
+    if (bandsByteCount > 0 && !this._bands(r, bandsByteCount, width, height, out32, log, verbose)) return null;
+    if (subcodecByteCount > 0 && !this._subcodecs(r, subcodecByteCount, width, height, out, out32, log, verbose)) return null;
 
     // Cache the composed tile if this was a GLYPH_INDEX (so a later GLYPH_HIT can re-use it).
     if (glyphEntry) glyphEntry.pixels.set(out32.subarray(0, width * height));
@@ -172,7 +183,7 @@ ClearDecode.prototype._residual = function (r, byteCount, width, height, out32, 
 
 // Bands layer: vertical bars. Each band spans columns [xStart..xEnd] at rows [yStart..yEnd], built from
 // per-column VBar entries (short-vbar cache + full-vbar cache), then written column-by-column to the tile.
-ClearDecode.prototype._bands = function (r, byteCount, width, height, out32, log) {
+ClearDecode.prototype._bands = function (r, byteCount, width, height, out32, log, verbose) {
     let suboffset = 0;
     while (suboffset < byteCount) {
         if (r.remaining() < 11) return false;
@@ -184,6 +195,7 @@ ClearDecode.prototype._bands = function (r, byteCount, width, height, out32, log
         const vBarCount = (xEnd - xStart) + 1;
         const vBarHeight = (yEnd - yStart + 1);
         if (vBarHeight > 52) { if (log) log("clear: vBarHeight>52"); return false; }
+        if (verbose && log) log("clear: band x=[" + xStart + "," + xEnd + "] y=[" + yStart + "," + yEnd + "] vBarCount=" + vBarCount);
 
         for (let i = 0; i < vBarCount; i++) {
             if (r.remaining() < 2) return false;
@@ -220,9 +232,16 @@ ClearDecode.prototype._bands = function (r, byteCount, width, height, out32, log
                 const idx = vBarHeader & 0x7fff;
                 vBarEntry = this.vbar[idx];
                 if (!vBarEntry || vBarEntry.size === 0) {
-                    // Empty cache slot — fill dummy (matches FreeRDP's warn+fill path).
+                    // Empty cache slot — fill dummy (matches FreeRDP's warn+fill path). This is a known
+                    // black/stale-tile cause: a VBAR_CACHE_HIT referencing a slot we never populated
+                    // (cache desync, e.g. from a prior seqNumber resync or CACHE_RESET race) silently
+                    // produces a blank column instead of the intended pixels.
+                    if (log) log("clear: VBAR_CACHE_HIT on empty/undersized slot " + idx +
+                        " (col " + i + " of " + vBarCount + ", x=" + (xStart + i) + ") — filling blank, expect stale/black column");
                     vBarEntry = { pixels: new Uint32Array(vBarHeight), count: vBarHeight, size: vBarHeight };
                     this.vbar[idx] = vBarEntry;
+                } else if (verbose && log) {
+                    log("clear: VBar HIT idx=" + idx + " col=" + i + " h=" + vBarHeight);
                 }
             } else {
                 if (log) log("clear: invalid vBarHeader 0x" + vBarHeader.toString(16));
@@ -268,7 +287,7 @@ ClearDecode.prototype._bands = function (r, byteCount, width, height, out32, log
 };
 
 // Subcodecs layer: per-region tiles via Uncompressed(0) / NSCodec(1) / RLEX(2).
-ClearDecode.prototype._subcodecs = function (r, byteCount, nWidth, nHeight, out, out32, log) {
+ClearDecode.prototype._subcodecs = function (r, byteCount, nWidth, nHeight, out, out32, log, verbose) {
     let suboffset = 0;
     while (suboffset < byteCount) {
         if (r.remaining() < 13) return false;
@@ -277,12 +296,23 @@ ClearDecode.prototype._subcodecs = function (r, byteCount, nWidth, nHeight, out,
         const subcodecId = r.u8();
         suboffset += 13;
         if (r.remaining() < bitmapDataByteCount) return false;
-        if (xStart + width > nWidth || yStart + height > nHeight) return false;
+        if (xStart + width > nWidth || yStart + height > nHeight) {
+            if (log) log("clear: subcodec region out of bounds x=" + xStart + " y=" + yStart +
+                " " + width + "x" + height + " tile=" + nWidth + "x" + nHeight);
+            return false;
+        }
+        if (verbose && log) {
+            log("clear: subcodec id=" + subcodecId + " region x=" + xStart + " y=" + yStart +
+                " " + width + "x" + height + " bytes=" + bitmapDataByteCount);
+        }
 
         const region = r.bytes(bitmapDataByteCount); // detaches a view into the source
         if (subcodecId === 0) {                       // Uncompressed BGR24, top-down
             const need = width * height * 3;
-            if (bitmapDataByteCount !== need) return false;
+            if (bitmapDataByteCount !== need) {
+                if (log) log("clear: uncompressed region size mismatch got=" + bitmapDataByteCount + " need=" + need);
+                return false;
+            }
             let p = 0;
             for (let y = 0; y < height; y++) {
                 let di = ((yStart + y) * nWidth + xStart);
@@ -292,14 +322,19 @@ ClearDecode.prototype._subcodecs = function (r, byteCount, nWidth, nHeight, out,
                 }
             }
         } else if (subcodecId === 2) {                // RLEX palettized runs
-            if (!this._rlex(region, width, height, xStart, yStart, nWidth, nHeight, out32, log)) return false;
+            if (!this._rlex(region, width, height, xStart, yStart, nWidth, nHeight, out32, log)) {
+                if (log) log("clear: RLEX region x=" + xStart + " y=" + yStart + " " + width + "x" + height +
+                    " decode failed — tile will be BLACK/stale at this region");
+                return false;
+            }
         } else if (subcodecId === 1) {                // NSCodec (YCoCg + RLE)
             if (!this._nscodec(region, width, height, xStart, yStart, nWidth, nHeight, out32, log)) {
-                if (log) log("clear: NSCodec region " + width + "x" + height + " decode failed");
+                if (log) log("clear: NSCodec region x=" + xStart + " y=" + yStart + " " + width + "x" + height +
+                    " decode failed — region left unchanged (stale)");
                 // Non-fatal: leave the region as-is and continue with the rest of the tile.
             }
         } else {
-            if (log) log("clear: unknown subcodecId " + subcodecId);
+            if (log) log("clear: unknown subcodecId " + subcodecId + " region " + width + "x" + height);
             return false;
         }
         suboffset += bitmapDataByteCount;
