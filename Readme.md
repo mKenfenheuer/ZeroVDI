@@ -13,7 +13,7 @@ centrally enforcing access, device policy, and a complete, tamper-evident audit 
 
 ---
 
-## ✨ What it does
+## What it does
 
 - **Browser-native desktop console.** Connect to any authorized desktop straight from the
   web UI. The remote-desktop stream (including RemoteFX Progressive and H.264) is decoded
@@ -36,7 +36,7 @@ centrally enforcing access, device policy, and a complete, tamper-evident audit 
 Everything runs in the browser — there is no client, plugin, agent, or `.rdp` file for
 end users to install.
 
-## 🧩 Components
+## Components
 
 | Component | Description |
 |---|---|
@@ -45,7 +45,7 @@ end users to install.
 
 Built on **.NET 9 / ASP.NET Core**, backed by **SQLite** and **Proxmox VE**.
 
-## 🚀 Deployment
+## Deployment
 
 ZeroVDI ships as container images and is deployed with Docker Compose. See
 [`docker-compose.yml`](docker-compose.yml) for the reference stack (gateway + connector).
@@ -58,7 +58,7 @@ Full setup guides live in the in-app documentation under **Admin → Docs**
 (installation, configuration, architecture) or in
 [`KSol.ZeroVDI/wwwroot/docs/admin/`](KSol.ZeroVDI/wwwroot/docs/admin/).
 
-## 🔐 Required security configuration
+## Required security configuration
 
 Before deploying, set these environment variables (shown in Docker `__` form):
 
@@ -80,7 +80,7 @@ API token secret are all sealed with the keyring (which is itself encrypted with
 plaintext `NtHash` / API secret is automatically encrypted in place (idempotent). User login
 passwords are stored only as the standard salted ASP.NET Identity hash.
 
-## 📄 License
+## License
 
 ZeroVDI is distributed under the **KSol.IT Non-Commercial License** — see [`LICENSE`](LICENSE).
 
@@ -91,7 +91,7 @@ ZeroVDI is distributed under the **KSol.IT Non-Commercial License** — see [`LI
 
 For commercial or enterprise licensing, contact **maximilian.kenfenheuer@ksol.it**.
 
-## 📞 Support
+## Support
 
 - Found a bug? Want to suggest a feature? Open an
   [issue](https://github.com/mKenfenheuer/ksol-zerovdi/issues).
