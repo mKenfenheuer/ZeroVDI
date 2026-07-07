@@ -1,4 +1,6 @@
-# KSol.IT ZeroVDI
+![ZeroVDI](KSol.ZeroVDI/wwwroot/img/zerovdi-logo.svg "ZeroVDI")
+
+---
 
 ![GitHub License](https://img.shields.io/github/license/mkenfenheuer/ksol-rdpgw)
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/mkenfenheuer/ksol-rdpgw/docker-publish.yml)
