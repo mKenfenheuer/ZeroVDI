@@ -32,6 +32,14 @@ function Client(websocketURL, canvasID) {
     this.proto = null;
     this.statusCb = null;       // optional (status, message) => void for the UI
 
+    // Connection-quality tracking: RTT is sampled via a periodic ping/pong echoed by the gateway (see
+    // _startQualityProbe/_onPongFrame); throughput is derived from bytes actually received on the
+    // WebSocket in a rolling window. Both are measured client-side from traffic already flowing —
+    // no separate speed-test transfer.
+    this._quality = { rtt: null, kbps: null, level: null, bytesThisWindow: 0, windowStartMs: 0, pingSeq: 0, pingSentAt: {} };
+    this.qualityCb = null;      // optional ({rtt, kbps, level}) => void for the UI
+    this._qualityTimer = null;
+
     // Windows keyboard layout id (KLID) sent in the RDP handshake (CS_CORE + Input capset) so the
     // host loads the layout matching the user's physical keyboard instead of always US English.
     // Synchronous locale-based guess now; refined asynchronously via the Keyboard API (Chromium)
@@ -51,6 +59,75 @@ function Client(websocketURL, canvasID) {
 
 Client.prototype.setStatusCallback = function (cb) { this.statusCb = cb; };
 Client.prototype._status = function (status, message) { if (this.statusCb) this.statusCb(status, message); };
+
+// ---- connection quality (RTT + throughput) --------------------------------------------------------
+// optional ({rtt: ms|null, kbps: number|null, level: "good"|"fair"|"poor"|null}) => void for the top bar.
+Client.prototype.setQualityCallback = function (cb) { this.qualityCb = cb; };
+
+Client.QUALITY_PING_INTERVAL_MS = 3000;
+Client.QUALITY_PING_TIMEOUT_MS = 8000; // stale in-flight pings are dropped so a lost pong doesn't wedge RTT
+
+Client.prototype._startQualityProbe = function () {
+    this._stopQualityProbe();
+    const self = this;
+    this._quality.windowStartMs = Date.now();
+    this._quality.bytesThisWindow = 0;
+    this._qualityTimer = setInterval(function () { self._qualityTick(); }, Client.QUALITY_PING_INTERVAL_MS);
+};
+
+Client.prototype._stopQualityProbe = function () {
+    if (this._qualityTimer) { clearInterval(this._qualityTimer); this._qualityTimer = null; }
+};
+
+Client.prototype._qualityTick = function () {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
+    const q = this._quality;
+    const now = Date.now();
+
+    // Throughput: bytes actually received over the elapsed window (not a synthetic transfer).
+    const elapsedS = (now - q.windowStartMs) / 1000;
+    if (elapsedS > 0) {
+        q.kbps = (q.bytesThisWindow * 8 / 1000) / elapsedS;
+    }
+    q.bytesThisWindow = 0;
+    q.windowStartMs = now;
+
+    // Drop stale in-flight pings (lost pong) so one dropped probe doesn't freeze the RTT reading forever.
+    for (const seq in q.pingSentAt) {
+        if (now - q.pingSentAt[seq] > Client.QUALITY_PING_TIMEOUT_MS) delete q.pingSentAt[seq];
+    }
+
+    const seq = ++q.pingSeq;
+    q.pingSentAt[seq] = now;
+    try { this.socket.send(JSON.stringify({ type: "ping", t: now, seq: seq })); } catch (e) { /* ignore */ }
+
+    this._publishQuality();
+};
+
+// Returns true if the frame was a pong (consumed), false if it should fall through to _onControlFrame.
+Client.prototype._onPongFrame = function (text) {
+    let msg;
+    try { msg = JSON.parse(text); } catch (e) { return false; }
+    if (msg.type !== "pong" || typeof msg.t !== "number") return false;
+    this._quality.rtt = Date.now() - msg.t;
+    this._publishQuality();
+    return true;
+};
+
+// Thresholds are RTT/throughput heuristics for an interactive desktop session (RDP GFX), not raw link
+// speed: >150ms RTT or <256kbps is where cursor lag / progressive-tile catch-up becomes visible.
+Client.prototype._classifyQuality = function (rtt, kbps) {
+    if (rtt == null && kbps == null) return null;
+    if ((rtt != null && rtt > 300) || (kbps != null && kbps < 256)) return "poor";
+    if ((rtt != null && rtt > 120) || (kbps != null && kbps < 1024)) return "fair";
+    return "good";
+};
+
+Client.prototype._publishQuality = function () {
+    const q = this._quality;
+    q.level = this._classifyQuality(q.rtt, q.kbps);
+    if (this.qualityCb) this.qualityCb({ rtt: q.rtt, kbps: q.kbps, level: q.level });
+};
 
 // Sizes the canvas backing store to a desktop resolution that fills `wrapEl` in *device* pixels, so
 // the remote desktop renders crisp and 1:1 on HiDPI displays (no browser upscaling/blur). The CSS
@@ -221,11 +298,15 @@ Client.prototype.connect = function (creds) {
 
     this.socket.onmessage = function (e) {
         if (typeof e.data === "string") {
+            // "pong" frames are our own RTT probe echoed back by the gateway (see _startQualityProbe);
+            // everything else is a status control frame ({status: ...}).
+            if (self._onPongFrame(e.data)) return;
             self._onControlFrame(e.data);
             return;
         }
         // Binary: relayed RDP bytes.
         const bytes = (e.data instanceof ArrayBuffer) ? new Uint8Array(e.data) : new Uint8Array(e.data);
+        self._quality.bytesThisWindow += bytes.byteLength;
         if (self.proto) self.proto.feed(bytes);
     };
 
@@ -976,6 +1057,7 @@ Client.prototype._onActive = function () {
     this.connected = true;
     this._activeSince = performance.now(); // for maybeResize's settle guard
     this._status("ready", null);
+    this._startQualityProbe();
     // Display Control may have signalled ready before the session was ACTIVE; now canResize() is true.
     this._applyInitialScale();
 
@@ -993,6 +1075,7 @@ Client.prototype.deinitialize = function () {
     // the full teardown (which would flip the UI to "closed" and reset session state) — _onControlFrame's
     // "redirect" handler already reset the protocol and is about to call connect() again.
     if (this._redirecting) return;
+    this._stopQualityProbe();
     window.removeEventListener("keydown", this.handleKeyDown);
     window.removeEventListener("keyup", this.handleKeyUp);
     this.canvas.removeEventListener("mousemove", this.handleMouseMove);

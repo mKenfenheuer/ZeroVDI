@@ -66,6 +66,24 @@
         #floatbar .name { font-weight: 600; white-space: nowrap; overflow: hidden;
             text-overflow: ellipsis; max-width: 22vw; margin-left: 10px }
         #floatbar .status { color: #9bd; white-space: nowrap; }
+        /* Connection-quality indicator: a phone-style signal-bars glyph (4 ascending bars) derived from
+           client-measured RTT and throughput (see client.js setQualityCallback). Hidden until the first
+           sample arrives. Lit bars (within the current quality level) render at full opacity in the
+           level's color; unlit bars stay a dim neutral fill at 75% opacity, same as a phone's signal icon. */
+        #floatbar .quality { display: none; align-items: center; gap: .35rem; white-space: nowrap; color: #9aa0a6; }
+        #floatbar .quality.show { display: flex; }
+        #floatbar .quality-bars { display: flex; align-items: flex-end; gap: 1px; height: .6rem; }
+        #floatbar .quality-bars i {
+            display: block; width: 3px; background: #777; opacity: .75; border-radius: 1px;
+        }
+        #floatbar .quality-bars i:nth-child(1) { height: 25%; }
+        #floatbar .quality-bars i:nth-child(2) { height: 50%; }
+        #floatbar .quality-bars i:nth-child(3) { height: 75%; }
+        #floatbar .quality-bars i:nth-child(4) { height: 100%; }
+        #floatbar .quality-bars i.lit { opacity: 1; }
+        #floatbar .quality.good .quality-bars i.lit { background: #3ecf6a; }
+        #floatbar .quality.fair .quality-bars i.lit { background: #e0a52c; }
+        #floatbar .quality.poor .quality-bars i.lit { background: #e0453c; }
         #floatbar-controls { display: flex; align-items: center; gap: .35rem; }
         #floatbar .btn { --bs-btn-padding-y: .15rem; --bs-btn-padding-x: .5rem; --bs-btn-font-size: .78rem; }
         /* A thin invisible strip along the top edge to reveal the bar when it's auto-hidden. */
@@ -291,6 +309,10 @@
     <div id="reveal-zone"></div>
     <div id="floatbar" class="hidden">
         <span class="name">@resourceName</span>
+        <span class="quality" id="floatbar-quality" title="Connection quality">
+            <span class="quality-bars"><i></i><i></i><i></i><i></i></span>
+            <span id="floatbar-quality-label"></span>
+        </span>
         <span id="floatbar-controls">
             <button class="btn-session-control" id="btn-clip" type="button"
                     title="Clipboard — sync text with the remote session"><i class="fa-solid fa-clipboard"></i></button>
@@ -594,6 +616,21 @@
                     loginOverlay.style.display = "flex";
                 }
             }
+
+            var qualityEl = document.getElementById("floatbar-quality");
+            var qualityLabel = document.getElementById("floatbar-quality-label");
+            var qualityBars = qualityEl.querySelectorAll(".quality-bars i");
+            var QUALITY_LIT_BARS = { poor: 1, fair: 2, good: 4 }; // out of 4, ascending like phone signal
+            client.setQualityCallback(function (q) {
+                if (!q.level) { qualityEl.classList.remove("show"); return; }
+                qualityEl.classList.remove("good", "fair", "poor");
+                qualityEl.classList.add("show", q.level);
+                var lit = QUALITY_LIT_BARS[q.level] || 0;
+                qualityBars.forEach(function (bar, i) { bar.classList.toggle("lit", i < lit); });
+                var rttText = (q.rtt != null) ? Math.round(q.rtt) + "ms" : "";
+                var kbpsText = (q.kbps != null) ? (q.kbps >= 1024 ? (q.kbps / 1024).toFixed(1) + "Mbps" : Math.round(q.kbps) + "kbps") : "";
+                qualityLabel.textContent = [rttText, kbpsText].filter(Boolean).join(" · ");
+            });
 
             client.setStatusCallback(function (status, message) {
                 switch (status) {

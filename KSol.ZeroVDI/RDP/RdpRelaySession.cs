@@ -332,6 +332,14 @@ public sealed class RdpRelaySession
                 var result = await _ws.ReceiveAsync(buffer, ct);
                 if (result.MessageType == WebSocketMessageType.Close) break;
                 if (result.Count == 0) continue;
+                if (result.MessageType == WebSocketMessageType.Text)
+                {
+                    // Connection-quality ping: the browser measures RTT by round-tripping a small JSON
+                    // frame carrying its own client-side timestamp. We just echo it back verbatim as
+                    // "pong" — the RDP byte stream never sees this, so it can't desync framing/decoders.
+                    await HandlePingAsync(buffer.AsMemory(0, result.Count), ct);
+                    continue;
+                }
                 // Browser sends raw RDP bytes as binary frames; write straight to the host. (A frame
                 // may be partial; RDP framing is the browser's concern, so just forward bytes.)
                 if (dump != null) { await dump.WriteAsync(buffer.AsMemory(0, result.Count), ct); await dump.FlushAsync(ct); }
@@ -342,6 +350,22 @@ public sealed class RdpRelaySession
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { _logger.LogDebug(ex, "RDP relay: ws→host pump ended"); }
+    }
+
+    // {"type":"ping","t":<client timestamp>} -> {"type":"pong","t":<same timestamp>}. Purely a round-trip
+    // echo so the browser can compute RTT = now() - t; the gateway does not interpret or store 't'.
+    private async Task HandlePingAsync(ReadOnlyMemory<byte> frame, CancellationToken ct)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(frame);
+            if (!doc.RootElement.TryGetProperty("type", out var t) || t.GetString() != "ping") return;
+            if (!doc.RootElement.TryGetProperty("t", out var tsEl)) return;
+            var json = JsonSerializer.Serialize(new { type = "pong", t = tsEl.GetDouble() });
+            if (_ws.State == WebSocketState.Open)
+                await _ws.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, ct);
+        }
+        catch (JsonException) { /* not a ping frame; ignore */ }
     }
 
     private async Task SendStatusAsync(string status, string? message, CancellationToken ct)
