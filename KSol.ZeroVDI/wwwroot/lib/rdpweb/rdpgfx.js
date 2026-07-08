@@ -17,6 +17,25 @@
 //
 // Structures ported from FreeRDP `channels/rdpgfx/client` + `include/freerdp/channels/rdpgfx.h`.
 
+// Intersect a (surface-clamped) progressive tile rect [tx,ty)..(tr,tb) with its REGION's tileRects.
+// Same helper as in decode-worker.js (keep in sync): returns [left,top,right,bottom] sub-rects; a
+// rect fully covering the tile short-circuits to a single full-tile clip; no rects → whole tile.
+function clipTileToRects(tx, ty, tr, tb, rects) {
+    if (!rects || !rects.length) return [[tx, ty, tr, tb]];
+    const clips = [];
+    for (let i = 0; i < rects.length; i++) {
+        const rc = rects[i];
+        const l = tx > rc.x ? tx : rc.x;
+        const t = ty > rc.y ? ty : rc.y;
+        const r = tr < rc.x + rc.w ? tr : rc.x + rc.w;
+        const b = tb < rc.y + rc.h ? tb : rc.y + rc.h;
+        if (r <= l || b <= t) continue;
+        if (l === tx && t === ty && r === tr && b === tb) return [[tx, ty, tr, tb]];
+        clips.push([l, t, r, b]);
+    }
+    return clips;
+}
+
 // ---- RDPGFX command ids ([MS-RDPEGFX] 2.2.1 / rdpgfx.h) ------------------------------------------
 const RDPGFX_CMDID_WIRETOSURFACE_1 = 0x0001;
 const RDPGFX_CMDID_WIRETOSURFACE_2 = 0x0002;
@@ -114,7 +133,7 @@ function RdpGfx(cb) {
     // RemoteFX Progressive (GNOME Remote Desktop streams this over WIRE_TO_SURFACE_2). Per-surface
     // context (holds the persistent per-tile coefficient grids needed for RFX_TILE_DIFFERENCE).
     this.progressive = (typeof RfxProgressive !== "undefined") ? RfxProgressive : null;
-    this.progCtx = {};           // "surfaceId:codecContextId" -> RfxProgressive.Context (main-thread fallback only)
+    this.progCtx = {};           // surfaceId -> RfxProgressive.Context (main-thread fallback only)
     this.framesDecoded = 0;
     this._dirty = [];            // output rects touched in the current frame, flushed at END_FRAME
     this.outputWidth = 0;
@@ -124,16 +143,18 @@ function RdpGfx(cb) {
     this._workerReqId = 0;
     this._workerPending = {};    // reqId -> { surfaceId, kind: "progressive"|"clear" }
     // ClearCodec/Progressive decode+paint is asynchronous (offloaded to decode-worker.js — see
-    // _decodeProgressive/_decodeClear), but SURFACE_TO_CACHE / SURFACE_TO_SURFACE / CACHE_TO_SURFACE are
-    // handled synchronously and read surf.canvas's CURRENT pixels immediately. [MS-RDPEGFX] PDUs are
-    // ordered — a SURFACE_TO_CACHE after a WIRE_TO_SURFACE_1/2 must see that PDU's painted result. Without
-    // this, a SURFACE_TO_CACHE dispatched while an earlier WIRE_TO_SURFACE for the same surface is still
-    // decoding in the worker would snapshot stale/pre-paint pixels into its cache slot — and every later
-    // CACHE_TO_SURFACE for that slot then re-paints that stale snapshot, which reads as "decoded garbage"
-    // that also shows up wherever the cache is reused. Track outstanding async decodes per surface and
-    // defer any surface-reading sync command until they've all landed.
-    this._pendingDecodes = {};   // surfaceId -> count of in-flight worker requests
-    this._deferredCmds = {};     // surfaceId -> [{cmdId, body}] queued behind pending decodes, in order
+    // _decodeProgressive/_decodeClear), but SOLIDFILL / SURFACE_TO_CACHE / SURFACE_TO_SURFACE /
+    // CACHE_TO_SURFACE are synchronous canvas ops. [MS-RDPEGFX] PDUs are strictly ordered — a
+    // SURFACE_TO_CACHE after a WIRE_TO_SURFACE must snapshot that PDU's painted result, a CACHE_TO_SURFACE
+    // after a SURFACE_TO_CACHE must see the slot populated, and a blit/fill must not be stamped over by an
+    // OLDER wire decode landing later. Per-surface defer queues can't express the cache-slot and cross-
+    // surface dependencies (a deferred SURFACE_TO_CACHE with a non-deferred CACHE_TO_SURFACE = "empty
+    // cache slot" black rects at session start), so ordering is global: every async decode gets a
+    // sequence number, order-sensitive sync ops queue in ONE FIFO behind the decodes submitted before
+    // them, and settle-time flushing replays them in exact PDU order (worker replies are FIFO).
+    this._decodeSeq = 0;         // decodes submitted (worker + sync fallback)
+    this._decodeSettledSeq = 0;  // decodes fully landed (painted or failed)
+    this._orderedQueue = [];     // [{barrier, cmdId, body}] sync ops waiting for barrier <= settledSeq
     this._initWorker();
 }
 
@@ -165,26 +186,19 @@ RdpGfx.prototype._initWorker = function () {
 RdpGfx.prototype._onWorkerMessage = function (msg) {
     if (msg.cmd === "log") { this._log(msg.message); return; }
     const pending = this._workerPending[msg.reqId];
-    if (!pending) return; // surface was destroyed/reset while this decode was in flight
+    if (!pending) return; // reset() cleared it — stale pre-reset reply; the seq counters were reset too
     delete this._workerPending[msg.reqId];
     const surf = this.surfaces[pending.surfaceId];
-    if (!surf) return; // surface destroyed while in flight
-    if (msg.cmd === "progressive-result") {
-        this._finishProgressive(pending.surfaceId, surf, msg);
-    } else if (msg.cmd === "clear-result") {
-        this._finishClear(pending.surfaceId, surf, msg);
+    // Settle even when the surface was destroyed while the decode was in flight (only the paint is
+    // skipped) — every submitted decode must advance the barrier or the ordered queue wedges forever.
+    if (surf) {
+        if (msg.cmd === "progressive-result") {
+            this._finishProgressive(pending.surfaceId, surf, msg);
+        } else if (msg.cmd === "clear-result") {
+            this._finishClear(pending.surfaceId, surf, msg);
+        }
     }
-    this._decodeSettled(pending.surfaceId);
-};
-
-// Called after a worker (or sync-fallback) decode for `surfaceId` has fully landed (painted or failed) —
-// decrements the in-flight counter and, once it hits zero, flushes any SURFACE_TO_CACHE/SURFACE_TO_SURFACE
-// PDUs that were deferred behind it (see the _pendingDecodes comment in the constructor).
-RdpGfx.prototype._decodeSettled = function (surfaceId) {
-    const n = (this._pendingDecodes[surfaceId] | 0) - 1;
-    if (n > 0) { this._pendingDecodes[surfaceId] = n; return; }
-    delete this._pendingDecodes[surfaceId];
-    this._flushDeferred(surfaceId);
+    this._decodeSettled();
 };
 
 RdpGfx.prototype._log = function (m) { if (this.cb.onLog) this.cb.onLog(m); };
@@ -204,7 +218,7 @@ RdpGfx.prototype.reset = function () {
     this._qoeT0 = null;
     if (this.clear) this.clear.reset();
     this._workerPending = {};
-    this._pendingDecodes = {}; this._deferredCmds = {};
+    this._decodeSeq = 0; this._decodeSettledSeq = 0; this._orderedQueue = [];
     if (this._worker) this._worker.postMessage({ cmd: "reset" });
 };
 
@@ -319,18 +333,26 @@ RdpGfx.prototype.onChannelData = function (data) {
 };
 
 RdpGfx.prototype._dispatch = function (cmdId, body) {
-    // SURFACE_TO_SURFACE reads srcId (u16 at offset 0); SURFACE_TO_CACHE reads surfaceId (u16 at offset
-    // 0) — both cmdIds happen to carry the surface-to-read as their very first field, so peeking it here
-    // (without disturbing the real ByteReader _onSurfaceToSurface/_onSurfaceToCache will construct) is
-    // enough to decide whether to defer. CACHE_TO_SURFACE deliberately isn't deferred here: it reads a
-    // cache slot, not a surface, and slots are only ever written by the (already-ordered-relative-to-this)
-    // synchronous SURFACE_TO_CACHE path — an async decode can't race a cache slot's content.
-    if (cmdId === RDPGFX_CMDID_SURFACETOSURFACE || cmdId === RDPGFX_CMDID_SURFACETOCACHE) {
-        const peekId = body.length >= 2 ? (body[0] | (body[1] << 8)) : null;
-        if (peekId != null && (this._pendingDecodes[peekId] | 0) > 0) {
-            (this._deferredCmds[peekId] || (this._deferredCmds[peekId] = [])).push({ cmdId, body });
-            return;
-        }
+    // Order-sensitive sync ops (see the _decodeSeq comment in the constructor): they read a surface or a
+    // cache slot, or write pixels an older in-flight decode would otherwise stamp over later. They may
+    // only run once every decode submitted before them has landed — and once anything is queued, all
+    // later order-sensitive ops queue behind it (FIFO), or a CACHE_TO_SURFACE could still overtake the
+    // queued SURFACE_TO_CACHE that populates its slot. WIRE_TO_SURFACE_1 with the UNCOMPRESSED codec
+    // also paints synchronously (_drawUncompressed) and needs the same gating — Windows interleaves
+    // small uncompressed strips with ClearCodec, and letting them jump ahead of in-flight decodes let
+    // the older decode land later and stamp stale pixels over the strip. (Codec-decoded wire PDUs stay
+    // ungated on purpose: they paint at their own settle slot, which is already in PDU order.)
+    let orderSensitive =
+        cmdId === RDPGFX_CMDID_SOLIDFILL || cmdId === RDPGFX_CMDID_SURFACETOSURFACE ||
+        cmdId === RDPGFX_CMDID_SURFACETOCACHE || cmdId === RDPGFX_CMDID_CACHETOSURFACE;
+    if (!orderSensitive && cmdId === RDPGFX_CMDID_WIRETOSURFACE_1 && body.length >= 4) {
+        orderSensitive = (body[2] | (body[3] << 8)) === RDPGFX_CODECID_UNCOMPRESSED; // peek codecId
+    }
+    if (orderSensitive && (this._decodeSettledSeq < this._decodeSeq || this._orderedQueue.length)) {
+        // body is a subarray view into the ZGFX inflate buffer, which is REUSED for the next PDU —
+        // anything that outlives this dispatch call must own its bytes or it decodes garbage later.
+        this._orderedQueue.push({ barrier: this._decodeSeq, cmdId, body: body.slice() });
+        return;
     }
     this._dispatchNow(cmdId, body);
 };
@@ -359,13 +381,15 @@ RdpGfx.prototype._dispatchNow = function (cmdId, body) {
     }
 };
 
-// Called whenever a surface's pending-decode count reaches zero: flush any commands that were deferred
-// behind it, in the order they originally arrived.
-RdpGfx.prototype._flushDeferred = function (surfaceId) {
-    const q = this._deferredCmds[surfaceId];
-    if (!q || !q.length) return;
-    delete this._deferredCmds[surfaceId];
-    for (const cmd of q) this._dispatch(cmd.cmdId, cmd.body); // re-check: may defer again behind newer decodes
+// Called after each decode has fully landed (painted or failed): advance the settle sequence and run
+// every queued sync op whose barrier is now met, in original PDU order. Stop at the first op still
+// waiting — FIFO order must never be violated by skipping ahead.
+RdpGfx.prototype._decodeSettled = function () {
+    if (this._decodeSettledSeq < this._decodeSeq) this._decodeSettledSeq++;
+    while (this._orderedQueue.length && this._orderedQueue[0].barrier <= this._decodeSettledSeq) {
+        const cmd = this._orderedQueue.shift();
+        this._dispatchNow(cmd.cmdId, cmd.body);
+    }
 };
 
 RdpGfx.prototype._onCapsConfirm = function (r) {
@@ -423,15 +447,12 @@ RdpGfx.prototype._destroySurface = function (surfaceId) {
     // Drop the progressive per-tile cache too — a recreated surfaceId is a brand-new surface; keeping the
     // old cache would mis-accumulate (and leak). The next frame must repaint from scratch. The real
     // per-tile state now lives in the worker (progCtx here is only used by the main-thread fallback path).
-    // Keyed by "surfaceId:codecContextId" (see _decodeProgressiveSync), so drop every context for this surface.
-    const prefix = surfaceId + ":";
-    for (const key in this.progCtx) if (key.indexOf(prefix) === 0) delete this.progCtx[key];
+    // Keyed by surfaceId (see _decodeProgressiveSyncInner).
+    delete this.progCtx[surfaceId];
     if (this._worker) this._worker.postMessage({ cmd: "destroy-surface", surfaceId: surfaceId });
-    // Any in-flight decode for this surface will still reply eventually, but _onWorkerMessage's `!surf`
-    // check bails before calling _decodeSettled — so clear the counter and drop anything deferred behind
-    // it here, otherwise a reused surfaceId could stay wedged waiting for a decode that will never settle.
-    delete this._pendingDecodes[surfaceId];
-    delete this._deferredCmds[surfaceId];
+    // In-flight decodes for this surface still reply and settle (paint skipped via the !surf check in
+    // _onWorkerMessage), so the ordered queue keeps draining. Queued sync ops that reference this
+    // surface no-op harmlessly in their handlers when they eventually run.
 };
 
 RdpGfx.prototype._onDeleteSurface = function (r) {
@@ -608,7 +629,7 @@ RdpGfx.prototype._onWireToSurface2 = function (r) {
 // putImageData happens here, in _finishProgressive. Falls back to synchronous main-thread decode
 // (_decodeProgressiveSync) if the worker isn't available.
 RdpGfx.prototype._decodeProgressive = function (surfaceId, surf, bitmapData, codecContextId) {
-    this._pendingDecodes[surfaceId] = (this._pendingDecodes[surfaceId] | 0) + 1;
+    this._decodeSeq++;
     if (!this._worker) { this._decodeProgressiveSync(surfaceId, surf, bitmapData, codecContextId); return; }
     const reqId = ++this._workerReqId;
     this._workerPending[reqId] = { surfaceId: surfaceId, kind: "progressive" };
@@ -671,45 +692,51 @@ RdpGfx.prototype._decodeProgressiveSync = function (surfaceId, surf, bitmapData,
 };
 
 RdpGfx.prototype._decodeProgressiveSyncInner = function (surfaceId, surf, bitmapData, codecContextId) {
-    // Keyed by surfaceId+codecContextId, not just surfaceId: [MS-RDPEGFX] lets the host multiplex
-    // multiple independent progressive streams (distinct codecContextId) onto the same surface, each
-    // covering its own region and refreshed on its own schedule. Sharing one Context (and therefore one
-    // set of persistent per-tile coefficient cells) between them let one context's FIRST/UPGRADE tiles
-    // clobber another's coefficient state for the same xIdx,yIdx, AND meant each decode's minX/minY/
-    // maxX/maxY dirty-rect only covered ITS OWN tiles — so pixels the other context previously painted
-    // just outside that rect were never repainted and eventually looked stale/black.
-    const key = surfaceId + ":" + codecContextId;
-    let ctx = this.progCtx[key];
-    if (!ctx) { ctx = new this.progressive.Context(); this.progCtx[key] = ctx; }
+    // Keyed by surfaceId ONLY, matching FreeRDP (progressive_create_surface_context takes just the
+    // surfaceId; codecContextId is ignored for tile state). Windows 11 bumps codecContextId on EVERY
+    // progressive PDU, yet still sends FIRST tiles with the diff flag — those coefficients are deltas
+    // to be accumulated onto that tile cell's state from the PREVIOUS PDU. Keying by codecContextId
+    // gave every PDU a fresh zeroed context, so diff tiles decoded as delta-only (washed-out grey),
+    // which SURFACE_TO_CACHE then snapshotted and spread. Tile state is per (surface, xIdx, yIdx).
+    let ctx = this.progCtx[surfaceId];
+    if (!ctx) { ctx = new this.progressive.Context(); this.progCtx[surfaceId] = ctx; }
     const self = this;
     const tiles = [];
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     // NOTE: this whole body is guarded — a single bad frame must NEVER throw out of the GFX dispatch
     // loop (that would silently stop ALL further rendering and freeze the screen). On any error we log
     // and bail on just this PDU.
+    let anyClipped = false;
     try {
         const verbose = this._verbose();
-        const res = this.progressive.decode(ctx, bitmapData, function (xIdx, yIdx, rgba) {
-            const x = xIdx * 64, y = yIdx * 64;
-            if (x < 0 || y < 0 || x >= surf.width || y >= surf.height) return;
-            const w = Math.min(64, surf.width - x);
-            const h = Math.min(64, surf.height - y);
-            if (w <= 0 || h <= 0) return;
-            let copy;
-            if (w === 64 && h === 64) {
-                copy = rgba.slice(0);
-            } else {
-                copy = new Uint8ClampedArray(w * h * 4);
-                for (let row = 0; row < h; row++) {
-                    const src = row * 64 * 4;
-                    copy.set(rgba.subarray(src, src + w * 4), row * w * 4);
+        const res = this.progressive.decode(ctx, bitmapData, function (xIdx, yIdx, rgba, rects) {
+            const tx = xIdx * 64, ty = yIdx * 64;
+            if (tx < 0 || ty < 0 || tx >= surf.width || ty >= surf.height) return;
+            const tr = Math.min(tx + 64, surf.width), tb = Math.min(ty + 64, surf.height);
+            // Clip to the REGION's tileRects — see the matching comment in decode-worker.js's
+            // decodeProgressive: pixels outside them must not be touched or stale coefficient-state
+            // content overwrites what other codecs painted there since ([MS-RDPEGFX] 2.2.4.2.1.5).
+            const clips = clipTileToRects(tx, ty, tr, tb, rects);
+            for (let ci = 0; ci < clips.length; ci++) {
+                const x = clips[ci][0], y = clips[ci][1];
+                const w = clips[ci][2] - x, h = clips[ci][3] - y;
+                let copy;
+                if (w === 64 && h === 64 && x === tx && y === ty) {
+                    copy = rgba.slice(0);
+                } else {
+                    copy = new Uint8ClampedArray(w * h * 4);
+                    for (let row = 0; row < h; row++) {
+                        const src = ((y - ty + row) * 64 + (x - tx)) * 4;
+                        copy.set(rgba.subarray(src, src + w * 4), row * w * 4);
+                    }
                 }
+                if (x !== tx || y !== ty || clips[ci][2] !== tr || clips[ci][3] !== tb || clips.length > 1) anyClipped = true;
+                tiles.push({ x, y, w, h, rgba: copy });
+                if (x < minX) minX = x;
+                if (y < minY) minY = y;
+                if (x + w > maxX) maxX = x + w;
+                if (y + h > maxY) maxY = y + h;
             }
-            tiles.push({ x, y, w, h, rgba: copy });
-            if (x < minX) minX = x;
-            if (y < minY) minY = y;
-            if (x + w > maxX) maxX = x + w;
-            if (y + h > maxY) maxY = y + h;
         }, function (m) { self._log("rdpgfx: " + m); }, verbose);
 
         if (!res) { this._log("rdpgfx: progressive decode failed (" + bitmapData.length + " bytes)"); return; }
@@ -720,16 +747,19 @@ RdpGfx.prototype._decodeProgressiveSyncInner = function (surfaceId, surf, bitmap
     if (!tiles.length) return;
     // See decode-worker.js's decodeProgressive for why sparse tile sets can't be composited into one
     // bounding-box buffer: unwritten 64x64 gaps inside the box would come out zero (black) and stamp
-    // over legitimate existing pixels there.
+    // over legitimate existing pixels there. Rect-clipped sub-tiles aren't 64-aligned, so they force
+    // the sparse path too.
     const bw = maxX - minX, bh = maxY - minY;
-    const colTiles = Math.ceil(bw / 64), rowTiles = Math.ceil(bh / 64);
-    const written = new Uint8Array(colTiles * rowTiles);
-    for (const t of tiles) {
-        const ox = t.x - minX, oy = t.y - minY;
-        written[(oy / 64 | 0) * colTiles + (ox / 64 | 0)] = 1;
+    let holes = anyClipped;
+    if (!holes) {
+        const colTiles = Math.ceil(bw / 64), rowTiles = Math.ceil(bh / 64);
+        const written = new Uint8Array(colTiles * rowTiles);
+        for (const t of tiles) {
+            const ox = t.x - minX, oy = t.y - minY;
+            written[(oy / 64 | 0) * colTiles + (ox / 64 | 0)] = 1;
+        }
+        for (let i = 0; i < written.length; i++) if (!written[i]) { holes = true; break; }
     }
-    let holes = false;
-    for (let i = 0; i < written.length; i++) if (!written[i]) { holes = true; break; }
     if (holes) {
         this._finishProgressive(surfaceId, surf, {
             ok: true, sparse: true,
@@ -802,7 +832,7 @@ RdpGfx.prototype._decodeAvc444 = function (surfaceId, surf, destRect, data) {
 // main thread posts one message per PDU, in PDU order, and the worker (single-threaded, no internal
 // reordering) processes and replies in that same order.
 RdpGfx.prototype._decodeClear = function (surfaceId, surf, rect, data) {
-    this._pendingDecodes[surfaceId] = (this._pendingDecodes[surfaceId] | 0) + 1;
+    this._decodeSeq++;
     if (!this._worker) { this._decodeClearSync(surfaceId, surf, rect, data); return; }
     const reqId = ++this._workerReqId;
     this._workerPending[reqId] = { surfaceId: surfaceId, kind: "clear" };
@@ -818,7 +848,23 @@ RdpGfx.prototype._finishClear = function (surfaceId, surf, msg) {
     try {
         const rgba = new Uint8ClampedArray(msg.buffer);
         const w = msg.rect.right - msg.rect.left, h = msg.rect.bottom - msg.rect.top;
-        surf.ctx.putImageData(new ImageData(rgba, w, h), msg.rect.left, msg.rect.top);
+        // ClearCodec layers (residual/bands/subcodecs) need not cover the whole dest rect — FreeRDP
+        // writes each layer's pixels straight onto the surface and leaves the rest untouched. Our
+        // decoder leaves uncovered pixels transparent (alpha 0), so composite with drawImage
+        // (source-over) via a scratch canvas instead of putImageData: putImageData REPLACES pixels,
+        // stamping the uncovered ones out as opaque black. Those black holes then also got snapshotted
+        // into the GFX bitmap cache by SURFACE_TO_CACHE and replayed on every CACHE_TO_SURFACE
+        // (window drags / hover redraws), spreading the corruption far beyond the original rect.
+        if (!this._clearScratch || this._clearScratch.width < w || this._clearScratch.height < h) {
+            const cw = Math.max(w, this._clearScratch ? this._clearScratch.width : 0);
+            const ch = Math.max(h, this._clearScratch ? this._clearScratch.height : 0);
+            this._clearScratch = (typeof OffscreenCanvas !== "undefined")
+                ? new OffscreenCanvas(cw, ch)
+                : Object.assign(document.createElement("canvas"), { width: cw, height: ch });
+            this._clearScratchCtx = this._clearScratch.getContext("2d"); // alpha:true — carries the coverage mask
+        }
+        this._clearScratchCtx.putImageData(new ImageData(rgba, w, h), 0, 0);
+        surf.ctx.drawImage(this._clearScratch, 0, 0, w, h, msg.rect.left, msg.rect.top, w, h);
         if (this._verbose()) {
             this._log("rdpgfx: ClearCodec PAINT surface=" + surfaceId + " at " + msg.rect.left + "," + msg.rect.top +
                 " " + w + "x" + h);

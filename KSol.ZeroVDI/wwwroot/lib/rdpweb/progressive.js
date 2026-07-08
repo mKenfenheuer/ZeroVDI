@@ -545,7 +545,10 @@ ProgressiveContext.prototype._tileCell = function (xIdx, yIdx) {
 
 // =================================================================================================
 // Top-level: decode one full RFX_PROGRESSIVE bitstream (the WIRE_TO_SURFACE_2 payload).
-// onTile(xIdx, yIdx, rgba64x64) is called for each reconstructed 64x64 tile.
+// onTile(xIdx, yIdx, rgba64x64, regionRects) is called for each reconstructed 64x64 tile;
+// regionRects ([{x,y,w,h}]) are the encapsulating REGION's tileRects — per [MS-RDPEGFX]
+// 2.2.4.2.1.5 only pixels inside them may be written to the surface (see FreeRDP
+// progressive_decompress, which intersects every tile with the union of these rects).
 // Returns { tiles, frames } counts, or null on parse failure.
 // =================================================================================================
 // Locate the first valid RFX_PROGRESSIVE block header, skipping any leading framing/preamble.
@@ -770,7 +773,7 @@ function reconstructTile(ctx, region, xIdx, yIdx, tflags, quality, qY, qCb, qCr,
     cell.bitPos = [quantAdd(qY, pY), quantAdd(qCb, pCb), quantAdd(qCr, pCr)];
 
     ycbcrToRgba(ctx.scratchY, ctx.scratchCb, ctx.scratchCr, ctx.rgba);
-    onTile(xIdx, yIdx, ctx.rgba);
+    onTile(xIdx, yIdx, ctx.rgba, region.rects);
 }
 
 // =================================================================================================
@@ -899,12 +902,12 @@ function upgradeTile(ctx, region, xIdx, yIdx, quality, qY, qCb, qCr, data, blobs
         cell.bitPos[c] = newBitPos;
     }
     ycbcrToRgba(ctx.scratchY, ctx.scratchCb, ctx.scratchCr, ctx.rgba);
-    onTile(xIdx, yIdx, ctx.rgba);
+    onTile(xIdx, yIdx, ctx.rgba, region.rects);
 }
 
 global.RfxProgressive = {
     Context: ProgressiveContext,
-    // decode(ctx, payload Uint8Array, onTile(xIdx,yIdx,rgbaUint8ClampedArray), log, verbose) -> {tiles,frames}|null
+    // decode(ctx, payload Uint8Array, onTile(xIdx,yIdx,rgbaUint8ClampedArray,regionRects), log, verbose) -> {tiles,frames}|null
     // `verbose` enables per-tile/per-region tracing (block headers, quant indices, cache state) on top
     // of the always-on error logging, for chasing a specific black/stale tile back to its cause.
     decode: function (ctx, payload, onTile, log, verbose) {

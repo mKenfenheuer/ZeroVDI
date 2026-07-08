@@ -8,9 +8,13 @@
 //   4. subcodecs data    — per-region Uncompressed(0) / NSCodec(1) / RLEX(2) palettized runs
 //
 // We decode into a freshly allocated RGBA buffer sized to the dest rect (canvas-native R,G,B,A order)
-// and hand it back to the caller, which putImageData()s it onto the surface canvas. The glyph/VBar
-// caches live on the ClearDecode instance and persist across PDUs (reset on CACHE_RESET / session
-// reset), exactly like FreeRDP's CLEAR_CONTEXT.
+// and hand it back to the caller. IMPORTANT: the layers need not cover the whole rect — pixels no
+// layer wrote stay TRANSPARENT (alpha 0) and the caller MUST alpha-composite the buffer onto the
+// surface (drawImage/source-over, see _finishClear in rdpgfx.js), never putImageData it, or the
+// uncovered pixels stamp out as opaque black. That mirrors FreeRDP, which writes each layer straight
+// onto the surface and leaves everything else untouched. The glyph/VBar caches live on the
+// ClearDecode instance and persist across PDUs (reset on CACHE_RESET / session reset), exactly like
+// FreeRDP's CLEAR_CONTEXT.
 
 const CLEARCODEC_FLAG_GLYPH_INDEX = 0x01;
 const CLEARCODEC_FLAG_GLYPH_HIT = 0x02;
@@ -177,7 +181,10 @@ ClearDecode.prototype._residual = function (r, byteCount, width, height, out32, 
         out32.fill(color, pixelIndex, pixelIndex + runLengthFactor);
         pixelIndex += runLengthFactor;
     }
-    if (pixelIndex !== pixelCount) { if (log) log("clear: residual underfill " + pixelIndex + "/" + pixelCount); return false; }
+    // [MS-RDPEGFX] 2.2.4.1.1.1: the residual layer's pixel count "MUST be less than or equal to" the
+    // image's — underfill is legal (the rest is covered by bands/subcodecs or simply left untouched).
+    // Failing here dropped the whole PDU and left the dest rect stale (visible as drag trails / ghost
+    // window frames). Uncovered pixels stay transparent and the caller's composite leaves them as-is.
     return true;
 };
 
@@ -458,11 +465,15 @@ ClearDecode.prototype._nscodec = function (data, width, height, nXRel, nYRel, nW
             const b8 = yv - cov - cgv;
             const xx = nXRel + x, yy = nYRel + y;
             if (xx < nWidth && yy < nHeight) {
+                // Alpha is forced opaque: the surface is opaque (FreeRDP ignores NSCodec alpha there
+                // too), and our caller alpha-composites the result — a decoded alpha < 255 would BLEND
+                // this region with stale content instead of replacing it (translucent ghost squares).
+                // Alpha 0 is reserved as the "layer didn't cover this pixel" sentinel.
                 out32[yy * nWidth + xx] = packRGBA(
                     r8 < 0 ? 0 : r8 > 255 ? 255 : r8,
                     g8 < 0 ? 0 : g8 > 255 ? 255 : g8,
                     b8 < 0 ? 0 : b8 > 255 ? 255 : b8,
-                    aP[ai + x]);
+                    0xff);
             }
             // chroma advances every 2 luma columns when subsampled, else every column.
             if (chroma) { if (x & 1) { co_i++; cg_i++; } } else { co_i++; cg_i++; }
