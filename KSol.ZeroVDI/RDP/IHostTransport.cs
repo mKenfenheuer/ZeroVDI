@@ -11,6 +11,14 @@ public interface IHostTransport
 {
     /// <summary>Opens a raw byte stream to host:port. Throws on failure to connect.</summary>
     Task<Stream> ConnectAsync(string host, int port, CancellationToken ct);
+
+    /// <summary>
+    /// Measures the current round-trip time to host:port over this transport's path (a timed TCP
+    /// connect — RDP has no client-initiated in-band RTT probe, so a throwaway connect is the only
+    /// portable measure). Returns null when the host is unreachable or the probe timed out. Used by
+    /// the relay's connection-quality sampler to report the gateway→host leg to the browser.
+    /// </summary>
+    Task<TimeSpan?> ProbeRttAsync(string host, int port, CancellationToken ct);
 }
 
 /// <summary>Direct TCP transport (today's behaviour): a <see cref="TcpClient"/> with keepalive tuning.</summary>
@@ -46,6 +54,21 @@ public sealed class DirectTcpTransport : IHostTransport
         // NetworkStream owns the socket so disposing the stream tears down the TcpClient.
         return new NetworkStream(tcp.Client, ownsSocket: true);
     }
+
+    public async Task<TimeSpan?> ProbeRttAsync(string host, int port, CancellationToken ct)
+    {
+        try
+        {
+            using var tcp = new TcpClient();
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(2));
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            await tcp.ConnectAsync(host, port, cts.Token);
+            sw.Stop();
+            return tcp.Connected ? sw.Elapsed : null;
+        }
+        catch { return null; }
+    }
 }
 
 /// <summary>Tunnels the host stream through a connector's WebSocket data channel.</summary>
@@ -57,4 +80,15 @@ public sealed class ConnectorTcpTransport : IHostTransport
 
     public Task<Stream> ConnectAsync(string host, int port, CancellationToken ct)
         => _hub.OpenTcpAsync(_connectorId, host, port, ct);
+
+    // The hub's Probe reply carries only the connector's LOCAL connect time (connector→host), which
+    // misses the gateway→connector hop this transport actually traverses. Timing the whole probe
+    // round trip (control-channel WS + connector's connect) covers the full gateway→host leg.
+    public async Task<TimeSpan?> ProbeRttAsync(string host, int port, CancellationToken ct)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var rtt = await _hub.ProbeAsync(_connectorId, host, port, ct);
+        sw.Stop();
+        return rtt != null ? sw.Elapsed : null;
+    }
 }

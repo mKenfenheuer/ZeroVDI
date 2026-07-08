@@ -67,8 +67,9 @@
             text-overflow: ellipsis; max-width: 22vw; margin-left: 10px }
         #floatbar .status { color: #9bd; white-space: nowrap; }
         /* Connection-quality indicator: a phone-style signal-bars glyph (4 ascending bars) derived from
-           client-measured RTT and throughput (see client.js setQualityCallback). Hidden until the first
-           sample arrives. Lit bars (within the current quality level) render at full opacity in the
+           the END-TO-END RTT (browser↔gateway measured in quality-worker.js + gateway↔host sampled by
+           the relay) and gateway-side throughput (see client.js setQualityCallback). Hidden until the
+           first sample arrives. Lit bars (within the current quality level) render at full opacity in the
            level's color; unlit bars stay a dim neutral fill at 75% opacity, same as a phone's signal icon. */
         #floatbar .quality { display: none; align-items: center; gap: .35rem; white-space: nowrap; color: #9aa0a6; }
         #floatbar .quality.show { display: flex; }
@@ -553,9 +554,15 @@
                 qualityEl.classList.add("show", q.level);
                 var lit = QUALITY_LIT_BARS[q.level] || 0;
                 qualityBars.forEach(function (bar, i) { bar.classList.toggle("lit", i < lit); });
+                // q.rtt is the END-TO-END round trip (browser ↔ gateway ↔ desktop); the tooltip breaks
+                // it down per leg so a slow reading is attributable (user's link vs. datacenter path).
                 var rttText = (q.rtt != null) ? Math.round(q.rtt) + "ms" : "";
                 var kbpsText = (q.kbps != null) ? (q.kbps >= 1024 ? (q.kbps / 1024).toFixed(1) + "Mbps" : Math.round(q.kbps) + "kbps") : "";
                 qualityLabel.textContent = [rttText, kbpsText].filter(Boolean).join(" · ");
+                var legs = [];
+                if (q.browserRtt != null) legs.push("You ↔ gateway: " + Math.round(q.browserRtt) + " ms");
+                legs.push("Gateway ↔ desktop: " + (q.hostRtt != null ? Math.round(q.hostRtt) + " ms" : "measuring…"));
+                qualityEl.title = "Connection quality (end-to-end)\n" + legs.join("\n");
             });
 
             client.setStatusCallback(function (status, message) {

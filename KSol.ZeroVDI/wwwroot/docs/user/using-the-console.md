@@ -45,6 +45,14 @@ remote desktop to hear your microphone or see your camera (for calls inside the 
 **Microphone** and **Camera** in [Connection settings](connection-settings.md). Your browser will
 ask permission the first time.
 
+## Connection quality
+
+The signal bars in the session toolbar show the health of your **whole** connection — from your
+browser, through the ZeroVDI gateway, to the remote desktop itself. Next to the bars you'll see the
+current round-trip latency and throughput. Hover over the indicator to see the two legs separately:
+**You ↔ gateway** (your internet link) and **Gateway ↔ desktop** (the datacenter path) — handy for
+telling whether a sluggish session is caused by your own network or by the far side.
+
 ## Reconnecting
 
 If your network drops briefly, ZeroVDI tries to reconnect automatically. If the screen goes black or

@@ -35,13 +35,13 @@ function Client(websocketURL, canvasID) {
     this.proto = null;
     this.statusCb = null;       // optional (status, message) => void for the UI
 
-    // Connection-quality tracking: RTT is sampled via a periodic ping/pong echoed by the gateway (see
-    // _startQualityProbe/_onPongFrame); throughput is derived from bytes actually received on the
-    // WebSocket in a rolling window. Both are measured client-side from traffic already flowing —
-    // no separate speed-test transfer.
-    this._quality = { rtt: null, kbps: null, level: null, bytesThisWindow: 0, windowStartMs: 0, pingSeq: 0, pingSentAt: {} };
-    this.qualityCb = null;      // optional ({rtt, kbps, level}) => void for the UI
-    this._qualityTimer = null;
+    // Connection-quality tracking runs entirely in quality-worker.js (own thread + own WebSocket to
+    // /ws/rdp-quality/{sessionId}) so a busy main thread can't skew the RTT reading. The gateway's pongs
+    // fold in its sampled gateway→host RTT and relayed-byte counter, so the published numbers cover the
+    // WHOLE path: web → gateway → RDP host. The main thread only forwards results to the UI callback.
+    this.qualityCb = null;      // optional ({rtt, browserRtt, hostRtt, kbps, level}) => void for the UI
+    this._qualityWorker = null;
+    this._gatewaySessionId = null; // from the gateway's "ready" control frame
 
     // Windows keyboard layout id (KLID) sent in the RDP handshake (CS_CORE + Input capset) so the
     // host loads the layout matching the user's physical keyboard instead of always US English.
@@ -63,73 +63,44 @@ function Client(websocketURL, canvasID) {
 Client.prototype.setStatusCallback = function (cb) { this.statusCb = cb; };
 Client.prototype._status = function (status, message) { if (this.statusCb) this.statusCb(status, message); };
 
-// ---- connection quality (RTT + throughput) --------------------------------------------------------
-// optional ({rtt: ms|null, kbps: number|null, level: "good"|"fair"|"poor"|null}) => void for the top bar.
+// ---- connection quality (end-to-end RTT + throughput, sampled in quality-worker.js) ----------------
+// optional ({rtt, browserRtt, hostRtt, kbps, level}) => void for the top bar. rtt is the END-TO-END
+// estimate (browser↔gateway measured by the worker + gateway↔host sampled by the relay); browserRtt/
+// hostRtt carry the per-leg split; level is "good"|"fair"|"poor"|null.
 Client.prototype.setQualityCallback = function (cb) { this.qualityCb = cb; };
 
-Client.QUALITY_PING_INTERVAL_MS = 3000;
-Client.QUALITY_PING_TIMEOUT_MS = 8000; // stale in-flight pings are dropped so a lost pong doesn't wedge RTT
+// URL of quality-worker.js, resolved relative to THIS script (document.currentScript is only valid
+// while the script is initially executing, so capture it at load time — same pattern as rdpgfx.js).
+const RDP_QUALITY_WORKER_URL = (typeof document !== "undefined" && document.currentScript && document.currentScript.src)
+    ? new URL("quality-worker.js", document.currentScript.src).toString()
+    : "quality-worker.js";
 
 Client.prototype._startQualityProbe = function () {
-    this._stopQualityProbe();
+    // Needs the gateway session id from the "ready" frame; without it (old gateway) the indicator
+    // simply stays hidden — nothing else depends on the quality channel.
+    if (!this._gatewaySessionId) return;
     const self = this;
-    this._quality.windowStartMs = Date.now();
-    this._quality.bytesThisWindow = 0;
-    this._qualityTimer = setInterval(function () { self._qualityTick(); }, Client.QUALITY_PING_INTERVAL_MS);
+    if (!this._qualityWorker) {
+        try {
+            this._qualityWorker = new Worker(RDP_QUALITY_WORKER_URL);
+        } catch (e) {
+            console.warn("quality worker unavailable:", e);
+            return;
+        }
+        this._qualityWorker.onmessage = function (e) { if (self.qualityCb) self.qualityCb(e.data); };
+    }
+    const url = new URL("/ws/rdp-quality/" + encodeURIComponent(this._gatewaySessionId), window.location.href);
+    url.protocol = (window.location.protocol === "https:") ? "wss:" : "ws:";
+    // "start" also rebinds after a server redirection, when the reconnected leg got a NEW session id.
+    this._qualityWorker.postMessage({ type: "start", url: url.toString() });
 };
 
 Client.prototype._stopQualityProbe = function () {
-    if (this._qualityTimer) { clearInterval(this._qualityTimer); this._qualityTimer = null; }
-};
-
-Client.prototype._qualityTick = function () {
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return;
-    const q = this._quality;
-    const now = Date.now();
-
-    // Throughput: bytes actually received over the elapsed window (not a synthetic transfer).
-    const elapsedS = (now - q.windowStartMs) / 1000;
-    if (elapsedS > 0) {
-        q.kbps = (q.bytesThisWindow * 8 / 1000) / elapsedS;
+    if (this._qualityWorker) {
+        this._qualityWorker.terminate();
+        this._qualityWorker = null;
     }
-    q.bytesThisWindow = 0;
-    q.windowStartMs = now;
-
-    // Drop stale in-flight pings (lost pong) so one dropped probe doesn't freeze the RTT reading forever.
-    for (const seq in q.pingSentAt) {
-        if (now - q.pingSentAt[seq] > Client.QUALITY_PING_TIMEOUT_MS) delete q.pingSentAt[seq];
-    }
-
-    const seq = ++q.pingSeq;
-    q.pingSentAt[seq] = now;
-    try { this.socket.send(JSON.stringify({ type: "ping", t: now, seq: seq })); } catch (e) { /* ignore */ }
-
-    this._publishQuality();
-};
-
-// Returns true if the frame was a pong (consumed), false if it should fall through to _onControlFrame.
-Client.prototype._onPongFrame = function (text) {
-    let msg;
-    try { msg = JSON.parse(text); } catch (e) { return false; }
-    if (msg.type !== "pong" || typeof msg.t !== "number") return false;
-    this._quality.rtt = Date.now() - msg.t;
-    this._publishQuality();
-    return true;
-};
-
-// Thresholds are RTT/throughput heuristics for an interactive desktop session (RDP GFX), not raw link
-// speed: >150ms RTT or <256kbps is where cursor lag / progressive-tile catch-up becomes visible.
-Client.prototype._classifyQuality = function (rtt, kbps) {
-    if (rtt == null && kbps == null) return null;
-    if ((rtt != null && rtt > 300) || (kbps != null && kbps < 256)) return "poor";
-    if ((rtt != null && rtt > 120) || (kbps != null && kbps < 1024)) return "fair";
-    return "good";
-};
-
-Client.prototype._publishQuality = function () {
-    const q = this._quality;
-    q.level = this._classifyQuality(q.rtt, q.kbps);
-    if (this.qualityCb) this.qualityCb({ rtt: q.rtt, kbps: q.kbps, level: q.level });
+    this._gatewaySessionId = null;
 };
 
 // Sizes the canvas backing store to a desktop resolution that fills `wrapEl` in *device* pixels, so
@@ -301,15 +272,13 @@ Client.prototype.connect = function (creds) {
 
     this.socket.onmessage = function (e) {
         if (typeof e.data === "string") {
-            // "pong" frames are our own RTT probe echoed back by the gateway (see _startQualityProbe);
-            // everything else is a status control frame ({status: ...}).
-            if (self._onPongFrame(e.data)) return;
+            // Status control frame ({status: ...}). Quality ping/pong lives on its own worker-owned
+            // WebSocket (quality-worker.js), never on this session socket.
             self._onControlFrame(e.data);
             return;
         }
         // Binary: relayed RDP bytes.
         const bytes = (e.data instanceof ArrayBuffer) ? new Uint8Array(e.data) : new Uint8Array(e.data);
-        self._quality.bytesThisWindow += bytes.byteLength;
         if (self.proto) self.proto.feed(bytes);
     };
 
@@ -330,6 +299,9 @@ Client.prototype._onControlFrame = function (text) {
             this._status("connecting", msg.message || "connecting…");
             break;
         case "ready":
+            // The gateway includes this tunnel's session id so the quality worker can open its own
+            // /ws/rdp-quality/{sessionId} socket once the session goes active (_onActive).
+            this._gatewaySessionId = msg.sessionId || null;
             this._status("connecting", "negotiating session…");
             this._startProtocol();
             break;

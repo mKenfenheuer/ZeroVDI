@@ -236,6 +236,11 @@ public class RdpWebSocketController : Controller
         // each redirect leg replaces the previous one for the same (user, resource).
         var tracked = _sessions.Register(userId, User.Identity?.Name, id, resource.Name, host, port,
             HttpContext.Connection.RemoteIpAddress?.ToString());
+        // Wire the quality channel: the relay tells the browser this session's id (in its "ready"
+        // frame) and the tracked entry exposes the relay so /ws/rdp-quality/{sessionId} can read its
+        // gateway→host RTT and relayed-byte counter.
+        session.TrackedSessionId = tracked.SessionId;
+        tracked.Relay = session;
         using var runCts = CancellationTokenSource.CreateLinkedTokenSource(
             HttpContext.RequestAborted, tracked.Cancellation.Token);
         try
@@ -275,6 +280,78 @@ public class RdpWebSocketController : Controller
                     }
                 }
                 catch (Exception ex) { _logger.LogWarning(ex, "RDP console: finalizing recording {RecId} failed", recording.Id); }
+            }
+        }
+    }
+
+    // GET /ws/rdp-quality/{sessionId}
+    //
+    // Connection-quality side channel for the browser's quality worker (wwwroot/lib/rdpweb/
+    // quality-worker.js). A Web Worker cannot share the main thread's session WebSocket, so it opens
+    // this second, per-session socket instead: it sends small JSON pings, and each pong echoes the
+    // timestamp (browser↔gateway RTT, timed entirely on the worker thread) plus the relay's
+    // gateway→host RTT sample and relayed-byte counter — everything needed to show END-TO-END
+    // quality (web → gateway → RDP host) without touching the browser main thread or the RDP stream.
+    [HttpGet("ws/rdp-quality/{sessionId}")]
+    [EnableRateLimiting("ws")]
+    public async Task Quality(string sessionId)
+    {
+        if (!HttpContext.WebSockets.IsWebSocketRequest)
+        {
+            HttpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
+            return;
+        }
+        var userId = _userManager.GetUserId(User);
+        // Only the session's own user may attach; 404 for both "gone" and "not yours".
+        var tracked = sessionId != null ? _sessions.Get(sessionId) : null;
+        if (userId == null || tracked == null || tracked.UserId != userId)
+        {
+            HttpContext.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+
+        var socket = await HttpContext.WebSockets.AcceptWebSocketAsync();
+        var buffer = new byte[1024];
+        try
+        {
+            while (socket.State == System.Net.WebSockets.WebSocketState.Open)
+            {
+                var result = await socket.ReceiveAsync(buffer, HttpContext.RequestAborted);
+                if (result.MessageType == System.Net.WebSockets.WebSocketMessageType.Close) break;
+                if (result.MessageType != System.Net.WebSockets.WebSocketMessageType.Text) continue;
+
+                // Session ended → tell the worker to stop by closing, instead of answering stale pings.
+                var live = _sessions.Get(sessionId!);
+                if (live == null) break;
+
+                double t; double? seq = null;
+                try
+                {
+                    using var doc = System.Text.Json.JsonDocument.Parse(buffer.AsMemory(0, result.Count));
+                    if (!doc.RootElement.TryGetProperty("type", out var typeEl) || typeEl.GetString() != "ping") continue;
+                    if (!doc.RootElement.TryGetProperty("t", out var tEl)) continue;
+                    t = tEl.GetDouble();
+                    if (doc.RootElement.TryGetProperty("seq", out var seqEl)) seq = seqEl.GetDouble();
+                }
+                catch (System.Text.Json.JsonException) { continue; }
+
+                var pong = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
+                {
+                    type = "pong", t, seq,
+                    hostRtt = live.Relay?.HostRttMs,
+                    bytes = live.Relay?.BytesToClient ?? 0L,
+                });
+                await socket.SendAsync(pong, System.Net.WebSockets.WebSocketMessageType.Text, true, HttpContext.RequestAborted);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (System.Net.WebSockets.WebSocketException) { /* browser went away mid-frame */ }
+        finally
+        {
+            if (socket.State == System.Net.WebSockets.WebSocketState.Open)
+            {
+                try { await socket.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "session ended", CancellationToken.None); }
+                catch { /* ignore */ }
             }
         }
     }

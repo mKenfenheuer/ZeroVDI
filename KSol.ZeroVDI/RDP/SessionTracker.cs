@@ -20,6 +20,10 @@ public sealed class ActiveSession
 
     /// <summary>Tripped by an admin force-disconnect; the relay's run token is linked to it.</summary>
     public CancellationTokenSource Cancellation { get; } = new();
+
+    /// <summary>The live relay behind this tunnel; the /ws/rdp-quality endpoint reads its
+    /// gateway→host RTT sample and relayed-byte counter. Null only between Register and wiring.</summary>
+    public RdpRelaySession? Relay { get; set; }
 }
 
 /// <summary>
@@ -62,6 +66,10 @@ public class SessionTracker
         if (_sessions.TryRemove(sessionId, out var s))
             s.Cancellation.Dispose();
     }
+
+    /// <summary>Looks up a live session by id, or null if it has ended.</summary>
+    public ActiveSession? Get(string sessionId) =>
+        _sessions.TryGetValue(sessionId, out var s) ? s : null;
 
     /// <summary>Snapshot of all live sessions, newest first.</summary>
     public IReadOnlyList<ActiveSession> All() =>

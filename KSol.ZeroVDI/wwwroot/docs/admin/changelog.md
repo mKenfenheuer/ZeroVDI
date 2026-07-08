@@ -7,6 +7,28 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.16] — 2026-07-08 — End-to-end connection quality indicator, sampled off the main thread
+
+### Changed
+- **The console's connection-quality indicator now measures the whole path: browser → gateway → RDP
+  host.** The relay periodically samples its gateway→host round-trip time over the session's actual
+  transport path (a timed TCP connect — directly, or through the connector tunnel including the
+  gateway→connector hop) and reports it alongside each quality pong; the browser adds its own
+  browser↔gateway RTT and shows the end-to-end total. Hovering the signal bars breaks the latency
+  down per leg ("You ↔ gateway" / "Gateway ↔ desktop"), so a slow session is attributable to the
+  user's link or the datacenter path at a glance. (RDP itself offers no client-initiated in-band
+  probe — MS-RDPBCGR auto-detect is strictly server-initiated — hence the transport-level sampling.)
+- **Quality sampling moved off the browser main thread.** RTT probing now runs in a dedicated Web
+  Worker (`quality-worker.js`) with its own WebSocket to the new authenticated, session-scoped
+  `/ws/rdp-quality/{sessionId}` endpoint (the session id is handed to the browser in the relay's
+  "ready" frame). Ping scheduling and pong timestamping happen on the worker thread, so heavy
+  main-thread work (progressive decode, large paints) no longer inflates the RTT reading or starves
+  the probe interval. Throughput is now derived from the gateway's relayed-byte counter carried in
+  each pong instead of per-message byte counting in the page's WebSocket handler, removing the last
+  main-thread bookkeeping. The session socket still answers legacy pings as a fallback.
+
+---
+
 ## [0.6.15] — 2026-07-07 — Console session options honour saved/admin defaults via one shared editor
 
 ### Fixed

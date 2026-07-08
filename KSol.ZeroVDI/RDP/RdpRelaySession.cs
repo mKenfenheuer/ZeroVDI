@@ -40,6 +40,27 @@ public sealed class RdpRelaySession
     // One recorder per session, fed by both pumps.
     private RdpStreamRecorder? _recorder;
 
+    // ── Connection-quality stats, read by the /ws/rdp-quality endpoint (see RdpWebSocketController) ──
+    // The browser's quality worker measures its own browser↔gateway RTT; these supply the other half of
+    // the picture: the gateway→host leg and the relayed byte count it derives throughput from.
+
+    /// <summary>SessionTracker id for this tunnel; sent to the browser in the "ready" control frame so
+    /// its quality worker can open the matching /ws/rdp-quality/{sessionId} socket.</summary>
+    public string? TrackedSessionId { get; set; }
+
+    // Micros so a torn read is impossible (Interlocked on a long); -1 = no sample yet/unreachable.
+    private long _hostRttMicros = -1;
+    private long _bytesToClient;
+
+    /// <summary>Latest sampled gateway→host RTT in ms, or null while unknown/unreachable.</summary>
+    public double? HostRttMs
+    {
+        get { var v = Interlocked.Read(ref _hostRttMicros); return v >= 0 ? v / 1000.0 : null; }
+    }
+
+    /// <summary>Total bytes relayed host→browser so far (throughput source for the quality worker).</summary>
+    public long BytesToClient => Interlocked.Read(ref _bytesToClient);
+
     public RdpRelaySession(WebSocket ws, string host, int port, KerberosAuth? kerberos, ILogger logger,
         VmCredentials? presuppliedCreds = null, IRdpMediaSink? mediaSink = null,
         byte[]? routingToken = null, VmCredentials? redirectCreds = null,
@@ -119,13 +140,16 @@ public sealed class RdpRelaySession
         using var _host_owned = host;
         var ssl = host.Stream;
 
-        await SendStatusAsync("ready", null, ct);
+        // "ready" carries the tracked session id so the browser's quality worker can open its own
+        // /ws/rdp-quality/{sessionId} socket (RTT probing runs off the browser main thread there).
+        await SendJsonAsync(new { status = "ready", message = (string?)null, sessionId = TrackedSessionId }, ct);
         _logger.LogInformation("RDP relay: bridging {Host}:{Port}", _host, _port);
 
         // 5) Relay the decrypted RDP stream both ways until either side closes.
         // Optional: live decode + record both directions through the shared RdpWire engine.
         _recorder = RdpStreamRecorder.TryCreate(_logger, _mediaSink);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var hostRttSampler = SampleHostRttAsync(linked.Token);
         var toWs = PumpSslToWsAsync(ssl, linked.Token);
         var toRdp = PumpWsToSslAsync(ssl, linked.Token);
         // Whichever pump finishes first ends the session. If the host→ws pump ended, the target closed
@@ -174,7 +198,7 @@ public sealed class RdpRelaySession
         }
 
         linked.Cancel();
-        try { await Task.WhenAll(toWs, toRdp); } catch { /* shutdown races are expected */ }
+        try { await Task.WhenAll(toWs, toRdp, hostRttSampler); } catch { /* shutdown races are expected */ }
         _recorder?.Dispose();
 
         if (!_redirected && !_handoverContinue && finished == toWs)
@@ -310,11 +334,15 @@ public sealed class RdpRelaySession
         }, ct);
 
         // WRITER: forward to the browser at the browser's pace (may block on a slow WS without affecting
-        // the reader / the host).
+        // the reader / the host). Bytes are counted AFTER the send completes, so the quality worker's
+        // throughput reading reflects what actually left towards the browser, not what queued up.
         try
         {
             await foreach (var slice in pipe.Reader.ReadAllAsync(ct))
+            {
                 await _ws.SendAsync(slice, WebSocketMessageType.Binary, endOfMessage: true, ct);
+                Interlocked.Add(ref _bytesToClient, slice.Length);
+            }
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { _logger.LogError(ex, "RDP relay: host→ws writer FAILED"); }
@@ -352,8 +380,30 @@ public sealed class RdpRelaySession
         catch (Exception ex) { _logger.LogDebug(ex, "RDP relay: ws→host pump ended"); }
     }
 
-    // {"type":"ping","t":<client timestamp>} -> {"type":"pong","t":<same timestamp>}. Purely a round-trip
-    // echo so the browser can compute RTT = now() - t; the gateway does not interpret or store 't'.
+    // Periodically re-measures the gateway→host RTT leg over the session's own transport path (direct
+    // TCP or connector tunnel — a timed throwaway connect either way; RDP offers no client-initiated
+    // in-band probe, MS-RDPBCGR auto-detect is strictly server-initiated). The browser's quality worker
+    // reads the latest sample via the /ws/rdp-quality endpoint and adds its own browser↔gateway RTT to
+    // show end-to-end latency. 15s cadence keeps the probe connects negligible next to the session.
+    private async Task SampleHostRttAsync(CancellationToken ct)
+    {
+        var transport = _hostTransport ?? new DirectTcpTransport(_logger);
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var rtt = await transport.ProbeRttAsync(_host, _port, ct);
+                Interlocked.Exchange(ref _hostRttMicros,
+                    rtt is { } r ? (long)(r.TotalMilliseconds * 1000) : -1);
+                await Task.Delay(TimeSpan.FromSeconds(15), ct);
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    // {"type":"ping","t":<client timestamp>} -> pong echoing t/seq plus the gateway-side stats. Kept on
+    // the session socket as a fallback for the dedicated /ws/rdp-quality channel the quality worker
+    // normally uses; the gateway does not interpret or store 't'.
     private async Task HandlePingAsync(ReadOnlyMemory<byte> frame, CancellationToken ct)
     {
         try
@@ -361,25 +411,26 @@ public sealed class RdpRelaySession
             using var doc = JsonDocument.Parse(frame);
             if (!doc.RootElement.TryGetProperty("type", out var t) || t.GetString() != "ping") return;
             if (!doc.RootElement.TryGetProperty("t", out var tsEl)) return;
-            var json = JsonSerializer.Serialize(new { type = "pong", t = tsEl.GetDouble() });
-            if (_ws.State == WebSocketState.Open)
-                await _ws.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, ct);
+            double? seq = doc.RootElement.TryGetProperty("seq", out var seqEl) ? seqEl.GetDouble() : null;
+            await SendJsonAsync(new { type = "pong", t = tsEl.GetDouble(), seq, hostRtt = HostRttMs, bytes = BytesToClient }, ct);
         }
         catch (JsonException) { /* not a ping frame; ignore */ }
     }
 
-    private async Task SendStatusAsync(string status, string? message, CancellationToken ct)
+    private Task SendStatusAsync(string status, string? message, CancellationToken ct)
+        => SendJsonAsync(new { status, message }, ct);
+
+    private async Task SendJsonAsync(object payload, CancellationToken ct)
     {
         if (_ws.State != WebSocketState.Open) return;
-        var json = JsonSerializer.Serialize(new { status, message });
-        var bytes = Encoding.UTF8.GetBytes(json);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(payload);
         try
         {
             await _ws.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct);
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "RDP relay: failed to send status {Status}", status);
+            _logger.LogDebug(ex, "RDP relay: failed to send control frame");
         }
     }
 }
