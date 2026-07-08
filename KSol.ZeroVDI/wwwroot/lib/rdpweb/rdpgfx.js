@@ -155,6 +155,7 @@ function RdpGfx(cb) {
     this._decodeSeq = 0;         // decodes submitted (worker + sync fallback)
     this._decodeSettledSeq = 0;  // decodes fully landed (painted or failed)
     this._orderedQueue = [];     // [{barrier, cmdId, body}] sync ops waiting for barrier <= settledSeq
+    this._curFrameId = 0;        // START_FRAME id; scopes the progressive decoder's updated-tile set
     this._initWorker();
 }
 
@@ -215,6 +216,7 @@ RdpGfx.prototype.reset = function () {
     if (this.clear) this.clear.reset();
     this._workerPending = {};
     this._decodeSeq = 0; this._decodeSettledSeq = 0; this._orderedQueue = [];
+    this._curFrameId = 0;
     if (this._worker) this._worker.postMessage({ cmd: "reset" });
 };
 
@@ -637,7 +639,7 @@ RdpGfx.prototype._decodeProgressive = function (surfaceId, surf, bitmapData, cod
     const copy = bitmapData.slice();
     this._worker.postMessage(
         { cmd: "progressive", reqId: reqId, surfaceId: surfaceId, codecContextId: codecContextId,
-            surfWidth: surf.width, surfHeight: surf.height,
+            surfWidth: surf.width, surfHeight: surf.height, frameId: this._curFrameId,
             bitmapData: copy.buffer, verbose: this._verbose() },
         [copy.buffer]
     );
@@ -736,7 +738,7 @@ RdpGfx.prototype._decodeProgressiveSyncInner = function (surfaceId, surf, bitmap
                 if (x + w > maxX) maxX = x + w;
                 if (y + h > maxY) maxY = y + h;
             }
-        }, function (m) { self._log("rdpgfx: " + m); }, verbose);
+        }, function (m) { self._log("rdpgfx: " + m); }, verbose, this._curFrameId);
 
         if (!res) { this._log("rdpgfx: progressive decode failed (" + bitmapData.length + " bytes)"); return; }
     } catch (e) {

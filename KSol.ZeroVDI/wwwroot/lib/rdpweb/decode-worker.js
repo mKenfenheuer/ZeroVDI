@@ -56,6 +56,8 @@ function decodeProgressive(msg) {
     let res = null, error = null;
     try {
         res = RfxProgressive.decode(ctx, new Uint8Array(msg.bitmapData), function (xIdx, yIdx, rgba, rects) {
+            // NOTE: fires once per updated-this-GFX-frame tile per PDU (frame set accumulates across
+            // PDUs sharing msg.frameId — FreeRDP update_tiles semantics; see progressive.js).
             const tx = xIdx * 64, ty = yIdx * 64;
             if (tx < 0 || ty < 0 || tx >= surfWidth || ty >= surfHeight) return;
             const tr = Math.min(tx + 64, surfWidth), tb = Math.min(ty + 64, surfHeight);
@@ -87,7 +89,7 @@ function decodeProgressive(msg) {
                 if (x + w > maxX) maxX = x + w;
                 if (y + h > maxY) maxY = y + h;
             }
-        }, log, msg.verbose);
+        }, log, msg.verbose, msg.frameId);
     } catch (e) {
         error = "progressive EXCEPTION (" + msg.bitmapData.byteLength + "B): " + (e && e.stack ? e.stack : e);
     }

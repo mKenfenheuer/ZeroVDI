@@ -523,30 +523,57 @@ function ProgressiveContext() {
     this.scratchCb = new Int16Array(4096);
     this.scratchCr = new Int16Array(4096);
     this.idwt = new Int16Array(4096 * 2 + 64); // DWT temp (needs 2*total*sw room)
-    this.rgba = new Uint8ClampedArray(64 * 64 * 4);
     this.tiles = {};         // "x,y" -> per-cell persistent state (diff accumulation + upgrades)
     this.gridWidth = 0; this.gridHeight = 0;
     this._blobs = new Array(12); // reusable [srlOff,srlLen,rawOff,rawLen]*3 for UPGRADE tiles
+    // Frame-scoped updated-tile set, mirroring FreeRDP's PROGRESSIVE_SURFACE_CONTEXT
+    // updatedTileIndices/numUpdatedTiles: tiles accumulate across ALL progressive PDUs that share a
+    // GFX frameId (progressive_decompress resets the list only when frameId changes), and EVERY PDU
+    // re-blits the whole set clipped to ITS OWN region rects (update_tiles). Windows splits one
+    // frame's tile data over several WIRE_TO_SURFACE_2 PDUs whose region rects cover tiles sent in
+    // the EARLIER PDUs of that frame — blitting only the current PDU's tiles leaves those rects
+    // permanently unpainted (invisible stale rects, no decode error). Rare on LAN (single-PDU
+    // frames), constant at WAN latency (large multi-PDU frames).
+    this.frameKey = null;    // GFX frameId the current set belongs to
+    this.frameStamp = 0;     // monotonic per-frame stamp for O(1) cell dedup
+    this.frameTiles = [];    // cells rendered so far in this frame (each holds persistent .rgba)
 }
-ProgressiveContext.prototype.reset = function () { this.tiles = {}; };
+ProgressiveContext.prototype.reset = function () {
+    this.tiles = {};
+    this.frameKey = null; this.frameStamp = 0; this.frameTiles = [];
+};
 ProgressiveContext.prototype._tileCell = function (xIdx, yIdx) {
     var key = xIdx + "," + yIdx;
     var c = this.tiles[key];
     if (!c) {
         c = {
+            x: xIdx, y: yIdx,
             cur: [new Int16Array(4096), new Int16Array(4096), new Int16Array(4096)],
             sign: [new Int16Array(4096), new Int16Array(4096), new Int16Array(4096)],
             bitPos: null, // [Y,Cb,Cr] per-band bit positions, set by FIRST/SIMPLE, consumed by UPGRADE
+            rgba: null,   // persistent last-reconstructed pixels (FreeRDP tile->data), lazy-alloc
+            inFrame: 0,   // frameStamp of the last frame this cell was added to frameTiles for
         };
         this.tiles[key] = c;
     }
     return c;
 };
+// Render the reconstructed scratch planes into the cell's persistent pixel buffer and add the cell
+// to the current frame's updated set (once per frame; re-updates just refresh the pixels).
+function renderCell(ctx, cell) {
+    if (!cell.rgba) cell.rgba = new Uint8ClampedArray(64 * 64 * 4);
+    ycbcrToRgba(ctx.scratchY, ctx.scratchCb, ctx.scratchCr, cell.rgba);
+    if (cell.inFrame !== ctx.frameStamp) {
+        cell.inFrame = ctx.frameStamp;
+        ctx.frameTiles.push(cell);
+    }
+}
 
 // =================================================================================================
 // Top-level: decode one full RFX_PROGRESSIVE bitstream (the WIRE_TO_SURFACE_2 payload).
-// onTile(xIdx, yIdx, rgba64x64, regionRects) is called for each reconstructed 64x64 tile;
-// regionRects ([{x,y,w,h}]) are the encapsulating REGION's tileRects — per [MS-RDPEGFX]
+// onTile(xIdx, yIdx, rgba64x64, regionRects) is called at end-of-PDU for EVERY tile updated so far
+// in the current GFX frame (not just this PDU's — see ProgressiveContext.frameTiles / FreeRDP
+// update_tiles); regionRects ([{x,y,w,h}]) are THIS PDU's REGION tileRects — per [MS-RDPEGFX]
 // 2.2.4.2.1.5 only pixels inside them may be written to the surface (see FreeRDP
 // progressive_decompress, which intersects every tile with the union of these rects).
 // Returns { tiles, frames } counts, or null on parse failure.
@@ -623,6 +650,16 @@ function decodeStream(ctx, data, onTile, log, verbose) {
             default:
                 if (log) log("progressive: unknown block 0x" + blockType.toString(16));
                 pos = blockEnd; break;
+        }
+    }
+    // End-of-PDU blit pass (FreeRDP update_tiles): emit EVERY tile updated so far in this GFX frame
+    // — not just this PDU's — clipped by the caller to THIS PDU's region rects (the last REGION
+    // block parsed, matching FreeRDP's single progressive->region). Tiles from earlier PDUs of the
+    // frame re-blit from their persistent cell.rgba; rects outside the frame set clip to nothing.
+    if (region) {
+        for (var ti = 0; ti < ctx.frameTiles.length; ti++) {
+            var cell = ctx.frameTiles[ti];
+            onTile(cell.x, cell.y, cell.rgba, region.rects);
         }
     }
     return { tiles: tilesOut, frames: frames };
@@ -772,8 +809,7 @@ function reconstructTile(ctx, region, xIdx, yIdx, tflags, quality, qY, qCb, qCr,
     // passes deliver (oldBitPos - newBitPos) bits per coefficient.
     cell.bitPos = [quantAdd(qY, pY), quantAdd(qCb, pCb), quantAdd(qCr, pCr)];
 
-    ycbcrToRgba(ctx.scratchY, ctx.scratchCb, ctx.scratchCr, ctx.rgba);
-    onTile(xIdx, yIdx, ctx.rgba, region.rects);
+    renderCell(ctx, cell); // blitted at end-of-PDU over the whole frame set (see decodeStream)
 }
 
 // =================================================================================================
@@ -901,18 +937,26 @@ function upgradeTile(ctx, region, xIdx, yIdx, quality, qY, qCb, qCr, data, blobs
             data, blobs[c * 4], blobs[c * 4 + 1], blobs[c * 4 + 2], blobs[c * 4 + 3], extrapolate);
         cell.bitPos[c] = newBitPos;
     }
-    ycbcrToRgba(ctx.scratchY, ctx.scratchCb, ctx.scratchCr, ctx.rgba);
-    onTile(xIdx, yIdx, ctx.rgba, region.rects);
+    renderCell(ctx, cell); // blitted at end-of-PDU over the whole frame set (see decodeStream)
 }
 
 global.RfxProgressive = {
     Context: ProgressiveContext,
-    // decode(ctx, payload Uint8Array, onTile(xIdx,yIdx,rgbaUint8ClampedArray,regionRects), log, verbose) -> {tiles,frames}|null
+    // decode(ctx, payload Uint8Array, onTile(xIdx,yIdx,rgbaUint8ClampedArray,regionRects), log, verbose,
+    //        frameId) -> {tiles,frames}|null
     // `verbose` enables per-tile/per-region tracing (block headers, quant indices, cache state) on top
     // of the always-on error logging, for chasing a specific black/stale tile back to its cause.
-    decode: function (ctx, payload, onTile, log, verbose) {
+    // `frameId` is the GFX START_FRAME id this PDU belongs to: PDUs sharing a frameId accumulate one
+    // updated-tile set and each PDU re-emits the whole set (FreeRDP progressive_decompress semantics —
+    // see ProgressiveContext.frameTiles). onTile fires per updated-this-frame tile per PDU.
+    decode: function (ctx, payload, onTile, log, verbose, frameId) {
         ctx._streamData = payload;
         ctx._streamDv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+        if (ctx.frameKey !== frameId) {
+            ctx.frameKey = frameId;
+            ctx.frameStamp++;
+            ctx.frameTiles = [];
+        }
         try {
             return decodeStream(ctx, payload, onTile, log, verbose);
         } catch (e) {
