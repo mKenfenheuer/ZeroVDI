@@ -135,7 +135,7 @@ ClearDecode.prototype.decode = function (data, width, height, log, verbose) {
         // a short tile with GLYPH_INDEX|HIT both set is valid and already returned; here it's an error
         // unless both flags are set (FreeRDP allows that early-out).
         const mask = CLEARCODEC_FLAG_GLYPH_HIT | CLEARCODEC_FLAG_GLYPH_INDEX;
-        if ((glyphFlags & mask) === mask) { if (glyphEntry) glyphEntry.pixels.set(out32.subarray(0, width * height)); return { rgba: out, width, height }; }
+        if ((glyphFlags & mask) === mask) { if (glyphEntry) glyphEntry.pixels.set(out32.subarray(0, width * height)); return { rgba: out, width, height, glyphEntry }; }
         if (log) log("clear: short composition header (remaining=" + r.remaining() + ")");
         return null;
     }
@@ -152,10 +152,16 @@ ClearDecode.prototype.decode = function (data, width, height, log, verbose) {
     if (bandsByteCount > 0 && !this._bands(r, bandsByteCount, width, height, out32, log, verbose)) return null;
     if (subcodecByteCount > 0 && !this._subcodecs(r, subcodecByteCount, width, height, out, out32, log, verbose)) return null;
 
-    // Cache the composed tile if this was a GLYPH_INDEX (so a later GLYPH_HIT can re-use it).
+    // Cache the tile if this was a GLYPH_INDEX (so a later GLYPH_HIT can re-use it). What's stored
+    // here is only a provisional copy: layers need not cover every pixel, and FreeRDP caches the glyph
+    // FROM THE DESTINATION SURFACE after composing (freerdp_image_copy out of pDstData), i.e. with the
+    // pre-existing surface pixels baked into the uncovered spots. The caller MUST overwrite
+    // glyphEntry.pixels with the composed surface rect after painting (see rdpgfx.js _finishClear) —
+    // otherwise a later GLYPH_HIT replays alpha-0 holes and the host/client pixel models diverge
+    // (visible as thin never-repainted strips of stale window chrome).
     if (glyphEntry) glyphEntry.pixels.set(out32.subarray(0, width * height));
 
-    return { rgba: out, width, height };
+    return { rgba: out, width, height, glyphEntry };
 };
 
 // Residual layer: BGR + runLength runs filling the whole tile in row-major order.

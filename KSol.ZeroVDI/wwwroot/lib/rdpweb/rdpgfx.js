@@ -125,11 +125,11 @@ function RdpGfx(cb) {
     this.outputMap = {};         // surfaceId -> { originX, originY } (MAP_SURFACE_TO_OUTPUT)
     this.confirmedVersion = 0;
     this.decoders = {};          // surfaceId -> H264SurfaceDecoder
-    // ClearCodec and RemoteFX Progressive are pure-JS, CPU-bound, bit-exact ports of FreeRDP that used
-    // to run synchronously on the main thread and could block input/render for hundreds of ms on a big
-    // frame. Both now run in decode-worker.js; this is the main-thread fallback used only if the Worker
-    // can't be constructed (e.g. CSP blocks it) or the browser lacks Worker support.
-    this.clear = (typeof ClearDecode !== "undefined") ? new ClearDecode() : null; // shared ClearCodec ctx
+    // ClearCodec and RemoteFX Progressive are pure-JS, CPU-bound, bit-exact ports of FreeRDP.
+    // Progressive (large frames, hundreds of tiles) runs in decode-worker.js; ClearCodec decodes on
+    // the main thread — its glyph cache must snapshot the composed destination surface (FreeRDP
+    // semantics, see _decodeClear/_finishClear), and its tiles are small enough not to block.
+    this.clear = (typeof ClearDecode !== "undefined") ? new ClearDecode() : null; // ClearCodec ctx (glyph/vBar caches)
     // RemoteFX Progressive (GNOME Remote Desktop streams this over WIRE_TO_SURFACE_2). Per-surface
     // context (holds the persistent per-tile coefficient grids needed for RFX_TILE_DIFFERENCE).
     this.progressive = (typeof RfxProgressive !== "undefined") ? RfxProgressive : null;
@@ -141,10 +141,10 @@ function RdpGfx(cb) {
 
     this._worker = null;         // decode-worker.js instance (progressive/clear offload), or null
     this._workerReqId = 0;
-    this._workerPending = {};    // reqId -> { surfaceId, kind: "progressive"|"clear" }
-    // ClearCodec/Progressive decode+paint is asynchronous (offloaded to decode-worker.js — see
-    // _decodeProgressive/_decodeClear), but SOLIDFILL / SURFACE_TO_CACHE / SURFACE_TO_SURFACE /
-    // CACHE_TO_SURFACE are synchronous canvas ops. [MS-RDPEGFX] PDUs are strictly ordered — a
+    this._workerPending = {};    // reqId -> { surfaceId }
+    // Progressive decode+paint is asynchronous (offloaded to decode-worker.js — see
+    // _decodeProgressive), but SOLIDFILL / SURFACE_TO_CACHE / SURFACE_TO_SURFACE / CACHE_TO_SURFACE /
+    // ClearCodec / uncompressed paints are synchronous canvas ops. [MS-RDPEGFX] PDUs are strictly ordered — a
     // SURFACE_TO_CACHE after a WIRE_TO_SURFACE must snapshot that PDU's painted result, a CACHE_TO_SURFACE
     // after a SURFACE_TO_CACHE must see the slot populated, and a blit/fill must not be stamped over by an
     // OLDER wire decode landing later. Per-surface defer queues can't express the cache-slot and cross-
@@ -191,12 +191,8 @@ RdpGfx.prototype._onWorkerMessage = function (msg) {
     const surf = this.surfaces[pending.surfaceId];
     // Settle even when the surface was destroyed while the decode was in flight (only the paint is
     // skipped) — every submitted decode must advance the barrier or the ordered queue wedges forever.
-    if (surf) {
-        if (msg.cmd === "progressive-result") {
-            this._finishProgressive(pending.surfaceId, surf, msg);
-        } else if (msg.cmd === "clear-result") {
-            this._finishClear(pending.surfaceId, surf, msg);
-        }
+    if (surf && msg.cmd === "progressive-result") {
+        this._finishProgressive(pending.surfaceId, surf, msg);
     }
     this._decodeSettled();
 };
@@ -346,7 +342,10 @@ RdpGfx.prototype._dispatch = function (cmdId, body) {
         cmdId === RDPGFX_CMDID_SOLIDFILL || cmdId === RDPGFX_CMDID_SURFACETOSURFACE ||
         cmdId === RDPGFX_CMDID_SURFACETOCACHE || cmdId === RDPGFX_CMDID_CACHETOSURFACE;
     if (!orderSensitive && cmdId === RDPGFX_CMDID_WIRETOSURFACE_1 && body.length >= 4) {
-        orderSensitive = (body[2] | (body[3] << 8)) === RDPGFX_CODECID_UNCOMPRESSED; // peek codecId
+        const codecId = body[2] | (body[3] << 8); // peek
+        // ClearCodec decodes synchronously on the main thread too (it must read the composed surface
+        // for FreeRDP-faithful glyph caching — see _decodeClear), so it needs the same gating.
+        orderSensitive = codecId === RDPGFX_CODECID_UNCOMPRESSED || codecId === RDPGFX_CODECID_CLEARCODEC;
     }
     if (orderSensitive && (this._decodeSettledSeq < this._decodeSeq || this._orderedQueue.length)) {
         // body is a subarray view into the ZGFX inflate buffer, which is REUSED for the next PDU —
@@ -822,25 +821,35 @@ RdpGfx.prototype._decodeAvc444 = function (surfaceId, surf, destRect, data) {
     this._decodeAvc420(surfaceId, surf, destRect, stream1);
 };
 
-// ClearCodec (0x8): decode the tile into an RGBA buffer and putImageData it onto the surface at the
-// dest rect. ClearCodec carries the full dest-rect pixels (no separate metablock); the dirty region is
-// the dest rect itself. Decode runs in decode-worker.js (see _decodeProgressive's comment); falls back
-// to synchronous main-thread decode if the worker isn't available.
-//
-// IMPORTANT: ClearDecode.decode() tracks a strictly-sequential seqNumber per PDU, and its glyph/VBar
-// caches must see PDUs in the exact order the host sent them — the worker guarantees this because the
-// main thread posts one message per PDU, in PDU order, and the worker (single-threaded, no internal
-// reordering) processes and replies in that same order.
+// ClearCodec (0x8): decode the tile into an RGBA buffer and composite it onto the surface at the dest
+// rect. Decodes SYNCHRONOUSLY on the main thread (not in decode-worker.js like progressive): FreeRDP
+// caches a GLYPH_INDEX tile from the DESTINATION SURFACE after composing — uncovered pixels get the
+// pre-existing surface content baked in — and only the main thread can read the surface canvas. The
+// worker's isolated glyph cache stored the raw decode buffer (with alpha-0 holes) instead, so every
+// GLYPH_HIT replay diverged from the host's pixel model, leaving thin permanently-stale strips.
+// ClearCodec tiles are small (glyphs cap at 1024 pixels; residual/bands cover UI-sized rects), so the
+// main-thread cost is negligible next to progressive, which stays on the worker. PDU ordering relative
+// to in-flight worker decodes is enforced upstream: _dispatch treats ClearCodec WIRE_TO_SURFACE_1 as
+// order-sensitive and queues it behind the decode barrier, same as uncompressed.
 RdpGfx.prototype._decodeClear = function (surfaceId, surf, rect, data) {
-    this._decodeSeq++;
-    if (!this._worker) { this._decodeClearSync(surfaceId, surf, rect, data); return; }
-    const reqId = ++this._workerReqId;
-    this._workerPending[reqId] = { surfaceId: surfaceId, kind: "clear" };
-    const copy = data.slice(); // detach-safe copy; data is a view into the reused ZGFX inflate buffer
-    this._worker.postMessage(
-        { cmd: "clear", reqId: reqId, surfaceId: surfaceId, rect: rect, data: copy.buffer, verbose: this._verbose() },
-        [copy.buffer]
-    );
+    if (!this.clear) { this._log("rdpgfx: ClearCodec module not loaded"); return; }
+    const w = rect.right - rect.left, h = rect.bottom - rect.top;
+    if (w <= 0 || h <= 0) return;
+    const self = this;
+    let res = null;
+    // Guarded like the progressive sync path: one malformed tile must never throw out of the GFX
+    // dispatch loop (that would silently stop ALL rendering); log and drop just this PDU.
+    try {
+        res = this.clear.decode(data, w, h, function (m) { self._log("rdpgfx: " + m); }, this._verbose());
+    } catch (e) {
+        this._log("rdpgfx: ClearCodec EXCEPTION: " + (e && e.stack ? e.stack : e));
+        return;
+    }
+    if (!res) {
+        this._log("rdpgfx: ClearCodec decode failed (" + w + "x" + h + ", " + data.length + " bytes)");
+        return;
+    }
+    this._finishClear(surfaceId, surf, { ok: true, rect: rect, buffer: res.rgba.buffer, glyphEntry: res.glyphEntry });
 };
 
 RdpGfx.prototype._finishClear = function (surfaceId, surf, msg) {
@@ -865,6 +874,14 @@ RdpGfx.prototype._finishClear = function (surfaceId, surf, msg) {
         }
         this._clearScratchCtx.putImageData(new ImageData(rgba, w, h), 0, 0);
         surf.ctx.drawImage(this._clearScratch, 0, 0, w, h, msg.rect.left, msg.rect.top, w, h);
+        // GLYPH_INDEX store: re-snapshot the glyph from the COMPOSED surface rect, exactly like
+        // FreeRDP (which copies out of pDstData after all layers landed). The decode-buffer copy
+        // clear.js stored is provisional — its uncovered pixels are alpha-0 holes, but the host's
+        // model says the glyph holds the fully-composed rect, and a later GLYPH_HIT paints it as-is.
+        if (msg.glyphEntry) {
+            const snap = surf.ctx.getImageData(msg.rect.left, msg.rect.top, w, h);
+            msg.glyphEntry.pixels.set(new Uint32Array(snap.data.buffer, 0, w * h));
+        }
         if (this._verbose()) {
             this._log("rdpgfx: ClearCodec PAINT surface=" + surfaceId + " at " + msg.rect.left + "," + msg.rect.top +
                 " " + w + "x" + h);
@@ -873,27 +890,6 @@ RdpGfx.prototype._finishClear = function (surfaceId, surf, msg) {
     } catch (e) {
         this._log("rdpgfx: ClearCodec paint exception: " + e);
     }
-};
-
-RdpGfx.prototype._decodeClearSync = function (surfaceId, surf, rect, data) {
-    try {
-        this._decodeClearSyncInner(surfaceId, surf, rect, data);
-    } finally {
-        this._decodeSettled(surfaceId);
-    }
-};
-
-RdpGfx.prototype._decodeClearSyncInner = function (surfaceId, surf, rect, data) {
-    if (!this.clear) { this._log("rdpgfx: ClearCodec module not loaded"); return; }
-    const w = rect.right - rect.left, h = rect.bottom - rect.top;
-    if (w <= 0 || h <= 0) return;
-    const self = this;
-    const res = this.clear.decode(data, w, h, function (m) { self._log("rdpgfx: " + m); }, this._verbose());
-    if (!res) {
-        this._log("rdpgfx: ClearCodec decode failed (" + w + "x" + h + ", " + data.length + " bytes)");
-        return;
-    }
-    this._finishClear(surfaceId, surf, { ok: true, rect: rect, buffer: res.rgba.buffer });
 };
 
 RdpGfx.prototype.onDecodedFrame = function (surfaceId, frame, regions) {
