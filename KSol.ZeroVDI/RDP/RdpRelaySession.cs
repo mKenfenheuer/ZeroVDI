@@ -41,8 +41,11 @@ public sealed class RdpRelaySession
     private RdpStreamRecorder? _recorder;
 
     // ── Connection-quality stats, read by the /ws/rdp-quality endpoint (see RdpWebSocketController) ──
-    // The browser's quality worker measures its own browser↔gateway RTT; these supply the other half of
-    // the picture: the gateway→host leg and the relayed byte count it derives throughput from.
+    // The browser's quality worker measures its own browser↔gateway RTT and runs an ACTIVE speed test
+    // over that same channel (see Quality() below) — an idle desktop session relays almost no bytes, so
+    // passive byte-counting falsely read as "poor" on a healthy-but-quiet connection. This RTT sample is
+    // the only thing the relay itself contributes to quality; everything else is end-to-end RTT + the
+    // active speed test.
 
     /// <summary>SessionTracker id for this tunnel; sent to the browser in the "ready" control frame so
     /// its quality worker can open the matching /ws/rdp-quality/{sessionId} socket.</summary>
@@ -50,16 +53,12 @@ public sealed class RdpRelaySession
 
     // Micros so a torn read is impossible (Interlocked on a long); -1 = no sample yet/unreachable.
     private long _hostRttMicros = -1;
-    private long _bytesToClient;
 
     /// <summary>Latest sampled gateway→host RTT in ms, or null while unknown/unreachable.</summary>
     public double? HostRttMs
     {
         get { var v = Interlocked.Read(ref _hostRttMicros); return v >= 0 ? v / 1000.0 : null; }
     }
-
-    /// <summary>Total bytes relayed host→browser so far (throughput source for the quality worker).</summary>
-    public long BytesToClient => Interlocked.Read(ref _bytesToClient);
 
     public RdpRelaySession(WebSocket ws, string host, int port, KerberosAuth? kerberos, ILogger logger,
         VmCredentials? presuppliedCreds = null, IRdpMediaSink? mediaSink = null,
@@ -334,15 +333,11 @@ public sealed class RdpRelaySession
         }, ct);
 
         // WRITER: forward to the browser at the browser's pace (may block on a slow WS without affecting
-        // the reader / the host). Bytes are counted AFTER the send completes, so the quality worker's
-        // throughput reading reflects what actually left towards the browser, not what queued up.
+        // the reader / the host).
         try
         {
             await foreach (var slice in pipe.Reader.ReadAllAsync(ct))
-            {
                 await _ws.SendAsync(slice, WebSocketMessageType.Binary, endOfMessage: true, ct);
-                Interlocked.Add(ref _bytesToClient, slice.Length);
-            }
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { _logger.LogError(ex, "RDP relay: host→ws writer FAILED"); }
@@ -412,7 +407,7 @@ public sealed class RdpRelaySession
             if (!doc.RootElement.TryGetProperty("type", out var t) || t.GetString() != "ping") return;
             if (!doc.RootElement.TryGetProperty("t", out var tsEl)) return;
             double? seq = doc.RootElement.TryGetProperty("seq", out var seqEl) ? seqEl.GetDouble() : null;
-            await SendJsonAsync(new { type = "pong", t = tsEl.GetDouble(), seq, hostRtt = HostRttMs, bytes = BytesToClient }, ct);
+            await SendJsonAsync(new { type = "pong", t = tsEl.GetDouble(), seq, hostRtt = HostRttMs }, ct);
         }
         catch (JsonException) { /* not a ping frame; ignore */ }
     }

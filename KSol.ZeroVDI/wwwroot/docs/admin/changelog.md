@@ -23,9 +23,13 @@ All notable changes to ZeroVDI are recorded here. The format is based on
   `/ws/rdp-quality/{sessionId}` endpoint (the session id is handed to the browser in the relay's
   "ready" frame). Ping scheduling and pong timestamping happen on the worker thread, so heavy
   main-thread work (progressive decode, large paints) no longer inflates the RTT reading or starves
-  the probe interval. Throughput is now derived from the gateway's relayed-byte counter carried in
-  each pong instead of per-message byte counting in the page's WebSocket handler, removing the last
-  main-thread bookkeeping. The session socket still answers legacy pings as a fallback.
+  the probe interval. The session socket still answers legacy pings as a fallback.
+- **Throughput is now an active speed test, not passive traffic counting.** An idle desktop session
+  relays almost no bytes, which previously made the indicator falsely report "poor" on a healthy but
+  quiet connection. The quality worker now periodically requests a bounded burst (256KB, every ~20s)
+  over the `/ws/rdp-quality` channel and times the transfer, giving a real throughput reading
+  regardless of desktop activity. Quality is now judged solely from this active speed test and the
+  end-to-end RTT — no session traffic is counted towards it anymore.
 
 ---
 

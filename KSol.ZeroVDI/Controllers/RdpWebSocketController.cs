@@ -284,14 +284,25 @@ public class RdpWebSocketController : Controller
         }
     }
 
+    // Speed-test burst size: large enough that a fast link's transfer time is measurable above WebSocket
+    // framing/scheduling noise, small enough that running it every ~20s is negligible next to the RDP
+    // stream itself and can't be mistaken for a DoS payload.
+    private const int SpeedTestBurstBytes = 256 * 1024;
+
     // GET /ws/rdp-quality/{sessionId}
     //
     // Connection-quality side channel for the browser's quality worker (wwwroot/lib/rdpweb/
     // quality-worker.js). A Web Worker cannot share the main thread's session WebSocket, so it opens
-    // this second, per-session socket instead: it sends small JSON pings, and each pong echoes the
-    // timestamp (browser↔gateway RTT, timed entirely on the worker thread) plus the relay's
-    // gateway→host RTT sample and relayed-byte counter — everything needed to show END-TO-END
-    // quality (web → gateway → RDP host) without touching the browser main thread or the RDP stream.
+    // this second, per-session socket instead. Two request types:
+    //   {"type":"ping",...}      -> pong echoing the timestamp (browser↔gateway RTT, timed on the
+    //                                worker thread) plus the relay's sampled gateway→host RTT.
+    //   {"type":"speedtest",...} -> a bounded burst of random bytes sent back immediately, so the
+    //                                worker can time the transfer and derive real throughput even when
+    //                                the RDP session itself is idle (an idle desktop relays almost no
+    //                                bytes, which used to make passive byte-counting read "poor" on a
+    //                                perfectly healthy connection).
+    // Quality is reported based SOLELY on this end-to-end RTT and this active speed test — no passive
+    // traffic counting — so a quiet session and a busy one are judged the same way.
     [HttpGet("ws/rdp-quality/{sessionId}")]
     [EnableRateLimiting("ws")]
     public async Task Quality(string sessionId)
@@ -320,26 +331,41 @@ public class RdpWebSocketController : Controller
                 if (result.MessageType == System.Net.WebSockets.WebSocketMessageType.Close) break;
                 if (result.MessageType != System.Net.WebSockets.WebSocketMessageType.Text) continue;
 
-                // Session ended → tell the worker to stop by closing, instead of answering stale pings.
+                // Session ended → tell the worker to stop by closing, instead of answering stale requests.
                 var live = _sessions.Get(sessionId!);
                 if (live == null) break;
 
-                double t; double? seq = null;
+                string type; double t; double? seq = null;
                 try
                 {
                     using var doc = System.Text.Json.JsonDocument.Parse(buffer.AsMemory(0, result.Count));
-                    if (!doc.RootElement.TryGetProperty("type", out var typeEl) || typeEl.GetString() != "ping") continue;
+                    if (!doc.RootElement.TryGetProperty("type", out var typeEl)) continue;
+                    type = typeEl.GetString() ?? "";
+                    if (type != "ping" && type != "speedtest") continue;
                     if (!doc.RootElement.TryGetProperty("t", out var tEl)) continue;
                     t = tEl.GetDouble();
                     if (doc.RootElement.TryGetProperty("seq", out var seqEl)) seq = seqEl.GetDouble();
                 }
                 catch (System.Text.Json.JsonException) { continue; }
 
+                if (type == "speedtest")
+                {
+                    // Sent as ONE binary frame so the worker's timer covers exactly the transfer, not
+                    // JSON parsing overhead. The client echoes t/seq back over a follow-up ping to
+                    // correlate; here we just prefix the frame with an 8-byte seq so small races between
+                    // concurrent bursts (there aren't any today, but the wire format shouldn't assume it)
+                    // can't be misattributed.
+                    var burst = new byte[8 + SpeedTestBurstBytes];
+                    BitConverter.TryWriteBytes(burst.AsSpan(0, 8), (long)(seq ?? 0));
+                    Random.Shared.NextBytes(burst.AsSpan(8));
+                    await socket.SendAsync(burst, System.Net.WebSockets.WebSocketMessageType.Binary, true, HttpContext.RequestAborted);
+                    continue;
+                }
+
                 var pong = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
                 {
                     type = "pong", t, seq,
                     hostRtt = live.Relay?.HostRttMs,
-                    bytes = live.Relay?.BytesToClient ?? 0L,
                 });
                 await socket.SendAsync(pong, System.Net.WebSockets.WebSocketMessageType.Text, true, HttpContext.RequestAborted);
             }
