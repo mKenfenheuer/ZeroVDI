@@ -1039,10 +1039,14 @@ RdpGfx.prototype._surfaceIdOf = function (surf) {
 // SOLIDFILL: fill one or more rects of a surface with a solid color (used for clears/letterboxing).
 RdpGfx.prototype._onSolidFill = function (r) {
     const surfaceId = r.u16le();
-    const b = r.u8(), g = r.u8(), rd = r.u8(), a = r.u8(); // RDPGFX_COLOR32 B,G,R,XA
+    const b = r.u8(), g = r.u8(), rd = r.u8(), xa = r.u8(); // RDPGFX_COLOR32 B,G,R,XA
     const fillRectCount = r.u16le();
     const surf = this.surfaces[surfaceId];
     if (!surf) return;
+    // XA is only meaningful on ARGB surfaces ([MS-RDPEGFX] 2.2.1.2); on XRGB surfaces Windows sends
+    // 0x00 there, and honoring it makes the fill fully transparent — fillRect becomes a no-op and the
+    // rect keeps its stale pixels (FreeRDP's gdi_SolidFill hardcodes 0xFF for the same reason).
+    const a = (surf.pixelFormat === GFX_PIXEL_FORMAT_ARGB_8888) ? xa : 255;
     surf.ctx.fillStyle = "rgba(" + rd + "," + g + "," + b + "," + (a / 255) + ")";
     const updated = [];
     for (let i = 0; i < fillRectCount; i++) {
