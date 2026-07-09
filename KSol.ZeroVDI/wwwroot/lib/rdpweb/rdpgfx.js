@@ -186,6 +186,14 @@ RdpGfx.prototype._initWorker = function () {
 
 RdpGfx.prototype._onWorkerMessage = function (msg) {
     if (msg.cmd === "log") { this._log(msg.message); return; }
+    // H.264 output frames are DECOUPLED from PDU submission (VideoDecoder emits asynchronously), so they
+    // carry no reqId and don't touch the ordered-decode barrier — they just paint whatever surface they
+    // belong to, in decode order (the worker's per-surface FIFO preserves it). The barrier for AVC is
+    // settled at SUBMISSION time (h264-submitted) instead: WebCodecs guarantees monotonic in→out order,
+    // so a following SURFACE_TO_SURFACE that we release once the PDU is consumed still composites the
+    // right pixels because the decoder can't reorder a later frame ahead of this surface's earlier one.
+    if (msg.cmd === "h264-frame") { this._paintH264Frame(msg); return; }
+    if (msg.cmd === "h264-need-keyframe") { if (this.requestKeyframe) this.requestKeyframe(msg.surfaceId); return; }
     const pending = this._workerPending[msg.reqId];
     if (!pending) return; // reset() cleared it — stale pre-reset reply; the seq counters were reset too
     delete this._workerPending[msg.reqId];
@@ -195,7 +203,18 @@ RdpGfx.prototype._onWorkerMessage = function (msg) {
     if (surf && msg.cmd === "progressive-result") {
         this._finishProgressive(pending.surfaceId, surf, msg);
     }
+    // "h264-submitted" only advances the barrier (its frame paints later, off-barrier).
     this._decodeSettled();
+};
+
+// Paint a VideoFrame transferred from the decode worker. Runs the exact old onDecodedFrame paint path
+// (a single drawImage of the whole decoded frame), which is all that remains on the main thread for
+// H.264 now — the decode itself happened in the worker.
+RdpGfx.prototype._paintH264Frame = function (msg) {
+    const surf = this.surfaces[msg.surfaceId];
+    const frame = msg.frame;
+    if (!surf) { if (frame && frame.close) frame.close(); return; }
+    this.onDecodedFrame(msg.surfaceId, frame, msg.regions);
 };
 
 RdpGfx.prototype._log = function (m) { if (this.cb.onLog) this.cb.onLog(m); };
@@ -785,6 +804,23 @@ RdpGfx.prototype._decodeProgressiveSyncInner = function (surfaceId, surf, bitmap
 // parts of the decoded frame changed; we draw the whole decoded frame into the surface at the rects'
 // bounding origin (the frame the encoder produced covers exactly the union of the regions).
 RdpGfx.prototype._decodeAvc420 = function (surfaceId, surf, destRect, data) {
+    // Preferred path: decode in the worker (off the main thread). The whole AVC420 PDU (metablock +
+    // Annex-B) is parsed and submitted to a worker-side VideoDecoder there; the finished VideoFrame is
+    // transferred back and painted by _paintH264Frame. Submission is barriered like progressive so a
+    // following order-sensitive op (SURFACE_TO_SURFACE etc.) waits for the PDU to be consumed.
+    if (this._worker) {
+        this._decodeSeq++;
+        const reqId = ++this._workerReqId;
+        this._workerPending[reqId] = { surfaceId: surfaceId, kind: "h264" };
+        // data is a view into the ZGFX inflate buffer (about to be reused) — copy before transfer.
+        const copy = data.slice();
+        this._worker.postMessage(
+            { cmd: "h264", reqId: reqId, surfaceId: surfaceId, bitmapData: copy.buffer },
+            [copy.buffer]
+        );
+        return;
+    }
+    // Fallback: no worker (CSP / no Worker support) — decode synchronously on the main thread.
     const r = new ByteReader(data);
     const numRegionRects = r.u32le();
     const rects = [];
@@ -928,7 +964,28 @@ RdpGfx.prototype.onDecodedFrame = function (surfaceId, frame, regions) {
         }
     };
 
-    // Primary safe path for Safari/iOS
+    // Fast path: draw the VideoFrame straight onto the 2D context. Canvas2D accepts a VideoFrame as an
+    // image source on every current engine (Chrome/Edge/Firefox, Safari 16.4+), so this needs no
+    // intermediate ImageBitmap allocation and — crucially — no extra async event-loop turn per frame,
+    // which matters now that we render at full video frame rate. On the rare engine that rejects a
+    // VideoFrame source (older Safari/iOS), fall back to createImageBitmap.
+    let drawn = false;
+    try {
+        surf.ctx.drawImage(frame, 0, 0, cw, ch);
+        drawn = true;
+    } catch (e) {
+        // Fall through to the ImageBitmap path below.
+    }
+    if (drawn) {
+        try {
+            self._afterSurfaceUpdate(surfaceId, surf, [{ left: 0, top: 0, right: cw, bottom: ch }]);
+        } finally {
+            if (frame.close) frame.close();
+        }
+        return;
+    }
+
+    // Compatibility path (older Safari/iOS): decode the frame into an ImageBitmap first.
     if (typeof createImageBitmap === "function") {
         createImageBitmap(frame)
             .then(paintFrame)
@@ -939,14 +996,7 @@ RdpGfx.prototype.onDecodedFrame = function (surfaceId, frame, regions) {
         return;
     }
 
-    // Last fallback (desktop-ish path)
-    try {
-        surf.ctx.drawImage(frame, 0, 0, cw, ch);
-    } catch (e) {
-        self._log("rdpgfx: drawImage(frame) failed: " + (e && e.message || e));
-    } finally {
-        if (frame.close) frame.close();
-    }
+    if (frame.close) frame.close();
 };
 
 // Fallback render path: createImageBitmap(frame) → drawImage per region rect. Used only when copyTo is

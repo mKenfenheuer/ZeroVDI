@@ -7,6 +7,33 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.17] — 2026-07-09 — H.264 decode moved off the browser main thread
+
+### Changed
+- **H.264 (AVC420/AVC444) now decodes in the Web Worker, not on the main thread.** The WebCodecs
+  `VideoDecoder`, the bitstream parsing (SPS scan, Annex-B NAL split), and the per-frame output
+  handling previously all ran on the browser main thread, so heavy video contended with input
+  dispatch — fast-moving desktop content could visibly stall keyboard/mouse handling. The decoder and
+  all bitstream work now live in `decode-worker.js` (WebCodecs is available in Worker scope), joining
+  RemoteFX Progressive which was already offloaded. Each finished frame is transferred back as a
+  `VideoFrame` (zero-copy — `VideoFrame` is Transferable), leaving the main thread only a single
+  `drawImage` per frame. Mixed-codec compositing (ClearCodec, progressive, surface-to-surface copies)
+  stays on the main thread and is unchanged. If a locked-down environment can't start the worker or
+  lacks WebCodecs-in-worker, decode transparently falls back to the previous main-thread path.
+- **AVC420 submission now participates in the ordered-decode barrier.** Like progressive, an AVC
+  `WIRE_TO_SURFACE_1` now advances the decode sequence so a following order-sensitive op
+  (`SURFACE_TO_SURFACE`, `SOLIDFILL`, …) releases only once the PDU has been consumed by the decoder,
+  closing a latent ordering gap that existed while AVC decoded synchronously but emitted frames async.
+
+### Faster
+- **Frame paint no longer allocates an intermediate `ImageBitmap` on capable browsers.** The decoded
+  `VideoFrame` is drawn straight onto the surface's 2D context (a valid image source on every current
+  engine), removing a per-frame allocation and an extra async event-loop turn. The old
+  `createImageBitmap` path is kept only as a fallback for older Safari/iOS that reject a `VideoFrame`
+  source.
+
+---
+
 ## [0.6.16] — 2026-07-08 — End-to-end connection quality indicator, sampled off the main thread
 
 ### Changed
