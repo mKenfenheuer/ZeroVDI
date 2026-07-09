@@ -140,16 +140,25 @@ internal sealed class RdpServerFrontEnd
         }
     }
 
-    /// <summary>Drains client→server traffic after ACTIVE so the pipe never back-pressures. M3 will
-    /// parse input events out of this stream; for now it is discarded.</summary>
-    public async Task DrainClientAsync(CancellationToken ct)
+    // ── input callbacks (raised from RunInputAsync; the encoder maps + forwards to the source) ──
+    /// <summary>Browser fastpath MOUSE event: PTRFLAGS + session-space x/y.</summary>
+    public event Action<ushort, int, int>? OnMouse;
+    /// <summary>Browser fastpath SCANCODE event: PC/AT set-1 keyCode, released, extended (0xE0).</summary>
+    public event Action<byte, bool, bool>? OnScancode;
+    /// <summary>Browser fastpath UNICODE event: UTF-16 code unit, released.</summary>
+    public event Action<ushort, bool>? OnUnicode;
+
+    /// <summary>
+    /// Reads client→server traffic after ACTIVE and decodes fastpath INPUT events (mouse/keyboard),
+    /// raising the events above. Slow-path (TPKT) control PDUs are consumed and ignored. Ends on EOF.
+    /// </summary>
+    public async Task RunInputAsync(CancellationToken ct)
     {
         try
         {
             while (!ct.IsCancellationRequested)
             {
-                var pdu = await ReadTpktOrFastpathAsync(ct);
-                if (pdu == null) break;
+                if (!await ReadAndDispatchInputAsync(ct)) break;
             }
         }
         catch (OperationCanceledException) { }
@@ -222,21 +231,29 @@ internal sealed class RdpServerFrontEnd
     }
 
     /// <summary>Reads either a TPKT slow-path or a fastpath input PDU; returns its raw bytes, or null on EOF.</summary>
-    private async Task<byte[]?> ReadTpktOrFastpathAsync(CancellationToken ct)
+    /// <summary>Reads one client PDU; decodes fastpath input events. Returns false on EOF.</summary>
+    private async Task<bool> ReadAndDispatchInputAsync(CancellationToken ct)
     {
         var first = new byte[1];
         int n = await _s.ReadAsync(first.AsMemory(0, 1), ct);
-        if (n == 0) return null;
+        if (n == 0) return false;
+
         if (first[0] == 0x03)
         {
+            // Slow-path TPKT (virtual-channel / control PDUs) — consume and ignore.
             var rest = await RdpHostConnection.ReadExactAsync(_s, 3, ct);
-            int len = (rest[1] << 8) | rest[2];
-            var body = await RdpHostConnection.ReadExactAsync(_s, len - 4, ct);
-            return body;
+            int tlen = (rest[1] << 8) | rest[2];
+            if (tlen > 4) await RdpHostConnection.ReadExactAsync(_s, tlen - 4, ct);
+            return true;
         }
-        // Fastpath input: header(1) then length (1 or 2 bytes, PER-style).
+
+        // Fastpath INPUT PDU ([MS-RDPBCGR] 2.2.8.1.2): fpInputHeader(1) then length (1 or 2 bytes,
+        // PER-style), then the events. The header's bits 2-5 carry numberEvents (0 ⇒ a single event, or
+        // an eventHeader-per-event stream). We match the JS client: it sends numEvents=1 per PDU.
+        byte fpHeader = first[0];
+        int numEvents = (fpHeader >> 2) & 0x0f;
         var lb = await RdpHostConnection.ReadExactAsync(_s, 1, ct);
-        int length; int consumed;
+        int length, consumed;
         if ((lb[0] & 0x80) != 0)
         {
             var lb2 = await RdpHostConnection.ReadExactAsync(_s, 1, ct);
@@ -244,8 +261,53 @@ internal sealed class RdpServerFrontEnd
             consumed = 3;
         }
         else { length = lb[0]; consumed = 2; }
-        if (length > consumed)
-            await RdpHostConnection.ReadExactAsync(_s, length - consumed, ct);
-        return Array.Empty<byte>();
+
+        int bodyLen = Math.Max(0, length - consumed);
+        var body = bodyLen > 0 ? await RdpHostConnection.ReadExactAsync(_s, bodyLen, ct) : Array.Empty<byte>();
+        DispatchInputEvents(body, numEvents == 0 ? 1 : numEvents);
+        return true;
+    }
+
+    /// <summary>Decodes fastpath input events from a PDU body (mirrors macRDP's decodeInputEvent).</summary>
+    private void DispatchInputEvents(ReadOnlySpan<byte> body, int events)
+    {
+        int o = 0;
+        for (int e = 0; e < events && o < body.Length; e++)
+        {
+            byte eventHeader = body[o++];
+            int eventCode = (eventHeader >> 5) & 0x7;
+            int eventFlags = eventHeader & 0x1f;
+            switch (eventCode)
+            {
+                case 0x1: // MOUSE: flags(u16le) x(u16le) y(u16le)
+                    if (o + 6 > body.Length) return;
+                    ushort ptrFlags = (ushort)(body[o] | (body[o + 1] << 8));
+                    int mx = body[o + 2] | (body[o + 3] << 8);
+                    int my = body[o + 4] | (body[o + 5] << 8);
+                    o += 6;
+                    OnMouse?.Invoke(ptrFlags, mx, my);
+                    break;
+                case 0x2: // MOUSEX (extended buttons) — same 6-byte layout; ignored for now.
+                    if (o + 6 > body.Length) return;
+                    o += 6;
+                    break;
+                case 0x0: // SCANCODE: 1-byte keyCode; flags (release 0x01, extended 0x02) in eventFlags.
+                    if (o + 1 > body.Length) return;
+                    byte code = body[o++];
+                    OnScancode?.Invoke(code, (eventFlags & 0x01) != 0, (eventFlags & 0x02) != 0);
+                    break;
+                case 0x4: // UNICODE: u16 code unit.
+                    if (o + 2 > body.Length) return;
+                    ushort ch = (ushort)(body[o] | (body[o + 1] << 8));
+                    o += 2;
+                    OnUnicode?.Invoke(ch, (eventFlags & 0x01) != 0);
+                    break;
+                case 0x3: // SYNC (toggle-key state) — nothing to do.
+                    break;
+                default:
+                    o += 6; // unknown; skip a fixed body and hope to resync
+                    break;
+            }
+        }
     }
 }

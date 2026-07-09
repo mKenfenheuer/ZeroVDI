@@ -25,6 +25,14 @@ internal sealed class RdpEncoderSession
     private (int x, int y, int w, int h) _fit;
     private readonly object _fbLock = new();
 
+    // RDP PTRFLAGS ([MS-RDPBCGR] 2.2.8.1.2.2.3).
+    private const int PTRFLAGS_MOVE = 0x0800, PTRFLAGS_DOWN = 0x8000;
+    private const int PTRFLAGS_BUTTON1 = 0x1000, PTRFLAGS_BUTTON2 = 0x2000, PTRFLAGS_BUTTON3 = 0x4000;
+    private const int PTRFLAGS_WHEEL = 0x0200, PTRFLAGS_WHEEL_NEGATIVE = 0x0100;
+    // RFB pointer button mask bits: 0=left,1=middle,2=right,3=wheel-up,4=wheel-down.
+    private int _rfbButtons;
+    private int _lastSrcX, _lastSrcY;
+
     public RdpEncoderSession(IProtocolSource source, Stream serverSide, ILogger logger)
     {
         _source = source;
@@ -32,6 +40,7 @@ internal sealed class RdpEncoderSession
         // Fallback size = source native size; overridden by the browser's requested size at handshake.
         _frontEnd = new RdpServerFrontEnd(serverSide, source.Width, source.Height, logger);
         _source.OnRectangle += OnSourceRectangle;
+        _frontEnd.OnMouse += OnBrowserMouse;
     }
 
     /// <summary>
@@ -103,7 +112,55 @@ internal sealed class RdpEncoderSession
         catch (Exception ex) { _logger.LogDebug(ex, "VNC: region flush failed"); }
     }
 
-    // Browser input → source. Full input mapping (mouse/keyboard) lands in M3/M4; for now we drain the
-    // client stream so the pipe never back-pressures.
-    private Task DrainBrowserInputAsync(CancellationToken ct) => _frontEnd.DrainClientAsync(ct);
+    // Browser input → source. RunInputAsync decodes fastpath events and raises OnMouse (+ OnScancode/
+    // OnUnicode in M4); we map coordinates and forward to the source.
+    private Task DrainBrowserInputAsync(CancellationToken ct) => _frontEnd.RunInputAsync(ct);
+
+    // A browser MOUSE event in SESSION coordinates. Map into source space (inverse letterbox), update the
+    // RFB button mask from the RDP pointer flags, and forward an RFB PointerEvent.
+    private void OnBrowserMouse(ushort ptrFlags, int sx, int sy)
+    {
+        int srcX, srcY;
+        lock (_fbLock)
+        {
+            if (_fit.w <= 0 || _fit.h <= 0) return;
+            // Session point → fit-region-relative → source pixel.
+            double relX = (sx - _fit.x) / (double)_fit.w;
+            double relY = (sy - _fit.y) / (double)_fit.h;
+            srcX = Math.Clamp((int)(relX * _source.Width), 0, Math.Max(0, _source.Width - 1));
+            srcY = Math.Clamp((int)(relY * _source.Height), 0, Math.Max(0, _source.Height - 1));
+        }
+        _lastSrcX = srcX; _lastSrcY = srcY;
+
+        // Wheel: momentary button 4 (up) / 5 (down) press+release; RFB has no persistent wheel state.
+        if ((ptrFlags & PTRFLAGS_WHEEL) != 0)
+        {
+            bool negative = (ptrFlags & PTRFLAGS_WHEEL_NEGATIVE) != 0;
+            int wheelBit = negative ? (1 << 4) : (1 << 3);
+            Forward(srcX, srcY, _rfbButtons | wheelBit);
+            Forward(srcX, srcY, _rfbButtons);
+            return;
+        }
+
+        // Button state: DOWN sets, its absence clears — for whichever button bit the event names. A MOVE
+        // event names no button and just repositions.
+        bool down = (ptrFlags & PTRFLAGS_DOWN) != 0;
+        if ((ptrFlags & PTRFLAGS_BUTTON1) != 0) SetButton(0, down);
+        else if ((ptrFlags & PTRFLAGS_BUTTON2) != 0) SetButton(1, down);   // middle
+        else if ((ptrFlags & PTRFLAGS_BUTTON3) != 0) SetButton(2, down);   // right
+
+        Forward(srcX, srcY, _rfbButtons);
+    }
+
+    private void SetButton(int rfbBit, bool down)
+    {
+        if (down) _rfbButtons |= (1 << rfbBit);
+        else _rfbButtons &= ~(1 << rfbBit);
+    }
+
+    private void Forward(int x, int y, int mask)
+    {
+        try { _source.PointerAsync(x, y, mask, CancellationToken.None).GetAwaiter().GetResult(); }
+        catch (Exception ex) { _logger.LogDebug(ex, "VNC: pointer forward failed"); }
+    }
 }

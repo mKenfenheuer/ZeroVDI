@@ -5,6 +5,13 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **VNC bridge is now live and mouse-interactive (M3).** The desktop updates continuously (RFB
+  incremental-update loop) instead of showing a single static frame, and mouse input works: the browser's
+  fastpath pointer events are decoded, mapped from the letterboxed session space back into the host's
+  native coordinates, and forwarded as RFB PointerEvents (left/middle/right buttons + wheel). Keyboard is
+  next (M4).
+
 ### Changed
 - **VNC bridge now presents the browser-requested desktop size and letterbox-scales the host into it.**
   Previously the RDP session was sized 1:1 to the VNC framebuffer (e.g. a 1920×1080 host filled a

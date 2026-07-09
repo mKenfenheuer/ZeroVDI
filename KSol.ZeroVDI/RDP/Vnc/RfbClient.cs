@@ -186,7 +186,13 @@ internal sealed class RfbClient : IProtocolSource
             int msgType = (await ReadExactAsync(1, ct))[0];
             switch (msgType)
             {
-                case 0: await ReadFramebufferUpdateAsync(ct); break;
+                case 0:
+                    await ReadFramebufferUpdateAsync(ct);
+                    // RFB is request-driven: ask for the next incremental update so changed regions keep
+                    // flowing. The server replies only when something changes, so this self-clocks the
+                    // live stream without polling. Coalescing (one outstanding request) avoids flooding.
+                    await RequestUpdateAsync(incremental: true, ct);
+                    break;
                 case 1: await ReadColourMapAsync(ct); break;
                 case 2: break; // Bell — no payload.
                 case 3: await ReadServerCutTextAsync(ct); break;
@@ -401,7 +407,15 @@ internal sealed class RfbClient : IProtocolSource
 
     // ── stream helpers ────────────────────────────────────────────────────────────────────────────
     private Task<byte[]> ReadExactAsync(int n, CancellationToken ct) => RdpHostConnection.ReadExactAsync(_s, n, ct);
-    private Task WriteAsync(byte[] bytes, CancellationToken ct) => _s.WriteAsync(bytes, ct).AsTask();
+    // Serialize all client→server writes: the frame loop (incremental requests) and the input path
+    // (pointer/key events) both write to the same socket from different tasks.
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private async Task WriteAsync(byte[] bytes, CancellationToken ct)
+    {
+        await _writeLock.WaitAsync(ct);
+        try { await _s.WriteAsync(bytes, ct); }
+        finally { _writeLock.Release(); }
+    }
 
     private async Task<string> ReadFailureReasonAsync(CancellationToken ct)
     {
