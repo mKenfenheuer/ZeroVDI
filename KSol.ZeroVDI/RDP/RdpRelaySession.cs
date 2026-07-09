@@ -28,6 +28,7 @@ public sealed class RdpRelaySession
     private readonly VmCredentials? _redirectCreds;
     private readonly Action<RdpServerRedirection>? _onRedirect;
     private readonly IHostTransport? _hostTransport;
+    private readonly IRdpResolver _resolver;
     private readonly ILogger _logger;
     private bool _redirected;
     // True once a token-bearing session that the HOST disconnected (GNOME "Remote Login" post-auth
@@ -63,10 +64,12 @@ public sealed class RdpRelaySession
     public RdpRelaySession(WebSocket ws, string host, int port, KerberosAuth? kerberos, ILogger logger,
         VmCredentials? presuppliedCreds = null, IRdpMediaSink? mediaSink = null,
         byte[]? routingToken = null, VmCredentials? redirectCreds = null,
-        Action<RdpServerRedirection>? onRedirect = null, IHostTransport? hostTransport = null)
+        Action<RdpServerRedirection>? onRedirect = null, IHostTransport? hostTransport = null,
+        IRdpResolver? resolver = null)
     {
         _ws = ws;
         _hostTransport = hostTransport;
+        _resolver = resolver ?? new NlaRdpResolver();
         _host = host;
         _port = port;
         _kerberos = kerberos;
@@ -124,8 +127,12 @@ public sealed class RdpRelaySession
         RdpHostConnection.Connected host;
         try
         {
-            host = await new RdpHostConnection(_host, _port, _kerberos, _logger, _hostTransport)
-                .ConnectAsync(creds, ct: ct, routingToken: _routingToken);
+            host = await _resolver.ConnectAsync(
+                new RdpResolveRequest(_host, _port, creds,
+                    _hostTransport ?? new DirectTcpTransport(_logger), _kerberos,
+                    RequestedProtocols: 0x00000002 | 0x00000001 /* HYBRID | SSL */,
+                    RoutingToken: _routingToken, Logger: _logger),
+                ct);
             if (_routingToken != null)
                 _logger.LogInformation("RDP relay: reconnected with redirection routing token ({Len}B)", _routingToken.Length);
         }
@@ -252,7 +259,7 @@ public sealed class RdpRelaySession
     // fast as the host sends, and a WRITER that forwards to the browser at the browser's pace. The host
     // never sees our WebSocket latency. The bound caps memory; if the browser falls hopelessly behind we
     // fail the session rather than buffer without limit.
-    private async Task PumpSslToWsAsync(SslStream ssl, CancellationToken ct)
+    private async Task PumpSslToWsAsync(Stream ssl, CancellationToken ct)
     {
         // Bounded so a stuck browser can't OOM us. ~256 chunks * 16KB ≈ 4MB max in flight.
         var pipe = System.Threading.Channels.Channel.CreateBounded<byte[]>(
@@ -344,7 +351,7 @@ public sealed class RdpRelaySession
         finally { try { await reader; } catch { } }
     }
 
-    private async Task PumpWsToSslAsync(SslStream ssl, CancellationToken ct)
+    private async Task PumpWsToSslAsync(Stream ssl, CancellationToken ct)
     {
         var buffer = new byte[16 * 1024];
         using var dump = OpenDump("our_c2s.bin");

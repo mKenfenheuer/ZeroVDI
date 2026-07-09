@@ -203,8 +203,12 @@ public sealed class MitmRdpStream : Stream
             // Request the SAME protocols toward the host that the client requested, so the host echoes
             // the value the client expects in its MCS Connect-Response (avoids the negotiation-flags
             // mismatch / 0x609 abort).
-            host = await new RdpHostConnection(_host, _port, _kerberos, _logger)
-                .ConnectAsync(hostCreds, clientRequestedProtocols, ct, _clientRoutingToken);
+            // The native MITM path is RDP-only forever (a native mstsc speaks RDP), so always the NLA
+            // resolver over a direct TCP transport — same behaviour as before the resolver seam.
+            host = await new NlaRdpResolver().ConnectAsync(
+                new RdpResolveRequest(_host, _port, hostCreds, new DirectTcpTransport(_logger), _kerberos,
+                    clientRequestedProtocols, _clientRoutingToken, _logger),
+                ct);
             _logger.LogInformation("MITM: bridging client <-> {Host}:{Port} (sso={Sso}, routingToken={Tok}B)",
                 _host, _port, _hostCreds != null, _clientRoutingToken?.Length ?? 0);
 
@@ -316,7 +320,7 @@ public sealed class MitmRdpStream : Stream
     /// split as <see cref="RdpRelaySession"/> on the host→client direction so a slow client never
     /// back-pressures (and stalls) the host mid-frame.
     /// </summary>
-    private async Task RelayDecryptedAsync(SslStream client, SslStream hostStream, CancellationToken ct)
+    private async Task RelayDecryptedAsync(SslStream client, Stream hostStream, CancellationToken ct)
     {
         using var recorder = RdpStreamRecorder.TryCreate(_logger, _mediaSink);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -332,7 +336,7 @@ public sealed class MitmRdpStream : Stream
         try { await Task.WhenAll(toClient, toHost); } catch { /* shutdown races expected */ }
     }
 
-    private async Task PumpAsync(SslStream from, SslStream to, RdpDir dir, RdpStreamRecorder? recorder, CancellationToken ct)
+    private async Task PumpAsync(Stream from, Stream to, RdpDir dir, RdpStreamRecorder? recorder, CancellationToken ct)
     {
         var buffer = new byte[16 * 1024];
         try

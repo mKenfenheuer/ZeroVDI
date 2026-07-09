@@ -71,8 +71,15 @@
                     <input asp-for="Resource.IpAddress" name="IpAddress" class="form-input @(isProxmox ? "opacity-60" : "")" readonly="@isProxmox" />
                 </div>
                 <div>
-                    <label asp-for="Resource.Port" class="form-label">RDP port</label>
+                    <label asp-for="Resource.Port" class="form-label">Port</label>
                     <input asp-for="Resource.Port" name="Port" type="number" class="form-input @(isProxmox ? "opacity-60" : "")" readonly="@isProxmox" />
+                </div>
+                <div>
+                    <label asp-for="Resource.Protocol" class="form-label">Protocol</label>
+                    <select name="Protocol" class="form-select">
+                        <option value="0" selected="@(r.Protocol == RdpProtocol.Rdp)">RDP (native)</option>
+                        <option value="1" selected="@(r.Protocol == RdpProtocol.Vnc)">VNC (bridged)</option>
+                    </select>
                 </div>
                 @if (Model.AvailableConnectors.Count > 0)
                 {

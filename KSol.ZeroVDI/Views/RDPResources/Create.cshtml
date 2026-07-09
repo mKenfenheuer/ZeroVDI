@@ -38,9 +38,16 @@
                 <span asp-validation-for="IpAddress" class="form-error"></span>
             </div>
             <div>
-                <label asp-for="Port" class="form-label">RDP port</label>
+                <label asp-for="Port" class="form-label">Port</label>
                 <input asp-for="Port" class="form-input" type="number" />
                 <span asp-validation-for="Port" class="form-error"></span>
+            </div>
+            <div>
+                <label asp-for="Protocol" class="form-label">Protocol</label>
+                <select name="Protocol" class="form-select">
+                    <option value="0">RDP (native)</option>
+                    <option value="1">VNC (bridged)</option>
+                </select>
             </div>
         </div>
     </div>

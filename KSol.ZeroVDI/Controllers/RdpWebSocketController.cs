@@ -30,6 +30,7 @@ public class RdpWebSocketController : Controller
     private readonly IAuditLogger _audit;
     private readonly ResourceAccessService _access;
     private readonly ConnectorPathSelector _paths;
+    private readonly IRdpResolverFactory _resolvers;
     private readonly ILogger<RdpWebSocketController> _logger;
 
     public RdpWebSocketController(
@@ -45,6 +46,7 @@ public class RdpWebSocketController : Controller
         IAuditLogger audit,
         ResourceAccessService access,
         ConnectorPathSelector paths,
+        IRdpResolverFactory resolvers,
         ILogger<RdpWebSocketController> logger)
     {
         _context = context;
@@ -59,6 +61,7 @@ public class RdpWebSocketController : Controller
         _audit = audit;
         _access = access;
         _paths = paths;
+        _resolvers = resolvers;
         _logger = logger;
     }
 
@@ -89,7 +92,9 @@ public class RdpWebSocketController : Controller
             HttpContext.Response.StatusCode = StatusCodes.Status404NotFound;
             return;
         }
-        var requestedPort = (ushort)(resource.Port > 0 ? resource.Port : 3389);
+        // Default port depends on the host protocol (RDP 3389, VNC 5900).
+        var defaultPort = resource.Protocol == RdpProtocol.Vnc ? 5900 : 3389;
+        var requestedPort = (ushort)(resource.Port > 0 ? resource.Port : defaultPort);
 
         // Resolve the resource to a live host/port — starts/resumes a Proxmox VM and waits for it. When
         // `id` is a VDI pool entry point this also provisions/reuses the user's clone and returns its
@@ -222,7 +227,8 @@ public class RdpWebSocketController : Controller
                     new RedirectionTokenCache.Pending(redir.LoadBalanceInfo!, redir.Username, redir.Domain, redir.Password,
                         recId, baseDir, leg + 1));
             },
-            hostTransport);
+            hostTransport,
+            _resolvers.For(resource.Protocol));
 
         await _resolver.OnConnectedAsync(userId, id);
         var sessionStartUtc = DateTime.UtcNow;

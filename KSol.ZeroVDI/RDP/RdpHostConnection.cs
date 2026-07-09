@@ -45,8 +45,14 @@ public sealed class RdpHostConnection
         _transport = transport ?? new DirectTcpTransport(logger);
     }
 
-    /// <summary>The result of a successful connect: the decrypted RDP stream over its underlying transport.</summary>
-    public sealed record Connected(SslStream Stream, Stream Inner) : IDisposable
+    /// <summary>
+    /// The result of a successful connect: the decrypted RDP stream over its underlying transport,
+    /// positioned at the MCS Connect-Initial exchange (where the browser client takes over).
+    /// <see cref="Stream"/> is an <see cref="SslStream"/> for the native-RDP path, but is typed
+    /// <see cref="System.IO.Stream"/> so a bridge resolver (e.g. VNC) can hand back a plain in-memory
+    /// duplex stream — the relay pumps use only base-<see cref="System.IO.Stream"/> members.
+    /// </summary>
+    public sealed record Connected(Stream Stream, Stream Inner) : IDisposable
     {
         public void Dispose()
         {

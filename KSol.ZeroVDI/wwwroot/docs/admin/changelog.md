@@ -5,7 +5,32 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **VNC bridge — RDP server front-end (M1).** The VNC resolver now stands up a minimal in-gateway RDP
+  *server* over an in-memory pipe: it answers the browser client's connection sequence (MCS
+  Connect-Response → Attach-User/Channel-Join confirms → licensing → Demand-Active → finalization) and,
+  on reaching the active state, paints a solid-color frame via a legacy fastpath **bitmap** update
+  (16bpp RGB565). This proves the from-scratch server PDU encoders against the real client before any
+  RFB/VNC pixels are wired in (that is M2). VNC resources still can't reach a real host yet.
+
 ---
+
+## [0.6.18] — 2026-07-09 — Pluggable host-protocol resolvers (RDP seam + VNC groundwork)
+
+### Added
+- **Resources now carry a `Protocol` (RDP or VNC).** A new per-resource protocol selects how the
+  gateway reaches the host. Native **RDP** (NLA/CredSSP) is the default and unchanged; **VNC** is
+  introduced as an alternative that will bridge an RFB/VNC host into an RDP stream (bridge itself lands
+  in following releases — selecting VNC currently fails the connection with a clear message). Set it in
+  the resource Create/Edit screens; the connection port defaults to 3389 for RDP and 5900 for VNC.
+
+### Changed
+- **Introduced an `IRdpResolver` seam at the single point that produces the decrypted RDP stream.**
+  The browser console relay and the session recorder already treat everything after connect as an
+  opaque RDP byte stream; the logic that *produces* that stream (TCP + X.224 + TLS + CredSSP) now sits
+  behind a resolver interface (`NlaRdpResolver`), chosen per resource by `Protocol`. This makes the VDI
+  system extensible with additional host protocols without touching the web client or recorder. The
+  native RDP path is byte-for-byte identical; this release is the extensibility groundwork only.
 
 ## [0.6.17] — 2026-07-09 — H.264 decode moved off the browser main thread
 

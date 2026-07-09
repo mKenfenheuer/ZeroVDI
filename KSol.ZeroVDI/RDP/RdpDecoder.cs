@@ -120,6 +120,7 @@ internal sealed class W
     public W U16be(int v) { B.Add((byte)((v >> 8) & 0xff)); B.Add((byte)(v & 0xff)); return this; }
     public W U32le(long v) { B.Add((byte)(v & 0xff)); B.Add((byte)((v >> 8) & 0xff)); B.Add((byte)((v >> 16) & 0xff)); B.Add((byte)((v >> 24) & 0xff)); return this; }
     public W Bytes(ReadOnlySpan<byte> s) { foreach (var x in s) B.Add(x); return this; }
+    public W Zeros(int n) { for (int i = 0; i < n; i++) B.Add(0); return this; }
     public byte[] ToArray() => B.ToArray();
 }
 
