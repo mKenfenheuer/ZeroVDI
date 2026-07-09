@@ -70,7 +70,7 @@ namespace KSol.ZeroVDI.Controllers
         // are created by the sync service, not here. Id is server-generated (GUID).
         [HttpPost("create")]
         [ValidateAntiForgeryToken]
-        public async Task<IActionResult> Create([Bind("Name,Description,IpAddress,Port,Protocol,OsType,WakeMethod,WolMacAddress,IpmiHost,IpmiUser,ShutdownMethod,SshUser,ShutdownCommand,WindowsUser,DefaultConnectionDefaults")] RDPResource rDPResource, string? ipmiPassword, string? sshKey, string? windowsPassword)
+        public async Task<IActionResult> Create([Bind("Name,Description,IpAddress,Port,Protocol,KeyboardLayout,OsType,WakeMethod,WolMacAddress,IpmiHost,IpmiUser,ShutdownMethod,SshUser,ShutdownCommand,WindowsUser,DefaultConnectionDefaults")] RDPResource rDPResource, string? ipmiPassword, string? sshKey, string? windowsPassword)
         {
             if (ModelState.IsValid)
             {
@@ -167,7 +167,7 @@ namespace KSol.ZeroVDI.Controllers
         // applied; for Manual resources the address, port and RDP options are editable too.
         [HttpPost("edit/{id}")]
         [ValidateAntiForgeryToken]
-        public async Task<IActionResult> Edit(string id, [Bind("Id,Name,Description,IpAddress,Port,Protocol,OsType,WakeMethod,WolMacAddress,IpmiHost,IpmiUser,ShutdownMethod,SshUser,ShutdownCommand,WindowsUser,ForcedConnectorId")] RDPResource input, string? ipmiPassword, string? sshKey, string? windowsPassword)
+        public async Task<IActionResult> Edit(string id, [Bind("Id,Name,Description,IpAddress,Port,Protocol,KeyboardLayout,OsType,WakeMethod,WolMacAddress,IpmiHost,IpmiUser,ShutdownMethod,SshUser,ShutdownCommand,WindowsUser,ForcedConnectorId")] RDPResource input, string? ipmiPassword, string? sshKey, string? windowsPassword)
         {
             if (id != input.Id)
             {
@@ -189,6 +189,7 @@ namespace KSol.ZeroVDI.Controllers
                     existing.IpAddress = input.IpAddress;
                     existing.Port = input.Port;
                     existing.Protocol = input.Protocol;
+                    existing.KeyboardLayout = input.KeyboardLayout;
                     existing.OsType = input.OsType;
                     existing.WakeMethod = input.WakeMethod;
                     existing.WolMacAddress = input.WolMacAddress;

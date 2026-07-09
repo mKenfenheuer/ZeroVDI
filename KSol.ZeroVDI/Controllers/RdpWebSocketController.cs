@@ -246,6 +246,7 @@ public class RdpWebSocketController : Controller
         // frame) and the tracked entry exposes the relay so /ws/rdp-quality/{sessionId} can read its
         // gateway→host RTT and relayed-byte counter.
         session.TrackedSessionId = tracked.SessionId;
+        session.KeyboardLayout = resource.KeyboardLayout;
         tracked.Relay = session;
         using var runCts = CancellationTokenSource.CreateLinkedTokenSource(
             HttpContext.RequestAborted, tracked.Cancellation.Token);

@@ -54,18 +54,18 @@ internal static class PixelConvert
 
     /// <summary>
     /// Converts a sub-rectangle of a top-down 32bpp BGRX session framebuffer into a <see cref="BitmapRect"/>
-    /// (16bpp RGB565, bottom-up, 4-byte-padded rows) for the bitmap fastpath.
+    /// (16bpp RGB565, bottom-up rows). IMPORTANT: this browser client's uncompressed bitmap renderer
+    /// (<c>color.js</c>) uses a stride of exactly <c>width*2</c> with NO row padding and runs <c>flipV</c>,
+    /// so we emit tightly-packed rows — 4-byte row padding (which mstsc expects) shears the image here.
     /// </summary>
     public static BitmapRect FramebufferRegionToRect(byte[] fb, int fbW, int x, int y, int w, int h)
     {
         int rowBytes = w * 2;
-        int pad = (4 - (rowBytes % 4)) % 4;
-        int stride = rowBytes + pad;
-        var data = new byte[stride * h];
+        var data = new byte[rowBytes * h];
         for (int row = 0; row < h; row++)
         {
             int srcRow = ((y + row) * fbW + x) * 4;           // top-down BGRX
-            int dstRow = (h - 1 - row) * stride;               // bottom-up 565
+            int dstRow = (h - 1 - row) * rowBytes;            // bottom-up 565
             for (int col = 0; col < w; col++)
             {
                 int s = srcRow + col * 4;                       // B,G,R,x

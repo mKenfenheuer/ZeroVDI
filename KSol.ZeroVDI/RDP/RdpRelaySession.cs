@@ -52,6 +52,9 @@ public sealed class RdpRelaySession
     /// its quality worker can open the matching /ws/rdp-quality/{sessionId} socket.</summary>
     public string? TrackedSessionId { get; set; }
 
+    /// <summary>Host keyboard layout, forwarded to the resolver (used by the VNC bridge to map scancodes).</summary>
+    public Models.KeyboardLayout KeyboardLayout { get; set; } = Models.KeyboardLayout.Us;
+
     // Micros so a torn read is impossible (Interlocked on a long); -1 = no sample yet/unreachable.
     private long _hostRttMicros = -1;
 
@@ -131,7 +134,7 @@ public sealed class RdpRelaySession
                 new RdpResolveRequest(_host, _port, creds,
                     _hostTransport ?? new DirectTcpTransport(_logger), _kerberos,
                     RequestedProtocols: 0x00000002 | 0x00000001 /* HYBRID | SSL */,
-                    RoutingToken: _routingToken, Logger: _logger),
+                    RoutingToken: _routingToken, Logger: _logger, KeyboardLayout: KeyboardLayout),
                 ct);
             if (_routingToken != null)
                 _logger.LogInformation("RDP relay: reconnected with redirection routing token ({Len}B)", _routingToken.Length);

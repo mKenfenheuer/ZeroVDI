@@ -6,11 +6,15 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **VNC bridge keyboard input (M4).** Browser key events (PC/AT set-1 scancodes) are mapped to X11
+  keysyms and forwarded as RFB KeyEvents — full US layout including letters, digits, punctuation,
+  modifiers (Shift/Ctrl/Alt/Meta), navigation, editing, function and keypad keys. Case and shifted
+  symbols are produced by the host from the forwarded Shift state, as RFB expects. The VNC bridge is now
+  fully interactive (screen + mouse + keyboard) over the bitmap path.
 - **VNC bridge is now live and mouse-interactive (M3).** The desktop updates continuously (RFB
   incremental-update loop) instead of showing a single static frame, and mouse input works: the browser's
   fastpath pointer events are decoded, mapped from the letterboxed session space back into the host's
-  native coordinates, and forwarded as RFB PointerEvents (left/middle/right buttons + wheel). Keyboard is
-  next (M4).
+  native coordinates, and forwarded as RFB PointerEvents (left/middle/right buttons + wheel).
 
 ### Changed
 - **VNC bridge now presents the browser-requested desktop size and letterbox-scales the host into it.**

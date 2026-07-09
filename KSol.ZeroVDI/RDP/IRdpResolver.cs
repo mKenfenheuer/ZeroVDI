@@ -35,4 +35,5 @@ public sealed record RdpResolveRequest(
     KerberosAuth? Kerberos,
     uint RequestedProtocols,
     byte[]? RoutingToken,
-    ILogger Logger);
+    ILogger Logger,
+    Models.KeyboardLayout KeyboardLayout = Models.KeyboardLayout.Us);

@@ -15,6 +15,7 @@ internal sealed class RdpEncoderSession
 {
     private readonly IProtocolSource _source;
     private readonly RdpServerFrontEnd _frontEnd;
+    private readonly KeysymMap _keymap;
     private readonly ILogger _logger;
 
     // Session-sized top-down 32bpp BGRX framebuffer (the letterboxed composition target). Sized once the
@@ -33,14 +34,17 @@ internal sealed class RdpEncoderSession
     private int _rfbButtons;
     private int _lastSrcX, _lastSrcY;
 
-    public RdpEncoderSession(IProtocolSource source, Stream serverSide, ILogger logger)
+    public RdpEncoderSession(IProtocolSource source, Stream serverSide, KeysymMap keymap, ILogger logger)
     {
         _source = source;
+        _keymap = keymap;
         _logger = logger;
         // Fallback size = source native size; overridden by the browser's requested size at handshake.
         _frontEnd = new RdpServerFrontEnd(serverSide, source.Width, source.Height, logger);
         _source.OnRectangle += OnSourceRectangle;
         _frontEnd.OnMouse += OnBrowserMouse;
+        _frontEnd.OnScancode += OnBrowserScancode;
+        _frontEnd.OnUnicode += OnBrowserUnicode;
     }
 
     /// <summary>
@@ -162,5 +166,46 @@ internal sealed class RdpEncoderSession
     {
         try { _source.PointerAsync(x, y, mask, CancellationToken.None).GetAwaiter().GetResult(); }
         catch (Exception ex) { _logger.LogDebug(ex, "VNC: pointer forward failed"); }
+    }
+
+    private bool _shiftDown;
+    // The keysym sent on key-DOWN for each (extended, scancode), so key-UP releases the SAME keysym even
+    // if Shift changed meanwhile — otherwise a symbol like '?' would stick down on the host.
+    private readonly Dictionary<int, uint> _downKeysym = new();
+
+    // A browser SCANCODE event → X11 keysym → RFB KeyEvent. We track Shift so symbol keys can send their
+    // exact shifted keysym directly (the host otherwise re-derives symbols under its own layout — the
+    // Shift+'/'→'-' bug). Left/Right Shift = scancodes 0x2A/0x36 (non-extended).
+    private void OnBrowserScancode(byte scancode, bool released, bool extended)
+    {
+        if (!extended && (scancode == 0x2A || scancode == 0x36)) _shiftDown = !released;
+        int slot = (extended ? 0x100 : 0) | scancode;
+        uint keysym;
+        if (released)
+        {
+            // Release the exact keysym we pressed; fall back to a fresh lookup if we never saw the down.
+            if (!_downKeysym.Remove(slot, out keysym))
+                keysym = _keymap.ScancodeToKeysym(scancode, extended, _shiftDown);
+        }
+        else
+        {
+            keysym = _keymap.ScancodeToKeysym(scancode, extended, _shiftDown);
+            if (keysym != 0) _downKeysym[slot] = keysym;
+        }
+        if (keysym != 0) ForwardKey(keysym, !released);
+    }
+
+    // The browser client sends only scancode events; a Unicode path is not used, but keep the hook so a
+    // future client that sends Unicode still types (Latin-1 direct / X11 Unicode keysym).
+    private void OnBrowserUnicode(ushort codeUnit, bool released)
+    {
+        uint keysym = codeUnit is >= 0x20 and <= 0xFF ? codeUnit : (0x01000000u | codeUnit);
+        if (keysym != 0) ForwardKey(keysym, !released);
+    }
+
+    private void ForwardKey(uint keysym, bool down)
+    {
+        try { _source.KeyAsync(keysym, down, CancellationToken.None).GetAwaiter().GetResult(); }
+        catch (Exception ex) { _logger.LogDebug(ex, "VNC: key forward failed"); }
     }
 }

@@ -45,7 +45,7 @@ public sealed class VncRdpResolver : IRdpResolver
         // 2) Hand the source to the shared RDP encoder over an in-memory duplex; the browser reads the
         // RDP stream from BrowserSide.
         var pipe = new DuplexPipeStream();
-        var encoder = new RdpEncoderSession(source, pipe.ServerSide, logger);
+        var encoder = new RdpEncoderSession(source, pipe.ServerSide, KeysymMap.For(request.KeyboardLayout), logger);
         var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
         _ = Task.Run(async () =>
