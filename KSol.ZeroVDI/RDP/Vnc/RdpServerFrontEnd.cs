@@ -14,8 +14,8 @@ namespace KSol.ZeroVDI.RDP.Vnc;
 internal sealed class RdpServerFrontEnd
 {
     private readonly Stream _s;
-    private readonly int _width;
-    private readonly int _height;
+    private int _width;    // session size — fixed from the browser's Connect-Initial at handshake time
+    private int _height;
     private readonly ILogger _logger;
 
     private int _userId = 1002;              // granted user channel (matches AttachUserConfirm)
@@ -24,11 +24,12 @@ internal sealed class RdpServerFrontEnd
     private int _joinsRemaining;
     private bool _active;
 
-    public RdpServerFrontEnd(Stream serverSide, int width, int height, ILogger logger)
+    /// <param name="fallbackWidth">Session size used only if the client's Connect-Initial omits a valid one.</param>
+    public RdpServerFrontEnd(Stream serverSide, int fallbackWidth, int fallbackHeight, ILogger logger)
     {
         _s = serverSide;
-        _width = width;
-        _height = height;
+        _width = fallbackWidth;
+        _height = fallbackHeight;
         _logger = logger;
     }
 
@@ -41,8 +42,15 @@ internal sealed class RdpServerFrontEnd
     /// <summary>Runs the handshake to ACTIVE. Returns when the client reaches the active phase.</summary>
     public async Task RunHandshakeAsync(CancellationToken ct)
     {
-        // 1) Connect-Initial → Connect-Response.
-        await ReadTpktAsync(ct); // client MCS Connect-Initial (contents irrelevant to us for MVP)
+        // 1) Connect-Initial → Connect-Response. The RDP session size is what the BROWSER requests here
+        // (its console window / device size); the source desktop is letterbox-scaled into it. Fall back to
+        // the ctor size only if the client omits a valid CS_CORE desktop size.
+        var connectInitial = await ReadTpktAsync(ct);
+        if (TryParseClientDesktopSize(connectInitial, out int reqW, out int reqH))
+        {
+            _width = reqW; _height = reqH;
+            _logger.LogInformation("VNC/RDP-server: client requested {W}x{H}", _width, _height);
+        }
         await SendRawAsync(RdpServerEncoders.TpktX224(
             RdpServerEncoders.ConnectResponse(IoChannelId, 0x00000001 /* PROTOCOL_SSL selected */,
                 Array.Empty<int>())), ct);
@@ -111,8 +119,10 @@ internal sealed class RdpServerFrontEnd
     /// </summary>
     private static IEnumerable<BitmapRect> BandRect(BitmapRect rect)
     {
-        int bytesPerRow = rect.Width * 2;
-        int maxRows = Math.Max(1, (RdpServerEncoders.MaxFastPathBody - 32) / Math.Max(1, bytesPerRow));
+        // The row stride may exceed Width*2 because rows are padded to a 4-byte multiple; derive it from
+        // the actual buffer so banding stays row-aligned regardless of padding.
+        int stride = rect.Height > 0 ? rect.Data.Length / rect.Height : rect.Width * 2;
+        int maxRows = Math.Max(1, (RdpServerEncoders.MaxFastPathBody - 32) / Math.Max(1, stride));
         if (rect.Height <= maxRows) { yield return rect; yield break; }
 
         // Walk top→bottom in destination space. Source data is bottom-up: the top-most destination row
@@ -122,8 +132,8 @@ internal sealed class RdpServerFrontEnd
         {
             int h = Math.Min(maxRows, rect.Height - y);
             int srcStartRow = rect.Height - (y + h);   // bottom-up index of this strip's first (bottom) row
-            var data = new byte[h * bytesPerRow];
-            Array.Copy(rect.Data, srcStartRow * bytesPerRow, data, 0, data.Length);
+            var data = new byte[h * stride];
+            Array.Copy(rect.Data, srcStartRow * stride, data, 0, data.Length);
             int top = rect.Top + y;
             // destRight/destBottom inclusive.
             yield return new BitmapRect(rect.Left, top, rect.Left + rect.Width - 1, top + h - 1, rect.Width, h, data);
@@ -162,6 +172,26 @@ internal sealed class RdpServerFrontEnd
     // The server's MCS initiator id when it originates Send-Data-Indications toward the client. The
     // client only reads it positionally; 1002 (our granted user) is conventional.
     private const int ServerInitiator = 1002;
+
+    /// <summary>
+    /// Scans a Connect-Initial PDU's bytes for the GCC CS_CORE block (0xC001) and reads the client's
+    /// requested desktopWidth/desktopHeight (u16le at block offset +8/+10). Mirrors macRDP's
+    /// parseClientDesktopSize. Returns false if not found / out of range.
+    /// </summary>
+    private static bool TryParseClientDesktopSize(ReadOnlySpan<byte> data, out int width, out int height)
+    {
+        for (int i = 0; i + 12 <= data.Length; i++)
+        {
+            if (data[i] == 0x01 && data[i + 1] == 0xC0) // CS_CORE header 0xC001 (LE on the wire: 01 C0)
+            {
+                int w = data[i + 8] | (data[i + 9] << 8);
+                int h = data[i + 10] | (data[i + 11] << 8);
+                if (w is >= 200 and <= 8192 && h is >= 200 and <= 8192) { width = w; height = h; return true; }
+            }
+        }
+        width = height = 0;
+        return false;
+    }
 
     /// <summary>Reads one complete TPKT (slow-path) PDU and returns its X.224 payload (past LI/code/EOT).</summary>
     private async Task<byte[]> ReadTpktAsync(CancellationToken ct)

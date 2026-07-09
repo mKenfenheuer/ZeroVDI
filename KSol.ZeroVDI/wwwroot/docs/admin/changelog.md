@@ -5,17 +5,39 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **VNC bridge now presents the browser-requested desktop size and letterbox-scales the host into it.**
+  Previously the RDP session was sized 1:1 to the VNC framebuffer (e.g. a 1920×1080 host filled a
+  1920×1080 session regardless of the console window). The shared encoder now reads the size the browser
+  requests in its MCS Connect-Initial and center-fits the host desktop into it, aspect-preserved, with
+  black letterbox bars — so the console fills its window and downscales large hosts.
+- **Introduced a protocol-source abstraction so the RDP encoder is shared across host protocols.** The
+  RDP server handshake, codecs, scaling and framing now live in a shared `RdpEncoderSession` driven by an
+  `IProtocolSource` (desktop pixels + input); VNC is one such source (`RfbClient`). Adding a new host
+  protocol no longer touches any RDP code — it implements `IProtocolSource`. (Audio/clipboard join the
+  interface when implemented.)
+
 ### Added
-- **VNC bridge — RDP server front-end (M1).** The VNC resolver now stands up a minimal in-gateway RDP
-  *server* over an in-memory pipe: it answers the browser client's connection sequence (MCS
-  Connect-Response → Attach-User/Channel-Join confirms → licensing → Demand-Active → finalization) and,
-  on reaching the active state, paints a solid-color frame via a legacy fastpath **bitmap** update
-  (16bpp RGB565). This proves the from-scratch server PDU encoders against the real client before any
-  RFB/VNC pixels are wired in (that is M2). VNC resources still can't reach a real host yet.
+- **VNC bridge supports macOS Screen Sharing (Apple Remote Desktop) authentication** — security type 30
+  (Diffie-Hellman + AES-128), in addition to standard VNC Authentication and None. Uses the resource's
+  stored username + password as the macOS login. (macOS hosts advertise `RFB 003.889` and only Apple
+  security types, which previously failed with "no supported security type".)
 
 ---
 
-## [0.6.18] — 2026-07-09 — Pluggable host-protocol resolvers (RDP seam + VNC groundwork)
+## [0.6.19] — 2026-07-09 — VNC bridge: live desktop over the bitmap path (M1+M2)
+
+### Added
+- **VNC resources now display the real remote desktop in the browser console.** The VNC resolver
+  connects to the host over RFB/VNC (VNC-Authentication or None; connector-tunnelled hosts supported),
+  reads the framebuffer, and bridges it to the unmodified browser RDP client by running a minimal
+  in-gateway RDP *server*: it answers the full connection sequence (MCS Connect-Response →
+  Attach-User/Channel-Join confirms → licensing → Demand-Active → finalization) and streams the
+  framebuffer as legacy fastpath **bitmap** updates (32bpp BGRX → 16bpp RGB565, bottom-up, banded into
+  ~15 KB SINGLE-fragment PDUs to match what a Windows host sends). Server encoders and framing were
+  cross-checked against the macRDP reference server. This is the first end-to-end VNC→RDP path; it shows
+  a static full frame — live incremental updates, mouse, and keyboard follow in the next releases, and
+  H.264/GFX + RemoteFX-Progressive/ClearCodec output after that.
 
 ### Added
 - **Resources now carry a `Protocol` (RDP or VNC).** A new per-resource protocol selects how the
