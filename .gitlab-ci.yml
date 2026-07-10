@@ -42,7 +42,7 @@ build_connector_image:
   stage: build
   rules:
     - changes:
-        - KSol.ZeroVDI.Desktop/**/*
+        - KSol.ZeroVDI.Connector/**/*
   tags:
     - docker
     - build
@@ -98,8 +98,10 @@ build_desktop_macos:
 # redeploys. The key never leaves the server (no key material in CI variables).
 .deploy_template: &deploy_template
   needs:
-    - build_amd64_image
-    - build_connector_image
+    - job: build_amd64_image
+      optional: true
+    - job: build_connector_image
+      optional: true
   stage: deploy
   allow_failure: false
   tags:
