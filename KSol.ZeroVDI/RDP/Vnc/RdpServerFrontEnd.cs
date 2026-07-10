@@ -23,6 +23,14 @@ internal sealed class RdpServerFrontEnd
     private uint _shareId = 0x000103EA;      // arbitrary but stable server share id
     private int _joinsRemaining;
     private bool _active;
+    private List<string> _channelNames = new();
+
+    /// <summary>MCS channel id granted to the client's "drdynvc" static channel, or 0 if not requested.
+    /// The GFX pipeline (MS-RDPEGFX) rides dynamic channels multiplexed over this.</summary>
+    public int DrdynvcChannelId { get; private set; }
+
+    /// <summary>Raised with the raw CHANNEL_PDU payload received on the drdynvc static channel.</summary>
+    public event Action<byte[]>? OnDrdynvcData;
 
     /// <param name="fallbackWidth">Session size used only if the client's Connect-Initial omits a valid one.</param>
     public RdpServerFrontEnd(Stream serverSide, int fallbackWidth, int fallbackHeight, ILogger logger)
@@ -51,10 +59,22 @@ internal sealed class RdpServerFrontEnd
             _width = reqW; _height = reqH;
             _logger.LogInformation("VNC/RDP-server: client requested {W}x{H}", _width, _height);
         }
+        // Parse the client's requested static virtual channels (CS_NET). We grant them positionally at
+        // ids 1003+idx (matching the client's expectation). drdynvc carries the GFX dynamic channels.
+        _channelNames = ParseClientChannels(connectInitial);
+        var channelIds = new List<int>();
+        for (int i = 0; i < _channelNames.Count; i++)
+        {
+            int id = IoChannelId + 1 + i; // 1003 is the I/O channel; static channels follow
+            channelIds.Add(id);
+            if (string.Equals(_channelNames[i], "drdynvc", StringComparison.OrdinalIgnoreCase))
+                DrdynvcChannelId = id;
+        }
         await SendRawAsync(RdpServerEncoders.TpktX224(
             RdpServerEncoders.ConnectResponse(IoChannelId, 0x00000001 /* PROTOCOL_SSL selected */,
-                Array.Empty<int>())), ct);
-        _logger.LogInformation("VNC/RDP-server: sent MCS Connect-Response");
+                channelIds)), ct);
+        _logger.LogInformation("VNC/RDP-server: sent MCS Connect-Response (channels: {Names}; drdynvc id={Dv})",
+            string.Join(",", _channelNames), DrdynvcChannelId);
 
         // 2) Erect-Domain (drop) then Attach-User-Request → Confirm.
         await ReadMcsDomainPduAsync(ct); // erect domain request
@@ -64,15 +84,16 @@ internal sealed class RdpServerFrontEnd
         await SendMcsDomainAsync(RdpServerEncoders.AttachUserConfirm(_userId), ct);
         _logger.LogInformation("VNC/RDP-server: sent Attach-User-Confirm (user {User})", _userId);
 
-        // 3) Channel joins: client joins [userId, ioChannel] (no static channels in MVP) — 2 joins.
-        _joinsRemaining = 2;
+        // 3) Channel joins: client joins [userId, ioChannel, ...staticChannels]. Confirm whatever channel
+        // the client actually requests (its exact id) so drdynvc etc. join cleanly.
+        _joinsRemaining = 2 + _channelNames.Count;
         while (_joinsRemaining > 0)
         {
             int ch = await ReadChannelJoinRequestAsync(ct);
             await SendMcsDomainAsync(RdpServerEncoders.ChannelJoinConfirm(_userId, ch), ct);
             _joinsRemaining--;
         }
-        _logger.LogInformation("VNC/RDP-server: channels joined");
+        _logger.LogInformation("VNC/RDP-server: {N} channels joined", 2 + _channelNames.Count);
 
         // 4) Client Info PDU (drop — VNC auth happened host-side, credentials irrelevant here).
         await ReadTpktAsync(ct);
@@ -202,6 +223,68 @@ internal sealed class RdpServerFrontEnd
         return false;
     }
 
+    /// <summary>
+    /// Scans a Connect-Initial for the GCC CS_NET block (0xC003) and returns the requested static virtual
+    /// channel names (8-byte, NUL-padded, then a 4-byte options field each). Mirrors macRDP's
+    /// parseConnectInitial.
+    /// </summary>
+    private static List<string> ParseClientChannels(ReadOnlySpan<byte> data)
+    {
+        for (int i = 0; i + 8 <= data.Length; i++)
+        {
+            if (data[i] == 0x03 && data[i + 1] == 0xC0) // CS_NET header 0xC003
+            {
+                int count = data[i + 4] | (data[i + 5] << 8) | (data[i + 6] << 16) | (data[i + 7] << 24);
+                if (count is > 0 and < 32)
+                {
+                    var names = new List<string>(count);
+                    int o = i + 8;
+                    for (int c = 0; c < count && o + 12 <= data.Length; c++)
+                    {
+                        int end = o;
+                        while (end < o + 8 && data[end] != 0) end++;
+                        names.Add(System.Text.Encoding.ASCII.GetString(data.Slice(o, end - o)));
+                        o += 12; // 8-byte name + 4-byte options
+                    }
+                    return names;
+                }
+            }
+        }
+        return new List<string>();
+    }
+
+    /// <summary>
+    /// Sends a virtual-channel payload on a static channel, wrapped in a Send-Data-Indication. The caller
+    /// supplies the raw channel payload (already carrying its CHANNEL_PDU_HEADER). Used for drdynvc.
+    /// </summary>
+    public Task SendOnChannelAsync(int channelId, byte[] channelPayload, CancellationToken ct)
+        => SendRawAsync(RdpServerEncoders.TpktX224(
+            RdpServerEncoders.McsSendDataIndication(ServerInitiator, channelId, channelPayload)), ct);
+
+    /// <summary>
+    /// Parses a slow-path X.224 Data payload (LI/0xF0/EOT + MCS Send-Data-Request) and, when it targets the
+    /// drdynvc channel, raises <see cref="OnDrdynvcData"/> with the embedded virtual-channel payload.
+    /// </summary>
+    private void RouteSlowPathChannel(ReadOnlySpan<byte> x224)
+    {
+        if (DrdynvcChannelId == 0 || OnDrdynvcData == null) return;
+        // x224: [0]=LI, [1]=0xF0, [2]=EOT, then MCS Send-Data-Request.
+        if (x224.Length < 3 + 6) return;
+        var mcs = x224[3..];
+        int o = 0;
+        int choice = mcs[o++];
+        if ((choice >> 2) != 25) return;                 // MCS_SEND_DATA_REQUEST
+        o += 2;                                           // initiator (PER integer16)
+        int channelId = (mcs[o] << 8) | mcs[o + 1]; o += 2; // channelId (PER integer16, 0-based)
+        o += 1;                                           // dataPriority/segmentation byte
+        // PER length (1 or 2 bytes).
+        int len = mcs[o++];
+        if ((len & 0x80) != 0) { len = ((len & 0x7f) << 8) | mcs[o++]; }
+        if (channelId != DrdynvcChannelId) return;
+        if (o > mcs.Length) return;
+        OnDrdynvcData(mcs[o..].ToArray());
+    }
+
     /// <summary>Reads one complete TPKT (slow-path) PDU and returns its X.224 payload (past LI/code/EOT).</summary>
     private async Task<byte[]> ReadTpktAsync(CancellationToken ct)
     {
@@ -240,10 +323,12 @@ internal sealed class RdpServerFrontEnd
 
         if (first[0] == 0x03)
         {
-            // Slow-path TPKT (virtual-channel / control PDUs) — consume and ignore.
+            // Slow-path TPKT: virtual-channel data (drdynvc → GFX) or control PDUs. Read the whole PDU and
+            // route drdynvc channel data to the DVC server; ignore the rest.
             var rest = await RdpHostConnection.ReadExactAsync(_s, 3, ct);
             int tlen = (rest[1] << 8) | rest[2];
-            if (tlen > 4) await RdpHostConnection.ReadExactAsync(_s, tlen - 4, ct);
+            var spBody = tlen > 4 ? await RdpHostConnection.ReadExactAsync(_s, tlen - 4, ct) : Array.Empty<byte>();
+            RouteSlowPathChannel(spBody);
             return true;
         }
 

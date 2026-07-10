@@ -6,6 +6,18 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **VNC bridge H.264/GFX output (M5).** When the browser advertises the GFX dynamic channel with an AVC
+  capset, the VNC bridge now negotiates MS-RDPEGFX and streams the desktop as **H.264 (AVC420/AVC444)**
+  over a server-side surface instead of legacy bitmaps — far better quality and bandwidth. The gateway
+  stands up the drdynvc dynamic-channel server, the RDPEGFX graphics server (caps confirm, surface
+  create/map, START/WIRE_TO_SURFACE_1/END frames, ZGFX raw segments), and encodes frames in real time
+  via a per-session **ffmpeg/libx264** subprocess (the image already ships ffmpeg). Codec is chosen from
+  what the client actually advertised; clients without AVC stay on the bitmap path. RemoteFX Progressive
+  negotiation is detected but its encoder lands in M6 (falls back to bitmap meanwhile). The DVC + GFX +
+  AVC420 wire code is ported from the macRDP reference server (its VideoToolbox encoder replaced by
+  ffmpeg for Linux).
+
+### Added
 - **VNC bridge keyboard input (M4).** Browser key events (PC/AT set-1 scancodes) are mapped to X11
   keysyms and forwarded as RFB KeyEvents — full US layout including letters, digits, punctuation,
   modifiers (Shift/Ctrl/Alt/Meta), navigation, editing, function and keypad keys. Case and shifted

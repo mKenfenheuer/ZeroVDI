@@ -11,12 +11,25 @@ namespace KSol.ZeroVDI.RDP.Vnc;
 /// This is the seam that lets new host protocols reuse all RDP/codec logic — a new protocol only writes
 /// an <see cref="IProtocolSource"/>.
 /// </summary>
-internal sealed class RdpEncoderSession
+internal sealed class RdpEncoderSession : IAsyncDisposable
 {
+    public async ValueTask DisposeAsync()
+    {
+        if (_h264 != null) await _h264.DisposeAsync();
+    }
+
     private readonly IProtocolSource _source;
     private readonly RdpServerFrontEnd _frontEnd;
     private readonly KeysymMap _keymap;
+    private readonly string _ffmpegPath;
     private readonly ILogger _logger;
+
+    // GFX / H.264 pipeline (engaged only when the browser advertises AVC over the GFX channel).
+    private DvcServer? _dvc;
+    private RdpGfxServer? _gfx;
+    private H264Encoder? _h264;
+    private volatile bool _gfxActive;   // true once AVC streaming is negotiated → stop bitmap output
+    private int _frameDirty;            // set when the framebuffer changed since the last H.264 encode
 
     // Session-sized top-down 32bpp BGRX framebuffer (the letterboxed composition target). Sized once the
     // RDP handshake fixes the browser-requested session size.
@@ -34,10 +47,11 @@ internal sealed class RdpEncoderSession
     private int _rfbButtons;
     private int _lastSrcX, _lastSrcY;
 
-    public RdpEncoderSession(IProtocolSource source, Stream serverSide, KeysymMap keymap, ILogger logger)
+    public RdpEncoderSession(IProtocolSource source, Stream serverSide, KeysymMap keymap, string ffmpegPath, ILogger logger)
     {
         _source = source;
         _keymap = keymap;
+        _ffmpegPath = ffmpegPath;
         _logger = logger;
         // Fallback size = source native size; overridden by the browser's requested size at handshake.
         _frontEnd = new RdpServerFrontEnd(serverSide, source.Width, source.Height, logger);
@@ -65,6 +79,10 @@ internal sealed class RdpEncoderSession
         _logger.LogInformation("VNC: session {SW}x{SH}, source {W}x{H} fit @({X},{Y}) {FW}x{FH}",
             _fbW, _fbH, _source.Width, _source.Height, _fit.x, _fit.y, _fit.w, _fit.h);
 
+        // Bring up the GFX/H.264 pipeline over drdynvc. If the browser advertises AVC we switch to H.264;
+        // otherwise the bitmap fastpath below keeps working. Negotiation runs asynchronously.
+        SetupGfx(ct);
+
         var sourcePump = _source.RunAsync(ct);
         await _source.RequestFullFrameAsync(ct);
 
@@ -72,7 +90,79 @@ internal sealed class RdpEncoderSession
         await FlushRegionAsync(0, 0, _fbW, _fbH, ct);
 
         var drain = DrainBrowserInputAsync(ct);
-        await Task.WhenAny(sourcePump, drain);
+        var frameClock = FrameClockAsync(ct);   // drives H.264 frames when GFX is active
+        await Task.WhenAny(sourcePump, drain, frameClock);
+    }
+
+    // ── GFX / H.264 ─────────────────────────────────────────────────────────────────────────────
+    private void SetupGfx(CancellationToken ct)
+    {
+        if (_frontEnd.DrdynvcChannelId == 0)
+        {
+            _logger.LogInformation("VNC: client did not request drdynvc — bitmap path only");
+            return;
+        }
+        // DVC over the drdynvc static channel. Its send callback wraps the drdynvc payload in a
+        // Send-Data-Indication on the drdynvc channel.
+        _dvc = new DvcServer(
+            payload => { try { _frontEnd.SendOnChannelAsync(_frontEnd.DrdynvcChannelId, payload, ct).GetAwaiter().GetResult(); } catch { } },
+            _logger);
+        _frontEnd.OnDrdynvcData += data => { try { _dvc!.HandleChannelChunk(data); } catch (Exception ex) { _logger.LogDebug(ex, "VNC: drdynvc handling failed"); } };
+
+        _gfx = new RdpGfxServer(_frontEnd.Width, _frontEnd.Height,
+            msg => { try { _dvc!.SendData(_gfxChannelId, msg); } catch { } }, _logger);
+        _gfx.OnActivated = () => OnGfxActivated(ct);
+
+        _dvc.Start();
+        // Open the Graphics dynamic channel; when the client accepts, route its data to the GFX server.
+        _gfxChannelId = _dvc.CreateChannel("Microsoft::Windows::RDS::Graphics",
+            onOpen: () => _logger.LogInformation("VNC: GFX channel open"),
+            onData: data => { try { _gfx!.OnChannelData(data); } catch (Exception ex) { _logger.LogDebug(ex, "VNC: GFX data failed"); } });
+    }
+
+    private uint _gfxChannelId;
+
+    private void OnGfxActivated(CancellationToken ct)
+    {
+        if (_gfx!.IsProgressive)
+        {
+            // RemoteFX Progressive is M6; we have no encoder yet, so stay on the bitmap path.
+            _logger.LogInformation("VNC: GFX negotiated Progressive — encoder not yet implemented (M6), staying on bitmap");
+            return;
+        }
+        // AVC420/444: stand up the ffmpeg H.264 encoder sized to the (even) session dimensions.
+        var enc = new H264Encoder(_frontEnd.Width, _frontEnd.Height, fps: 30, _ffmpegPath, _logger);
+        enc.OnFrame += annexB =>
+        {
+            try { if (_gfx!.CanSubmitFrame) _gfx.SubmitFrame(annexB); }
+            catch (Exception ex) { _logger.LogDebug(ex, "VNC: GFX submit failed"); }
+        };
+        try { enc.Start(); _h264 = enc; _gfxActive = true; _logger.LogInformation("VNC: switched to H.264/GFX output"); }
+        catch (Exception ex) { _logger.LogWarning(ex, "VNC: H.264 encoder failed to start; staying on bitmap"); }
+    }
+
+    // Encodes the session framebuffer to H.264 at a steady cadence whenever GFX is active and the frame
+    // changed since the last encode. H.264 needs whole frames (unlike the event-driven bitmap path).
+    private async Task FrameClockAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(33, ct); // ~30fps
+                if (!_gfxActive || _h264 == null) continue;
+                if (Interlocked.Exchange(ref _frameDirty, 0) == 0) continue;
+                if (!_gfx!.CanSubmitFrame) continue;
+                byte[] frame;
+                lock (_fbLock)
+                {
+                    if (_fb.Length == 0) continue;
+                    frame = (byte[])_fb.Clone();   // top-down BGRA, session-sized
+                }
+                await _h264.EncodeAsync(frame, ct);
+            }
+        }
+        catch (OperationCanceledException) { }
     }
 
     // A source rectangle arrived (native coords). Scale-blit it into the letterboxed session framebuffer,
@@ -96,7 +186,10 @@ internal sealed class RdpEncoderSession
             if (dw <= 0 || dh <= 0) return;
             PixelConvert.ScaleBlitBgrx(bgrx, w, h, _fb, _fbW, dx, dy, dw, dh);
         }
-        // Fire the bitmap update outside the lock (SendBitmap serializes on the pipe).
+        // When GFX/H.264 is active the frame clock encodes whole frames; just mark the framebuffer dirty
+        // and skip the legacy bitmap update (sending both would double-paint / fight the surface).
+        if (_gfxActive) { Interlocked.Exchange(ref _frameDirty, 1); return; }
+        // Otherwise the bitmap fastpath: emit the touched session region (outside the lock).
         FlushRegionAsync(dx, dy, dw, dh, CancellationToken.None).GetAwaiter().GetResult();
     }
 

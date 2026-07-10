@@ -12,6 +12,14 @@ namespace KSol.ZeroVDI.RDP.Vnc;
 /// </summary>
 public sealed class VncRdpResolver : IRdpResolver
 {
+    private readonly string _ffmpegPath;
+
+    public VncRdpResolver(IConfiguration config)
+    {
+        // Reuse the recording ffmpeg for real-time H.264 encoding of the GFX path.
+        _ffmpegPath = config["Recording:FfmpegPath"] ?? "ffmpeg";
+    }
+
     public async Task<RdpHostConnection.Connected> ConnectAsync(RdpResolveRequest request, CancellationToken ct)
     {
         var logger = request.Logger;
@@ -45,7 +53,7 @@ public sealed class VncRdpResolver : IRdpResolver
         // 2) Hand the source to the shared RDP encoder over an in-memory duplex; the browser reads the
         // RDP stream from BrowserSide.
         var pipe = new DuplexPipeStream();
-        var encoder = new RdpEncoderSession(source, pipe.ServerSide, KeysymMap.For(request.KeyboardLayout), logger);
+        var encoder = new RdpEncoderSession(source, pipe.ServerSide, KeysymMap.For(request.KeyboardLayout), _ffmpegPath, logger);
         var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
         _ = Task.Run(async () =>
@@ -53,7 +61,7 @@ public sealed class VncRdpResolver : IRdpResolver
             try { await encoder.RunAsync(cts.Token); }
             catch (OperationCanceledException) { }
             catch (Exception ex) { logger.LogWarning(ex, "VNC bridge ended with error"); }
-            finally { pipe.Complete(); await source.DisposeAsync(); }
+            finally { pipe.Complete(); await encoder.DisposeAsync(); await source.DisposeAsync(); }
         }, cts.Token);
 
         var disposer = new ActionDisposable(() =>
