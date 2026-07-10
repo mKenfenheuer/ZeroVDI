@@ -6,16 +6,24 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **VNC bridge RemoteFX Progressive output (M6).** Browsers that negotiate the GFX dynamic channel but
+  advertise **no AVC decoder** (so H.264 is unavailable) now get **RemoteFX Progressive** over the same
+  MS-RDPEGFX surface instead of dropping to legacy bitmaps. A pure-CPU progressive encoder (ported from
+  the macRDP reference: forward 3-level DWT, per-band quantization, LL3 differential, RLGR1 entropy
+  coding, and the `progressive-simple` wire framing the rdpweb `progressive.js` decoder consumes) encodes
+  64×64 tiles, sending only tiles whose pixels changed (per-tile hashing) and re-sending idle tiles at
+  successively finer quality until lossless (coarse-first / refine-when-idle). Frames are split across
+  self-contained WIRE_TO_SURFACE_2 streams under the client's per-PDU decode budget. Codec selection is
+  unchanged: AVC444 → AVC420 → **Progressive** → bitmap, honoring what the client advertises.
 - **VNC bridge H.264/GFX output (M5).** When the browser advertises the GFX dynamic channel with an AVC
   capset, the VNC bridge now negotiates MS-RDPEGFX and streams the desktop as **H.264 (AVC420/AVC444)**
   over a server-side surface instead of legacy bitmaps — far better quality and bandwidth. The gateway
   stands up the drdynvc dynamic-channel server, the RDPEGFX graphics server (caps confirm, surface
   create/map, START/WIRE_TO_SURFACE_1/END frames, ZGFX raw segments), and encodes frames in real time
   via a per-session **ffmpeg/libx264** subprocess (the image already ships ffmpeg). Codec is chosen from
-  what the client actually advertised; clients without AVC stay on the bitmap path. RemoteFX Progressive
-  negotiation is detected but its encoder lands in M6 (falls back to bitmap meanwhile). The DVC + GFX +
-  AVC420 wire code is ported from the macRDP reference server (its VideoToolbox encoder replaced by
-  ffmpeg for Linux).
+  what the client actually advertised; clients without AVC use RemoteFX Progressive (see M6), and clients
+  without any GFX channel stay on the bitmap path. The DVC + GFX + AVC420 wire code is ported from the
+  macRDP reference server (its VideoToolbox encoder replaced by ffmpeg for Linux).
 
 ### Added
 - **VNC bridge keyboard input (M4).** Browser key events (PC/AT set-1 scancodes) are mapped to X11

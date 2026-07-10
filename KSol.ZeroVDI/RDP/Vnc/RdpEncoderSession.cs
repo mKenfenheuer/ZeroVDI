@@ -28,7 +28,8 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     private DvcServer? _dvc;
     private RdpGfxServer? _gfx;
     private H264Encoder? _h264;
-    private volatile bool _gfxActive;   // true once AVC streaming is negotiated → stop bitmap output
+    private RfxProgressiveEncoder? _rfxProg;   // RemoteFX Progressive path (fallback for no-AVC clients)
+    private volatile bool _gfxActive;   // true once GFX streaming (AVC or progressive) is negotiated → stop bitmap output
     private int _frameDirty;            // set when the framebuffer changed since the last H.264 encode
 
     // Session-sized top-down 32bpp BGRX framebuffer (the letterboxed composition target). Sized once the
@@ -126,8 +127,13 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     {
         if (_gfx!.IsProgressive)
         {
-            // RemoteFX Progressive is M6; we have no encoder yet, so stay on the bitmap path.
-            _logger.LogInformation("VNC: GFX negotiated Progressive — encoder not yet implemented (M6), staying on bitmap");
+            // RemoteFX Progressive: the browser advertised no AVC decoder. Stand up the CPU progressive
+            // encoder, sized to the session; the frame clock drives it exactly like H.264 (whole-frame,
+            // change-detected internally). Reset() forces a full-frame first send against the fresh surface.
+            _rfxProg = new RfxProgressiveEncoder(_frontEnd.Width, _frontEnd.Height);
+            _rfxProg.Reset();
+            _gfxActive = true;
+            _logger.LogInformation("VNC: switched to RemoteFX Progressive/GFX output");
             return;
         }
         // AVC420/444: stand up the ffmpeg H.264 encoder sized to the (even) session dimensions.
@@ -150,8 +156,12 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
             while (!ct.IsCancellationRequested)
             {
                 await Task.Delay(33, ct); // ~30fps
-                if (!_gfxActive || _h264 == null) continue;
-                if (Interlocked.Exchange(ref _frameDirty, 0) == 0) continue;
+                if (!_gfxActive) continue;
+                bool progressive = _rfxProg != null;
+                // Progressive refines idle tiles over successive frames, so it must keep ticking even when
+                // the framebuffer is unchanged (until every tile reaches lossless). H.264 only encodes on
+                // change. Either way we need room in the GFX unacked window.
+                if (!progressive && Interlocked.Exchange(ref _frameDirty, 0) == 0) continue;
                 if (!_gfx!.CanSubmitFrame) continue;
                 byte[] frame;
                 lock (_fbLock)
@@ -159,6 +169,16 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
                     if (_fb.Length == 0) continue;
                     frame = (byte[])_fb.Clone();   // top-down BGRA, session-sized
                 }
+                if (progressive)
+                {
+                    // Consume the dirty flag so we don't spin; the encoder's own per-tile hashing decides
+                    // what actually changed and what to refine.
+                    Interlocked.Exchange(ref _frameDirty, 0);
+                    var streams = _rfxProg!.Encode(frame);
+                    if (streams.Count > 0) _gfx.SubmitProgressiveFrame(streams);
+                    continue;
+                }
+                if (_h264 == null) continue;
                 await _h264.EncodeAsync(frame, ct);
             }
         }

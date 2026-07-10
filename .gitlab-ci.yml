@@ -12,6 +12,9 @@ build_amd64_image:
       optional: true
     - job: build_desktop_macos
       optional: true
+  rules:
+    - changes:
+        - KSol.ZeroVDI/**/*
   tags:
     - docker
     - build
@@ -28,13 +31,18 @@ build_amd64_image:
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
     - docker build -t $CI_COMMIT_BRANCH .
     - docker image tag $CI_COMMIT_BRANCH $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+    - docker image tag $CI_COMMIT_BRANCH $CI_REGISTRY_IMAGE:latest
     - docker image push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+    - docker image push $CI_REGISTRY_IMAGE:latest
     - docker image prune -a
 
 # ZeroVDI connector agent image, published under the /connector path of the registry so it versions
 # alongside the gateway (same short-SHA tag).
 build_connector_image:
   stage: build
+  rules:
+    - changes:
+        - KSol.ZeroVDI.Desktop/**/*
   tags:
     - docker
     - build
@@ -42,7 +50,9 @@ build_connector_image:
   script:
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
     - docker build -f KSol.ZeroVDI.Connector/Dockerfile -t $CI_REGISTRY_IMAGE/connector:$CI_COMMIT_SHORT_SHA .
+    - docker build -f KSol.ZeroVDI.Connector/Dockerfile -t $CI_REGISTRY_IMAGE/connector:latest .
     - docker image push $CI_REGISTRY_IMAGE/connector:$CI_COMMIT_SHORT_SHA
+    - docker image push $CI_REGISTRY_IMAGE/connector:latest
     - docker image prune -a
 
 # Desktop client (Electron wrapper around the web console). Windows and Linux targets are built
@@ -98,8 +108,8 @@ build_desktop_macos:
     - no-gpu
   script:
     - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
-    - export APP_IMAGE=$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
-    - export CONNECTOR_IMAGE=$CI_REGISTRY_IMAGE/connector:$CI_COMMIT_SHORT_SHA
+    - export APP_IMAGE=$CI_REGISTRY_IMAGE:latest
+    - export CONNECTOR_IMAGE=$CI_REGISTRY_IMAGE/connector:latest
     - export COMPOSE_PROJECT="zerovdi"
     - export STACK_NAME="$COMPOSE_PROJECT"
     # Connector enrollment from PROTECTED/MASKED GitLab CI/CD variables (per environment). Supply
