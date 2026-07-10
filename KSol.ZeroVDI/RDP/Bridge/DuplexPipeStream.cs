@@ -1,6 +1,6 @@
 using System.Threading.Channels;
 
-namespace KSol.ZeroVDI.RDP.Vnc;
+namespace KSol.ZeroVDI.RDP.Bridge;
 
 /// <summary>
 /// An in-memory bidirectional pipe: two <see cref="Stream"/> endpoints where each one's writes appear on

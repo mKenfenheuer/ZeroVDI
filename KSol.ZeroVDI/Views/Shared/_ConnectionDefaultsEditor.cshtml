@@ -124,10 +124,7 @@
             <select class="form-select" name="@(console ? null : Name("GfxMode"))" id="@(console ? "opt-gfx-mode" : uid + "-gfx")">
                 <option value="off" selected="@(Model.GfxMode == "off")">Legacy bitmaps (most compatible)</option>
                 <option value="clearcodec" selected="@(Model.GfxMode == "clearcodec")">GFX — ClearCodec</option>
-                @if (console)
-                {
-                    <option value="progressive" selected="@(Model.GfxMode == "progressive")">GFX — RemoteFX Progressive</option>
-                }
+                <option value="progressive" selected="@(Model.GfxMode == "progressive")">GFX — RemoteFX Progressive</option>
                 <option value="avc420" selected="@(Model.GfxMode == "avc420")">GFX — H.264 (AVC420), fallback ClearCodec</option>
                 <option value="avc444" selected="@(Model.GfxMode == "avc444")">GFX — H.264 (AVC444), fallback ClearCodec</option>
             </select>

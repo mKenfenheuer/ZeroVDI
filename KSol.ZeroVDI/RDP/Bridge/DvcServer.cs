@@ -1,4 +1,4 @@
-namespace KSol.ZeroVDI.RDP.Vnc;
+namespace KSol.ZeroVDI.RDP.Bridge;
 
 /// <summary>
 /// Server side of MS-RDPEDYC dynamic virtual channels, multiplexed over the "drdynvc" static channel.

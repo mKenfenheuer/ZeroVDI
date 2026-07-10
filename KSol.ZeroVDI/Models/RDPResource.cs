@@ -27,6 +27,8 @@ public enum RdpProtocol
     Rdp = 0,
     /// <summary>VNC/RFB host, bridged to an RDP stream by the gateway.</summary>
     Vnc = 1,
+    /// <summary>SPICE host, bridged to an RDP stream by the gateway.</summary>
+    Spice = 2,
 }
 
 /// <summary>Keyboard layout used to interpret key events for protocols that need it (e.g. the VNC bridge,

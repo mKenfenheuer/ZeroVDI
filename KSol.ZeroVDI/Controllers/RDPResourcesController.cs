@@ -184,12 +184,26 @@ namespace KSol.ZeroVDI.Controllers
             {
                 existing.Name = input.Name;
                 existing.Description = input.Description;
+
+                // Protocol + keyboard layout are logical settings that apply to every source (a discovered
+                // Proxmox VM can be RDP/VNC/SPICE too). For Proxmox resources the host/port are otherwise
+                // machine-provisioned (readonly in the form), so when the protocol changes, retarget the
+                // port to that protocol's backend default (RDP 3389 / VNC 5900 / SPICE 5900) instead of
+                // leaving a stale port from the previous protocol.
+                var protocolChanged = existing.Protocol != input.Protocol;
+                existing.Protocol = input.Protocol;
+                existing.KeyboardLayout = input.KeyboardLayout;
+                if (existing.Source != ResourceSource.Manual && protocolChanged
+                    && existing.ProxmoxBackendId != null)
+                {
+                    var b = await _backends.GetAsync(existing.ProxmoxBackendId.Value);
+                    if (b != null) existing.Port = b.DefaultPortFor(input.Protocol);
+                }
+
                 if (existing.Source == ResourceSource.Manual)
                 {
                     existing.IpAddress = input.IpAddress;
                     existing.Port = input.Port;
-                    existing.Protocol = input.Protocol;
-                    existing.KeyboardLayout = input.KeyboardLayout;
                     existing.OsType = input.OsType;
                     existing.WakeMethod = input.WakeMethod;
                     existing.WolMacAddress = input.WolMacAddress;

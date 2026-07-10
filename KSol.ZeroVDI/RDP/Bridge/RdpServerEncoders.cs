@@ -1,6 +1,6 @@
 using System.Text;
 
-namespace KSol.ZeroVDI.RDP.Vnc;
+namespace KSol.ZeroVDI.RDP.Bridge;
 
 /// <summary>
 /// Server-side RDP PDU builders for the VNC→RDP bridge. These synthesize the PDUs the browser client

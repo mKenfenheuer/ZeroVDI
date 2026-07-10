@@ -234,6 +234,22 @@ public class VdiResourceResolver
 
 
 
+        // SPICE resources are reached through the node's spiceproxy, NOT the guest IP:port — so once the
+        // VM is running we're done: skip the guest-IP wait and RDP-port probe (a SPICE-only/headless VM
+        // may never expose a reachable IP or the SPICE port on the guest). The controller dials spiceproxy
+        // using the backend/node/VMID; the returned host is only a placeholder. Best-effort record any IP
+        // we can already see for the admin view.
+        if (res.Protocol == RdpProtocol.Spice)
+        {
+            var spiceIp = await _proxmox.GetGuestIpAsync(backend, node, vmid, ct);
+            Report(new ReadinessProgress(ReadinessPhase.Finalizing, "Finalizing connection…"));
+            if (!string.IsNullOrEmpty(spiceIp)) res.IpAddress = spiceIp;
+            res.PowerState = ResourcePowerState.Running;
+            await db.SaveChangesAsync(ct);
+            _logger.LogInformation("Resolve: SPICE {Resource} on {Node}/{VmId} running (via spiceproxy)", resource, node, vmid);
+            return Ready(spiceIp ?? node, port);
+        }
+
         // Wait for the guest agent to report an IP, then for the RDP port to accept connections,
         // bounded by the backend's configured start timeout.
         deadline = DateTime.UtcNow.AddSeconds(Math.Max(60, backend.StartTimeoutSeconds));

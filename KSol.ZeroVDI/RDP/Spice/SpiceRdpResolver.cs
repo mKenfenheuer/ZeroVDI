@@ -1,20 +1,22 @@
-namespace KSol.ZeroVDI.RDP.Vnc;
+using KSol.ZeroVDI.RDP.Bridge;
+
+namespace KSol.ZeroVDI.RDP.Spice;
 
 /// <summary>
-/// The VNC host protocol, plugged into the shared RDP encoder. This resolver is now thin: it constructs
-/// the VNC <see cref="IProtocolSource"/> (<see cref="RfbClient"/>), connects it, and hands it to the
-/// shared <see cref="RdpEncoderSession"/> which owns all RDP-server + codec + scaling logic.
+/// The SPICE host protocol, plugged into the shared RDP encoder. Like <see cref="VncRdpResolver"/> this
+/// resolver is thin: it constructs the SPICE <see cref="IProtocolSource"/> (<see cref="SpiceClient"/>),
+/// connects it, and hands it to the shared <see cref="RdpEncoderSession"/> which owns all RDP-server +
+/// codec + scaling logic.
 ///
-///   RfbClient (IProtocolSource) → RdpEncoderSession (shared) → DuplexPipeStream → RdpRelaySession → web
+///   SpiceClient (IProtocolSource) → RdpEncoderSession (shared) → DuplexPipeStream → RdpRelaySession → web
 ///
-/// Adding another host protocol (SPICE, …) means writing a new <see cref="IProtocolSource"/> and a
-/// one-line resolver like this — no RDP knowledge required.
+/// The only host-protocol-specific code is <see cref="SpiceClient"/> and its channels — no RDP knowledge.
 /// </summary>
-public sealed class VncRdpResolver : IRdpResolver
+public sealed class SpiceRdpResolver : IRdpResolver
 {
     private readonly string _ffmpegPath;
 
-    public VncRdpResolver(IConfiguration config)
+    public SpiceRdpResolver(IConfiguration config)
     {
         // Reuse the recording ffmpeg for real-time H.264 encoding of the GFX path.
         _ffmpegPath = config["Recording:FfmpegPath"] ?? "ffmpeg";
@@ -24,10 +26,18 @@ public sealed class VncRdpResolver : IRdpResolver
     {
         var logger = request.Logger;
 
-        // 1) Build + connect the VNC source (RFB handshake + auth). Runs synchronously so we surface auth/
-        // reachability failures as a ConnectException before the browser session is handed a stream.
-        var source = new RfbClient(request.Transport, request.Host, request.Port,
-            request.Creds.user, request.Creds.password, logger);
+        // 1) Build + connect the SPICE source (link handshake + ticket auth + wait for the primary
+        // surface). Runs synchronously so we surface auth/reachability failures as a ConnectException
+        // before the browser session is handed a stream.
+        //
+        // Proxmox spiceproxy: each SPICE channel rides its OWN freshly-fetched single-use ticket, so the
+        // SPICE auth password must come from the tunnel the channel just dialed — the transport exposes it
+        // as LastTicketPassword. Direct SPICE uses request.Creds.password for every channel.
+        Func<string?>? passwordProvider = request.Transport is SpiceProxyTransport spt
+            ? () => spt.LastTicketPassword
+            : null;
+        var source = new SpiceClient(request.Transport, request.Host, request.Port,
+            request.Creds.user, request.Creds.password, logger, passwordProvider);
         try
         {
             await source.ConnectAsync(ct);
@@ -40,14 +50,14 @@ public sealed class VncRdpResolver : IRdpResolver
         catch (Exception ex)
         {
             await source.DisposeAsync();
-            logger.LogWarning(ex, "VNC: source connect failed");
-            throw new RdpHostConnection.ConnectException("VNC handshake failed");
+            logger.LogWarning(ex, "SPICE: source connect failed");
+            throw new RdpHostConnection.ConnectException("SPICE handshake failed");
         }
 
         if (source.Width <= 0 || source.Height <= 0)
         {
             await source.DisposeAsync();
-            throw new RdpHostConnection.ConnectException("VNC server reported an invalid framebuffer size");
+            throw new RdpHostConnection.ConnectException("SPICE server reported an invalid display size");
         }
 
         // 2) Hand the source to the shared RDP encoder over an in-memory duplex; the browser reads the
@@ -60,7 +70,7 @@ public sealed class VncRdpResolver : IRdpResolver
         {
             try { await encoder.RunAsync(cts.Token); }
             catch (OperationCanceledException) { }
-            catch (Exception ex) { logger.LogWarning(ex, "VNC bridge ended with error"); }
+            catch (Exception ex) { logger.LogWarning(ex, "SPICE bridge ended with error"); }
             finally { pipe.Complete(); await encoder.DisposeAsync(); await source.DisposeAsync(); }
         }, cts.Token);
 

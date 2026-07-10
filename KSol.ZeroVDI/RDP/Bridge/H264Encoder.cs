@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-namespace KSol.ZeroVDI.RDP.Vnc;
+namespace KSol.ZeroVDI.RDP.Bridge;
 
 /// <summary>
 /// Real-time H.264 encoder for the RDPEGFX AVC420 path, backed by a per-session <c>ffmpeg</c>/libx264
@@ -67,7 +67,7 @@ internal sealed class H264Encoder : IAsyncDisposable
         }) psi.ArgumentList.Add(a);
 
         _proc = Process.Start(psi) ?? throw new InvalidOperationException("failed to start ffmpeg");
-        _logger.LogInformation("VNC/H264: ffmpeg encoder started {W}x{H}@{F}", _width, _height, _fps);
+        _logger.LogInformation("Bridge/H264: ffmpeg encoder started {W}x{H}@{F}", _width, _height, _fps);
         _ = DrainStderrAsync(_proc);
         _readTask = ReadAnnexBAsync(_proc);
     }
@@ -79,7 +79,7 @@ internal sealed class H264Encoder : IAsyncDisposable
         if (p == null || p.HasExited) return;
         if (bgra.Length != _frameBytes) return;   // wrong geometry; skip
         try { await p.StandardInput.BaseStream.WriteAsync(bgra, ct); await p.StandardInput.BaseStream.FlushAsync(ct); }
-        catch (Exception ex) { _logger.LogDebug(ex, "VNC/H264: encode write failed"); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Bridge/H264: encode write failed"); }
     }
 
     // Reads Annex-B from ffmpeg stdout and splits it into access units, emitting one per frame. libx264 at
@@ -105,7 +105,7 @@ internal sealed class H264Encoder : IAsyncDisposable
                 FlushCompleteFrames(acc);
             }
         }
-        catch (Exception ex) { _logger.LogDebug(ex, "VNC/H264: reader ended"); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Bridge/H264: reader ended"); }
         // Emit any trailing AU.
         if (acc.Count > 0) OnFrame?.Invoke(acc.ToArray());
     }
@@ -157,7 +157,7 @@ internal sealed class H264Encoder : IAsyncDisposable
             // Only emit AUs that actually contain a VCL slice; skip parameter-set-only or stub fragments.
             if (HasVcl(frame))
             {
-                if (_logNal) _logger.LogInformation("VNC/H264: emit AU {N}B, NALs=[{Nals}]", frame.Length, NalTypes(frame));
+                if (_logNal) _logger.LogInformation("Bridge/H264: emit AU {N}B, NALs=[{Nals}]", frame.Length, NalTypes(frame));
                 OnFrame?.Invoke(frame);
             }
             data.RemoveRange(0, cut);                    // loop again in case several AUs are buffered
@@ -197,7 +197,7 @@ internal sealed class H264Encoder : IAsyncDisposable
         {
             string? line;
             while ((line = await p.StandardError.ReadLineAsync()) != null)
-                _logger.LogDebug("VNC/H264 ffmpeg: {Line}", line);
+                _logger.LogDebug("Bridge/H264 ffmpeg: {Line}", line);
         }
         catch { }
     }

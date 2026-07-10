@@ -1,5 +1,6 @@
 using KSol.ZeroVDI.Models;
-using KSol.ZeroVDI.RDP.Vnc;
+using KSol.ZeroVDI.RDP.Bridge;
+using KSol.ZeroVDI.RDP.Spice;
 
 namespace KSol.ZeroVDI.RDP;
 
@@ -14,16 +15,19 @@ public sealed class RdpResolverFactory : IRdpResolverFactory
 {
     private readonly NlaRdpResolver _nla;
     private readonly VncRdpResolver _vnc;
+    private readonly SpiceRdpResolver _spice;
 
-    public RdpResolverFactory(NlaRdpResolver nla, VncRdpResolver vnc)
+    public RdpResolverFactory(NlaRdpResolver nla, VncRdpResolver vnc, SpiceRdpResolver spice)
     {
         _nla = nla;
         _vnc = vnc;
+        _spice = spice;
     }
 
     public IRdpResolver For(RdpProtocol protocol) => protocol switch
     {
         RdpProtocol.Vnc => _vnc,
+        RdpProtocol.Spice => _spice,
         _ => _nla,
     };
 }

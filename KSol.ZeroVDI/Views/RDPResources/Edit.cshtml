@@ -79,6 +79,7 @@
                     <select name="Protocol" class="form-select">
                         <option value="0" selected="@(r.Protocol == RdpProtocol.Rdp)">RDP (native)</option>
                         <option value="1" selected="@(r.Protocol == RdpProtocol.Vnc)">VNC (bridged)</option>
+                        <option value="2" selected="@(r.Protocol == RdpProtocol.Spice)">SPICE (bridged)</option>
                     </select>
                 </div>
                 <div>

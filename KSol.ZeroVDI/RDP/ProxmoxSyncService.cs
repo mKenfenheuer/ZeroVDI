@@ -130,17 +130,35 @@ public class ProxmoxSyncService : BackgroundService
 
             if (res == null)
             {
-                // First time we see this VM: create a row.
+                // First time we see this VM in our DB. If the VM notes already carry a stamped gateway id
+                // (e.g. the row was deleted but the VM was never un-stamped, or the DB was restored),
+                // ADOPT that id so the VM keeps its identity — never mint a fresh GUID over a stamped one.
                 res = new RDPResource
                 {
                     Source = ResourceSource.Proxmox,
                     ProxmoxBackendId = backend.Id,
-                    Port = backend.DefaultRdpPort,
                 };
+                if (!string.IsNullOrWhiteSpace(id)) res.Id = id!;
+
+                // Auto-pick a sensible default protocol from the VM's display adapter + guest OS — ONLY at
+                // first discovery (all later syncs preserve whatever the admin/previous run set). A SPICE-
+                // capable display (qxl / virtio-gpu / virtio-gl) → SPICE. Otherwise Windows guests → RDP,
+                // everything else → VNC (the common "any other OS over the bridge" case).
+                var (vga, ostype) = await _proxmox.GetDisplayInfoAsync(backend, vm.Node, vm.VmId, ct);
+                if (ProxmoxClient.IsSpiceVga(vga))
+                    res.Protocol = RdpProtocol.Spice;
+                else if (ProxmoxClient.IsWindowsOsType(ostype))
+                    res.Protocol = RdpProtocol.Rdp;
+                else
+                    res.Protocol = RdpProtocol.Vnc;
+                if (ProxmoxClient.IsWindowsOsType(ostype)) res.OsType = OsType.Windows;
+                // Port follows the chosen protocol's backend default.
+                res.Port = backend.DefaultPortFor(res.Protocol);
+
                 db.RDPResources.Add(res);
-                await db.SaveChangesAsync(ct); // materialize the GUID
-                _logger.LogInformation("Proxmox sync[{Backend}]: discovered VM {VmId} on {Node} -> {Id}",
-                    backend.Name, vm.VmId, vm.Node, res.Id);
+                await db.SaveChangesAsync(ct); // materialize the row
+                _logger.LogInformation("Proxmox sync[{Backend}]: discovered VM {VmId} on {Node} -> {Id} (vga={Vga} os={Os} protocol={Proto})",
+                    backend.Name, vm.VmId, vm.Node, res.Id, vga ?? "std", ostype ?? "?", res.Protocol);
             }
 
             // Ensure the VM notes carry this resource's id (durable binding that survives migration
@@ -152,16 +170,23 @@ public class ProxmoxSyncService : BackgroundService
                 if (ok) notes = stamped;
             }
 
-            // Refresh mutable data. Node and backend are updated every time so a migrated VM
-            // (or a row created against the wrong node) self-heals to the current location.
+            // Refresh location/binding data every time: a migrated VM (or a row created against the wrong
+            // node) self-heals to the current node/backend. These are not admin-editable.
             res.ProxmoxBackendId = backend.Id;
             res.ProxmoxNode = vm.Node;
             res.ProxmoxVmId = vm.VmId;
-            res.Name = string.IsNullOrWhiteSpace(vm.Name) ? $"vm-{vm.VmId}" : vm.Name;
             res.ConfigJson = notes;
 
-            var desc = ProxmoxNotes.ReadDescription(notes);
-            if (desc != null) res.Description = desc;
+            // Name/Description are admin-editable — only seed them on FIRST discovery (when empty), never
+            // clobber an admin's edits on re-sync. Protocol and Port are likewise preserved (only defaulted
+            // on the create path above), so a discovered VM the admin flips to VNC/SPICE keeps that setting.
+            if (string.IsNullOrWhiteSpace(res.Name))
+                res.Name = string.IsNullOrWhiteSpace(vm.Name) ? $"vm-{vm.VmId}" : vm.Name;
+            if (string.IsNullOrWhiteSpace(res.Description))
+            {
+                var desc = ProxmoxNotes.ReadDescription(notes);
+                if (desc != null) res.Description = desc;
+            }
 
             // Refresh the guest IP while the VM is up so the status probe loop (ResourceStatusService)
             // and connect-time resolve have a current address. Power state itself is owned by that loop.

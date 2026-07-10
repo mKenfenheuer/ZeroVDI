@@ -1,6 +1,6 @@
 using System.Runtime.CompilerServices;
 
-namespace KSol.ZeroVDI.RDP.Vnc;
+namespace KSol.ZeroVDI.RDP.Bridge;
 
 /// <summary>
 /// RemoteFX Progressive (RDPGFX_CODECID_CAPROGRESSIVE 0x0009) encoder for the RDPEGFX pipeline — the

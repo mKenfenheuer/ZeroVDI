@@ -1,6 +1,6 @@
 using KSol.ZeroVDI.Models;
 
-namespace KSol.ZeroVDI.RDP.Vnc;
+namespace KSol.ZeroVDI.RDP.Bridge;
 
 /// <summary>
 /// Maps browser RDP keyboard events (PC/AT set-1 scancodes, which are layout-INDEPENDENT physical key

@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 
-namespace KSol.ZeroVDI.RDP.Vnc;
+namespace KSol.ZeroVDI.RDP.Bridge;
 
 /// <summary>
 /// A minimal RFB (VNC) 3.8 client — just enough for the VNC→RDP bridge: version handshake, VNC
@@ -32,6 +32,9 @@ internal sealed class RfbClient : IProtocolSource
 
     /// <summary>Raised for each decoded rectangle: (x, y, w, h, top-down 32bpp BGRX pixels).</summary>
     public event Action<int, int, int, int, byte[]>? OnRectangle;
+
+    /// <summary>Not raised yet — VNC DesktopSize pseudo-encoding (mid-session resize) is deferred.</summary>
+    public event Action<int, int>? OnGeometryChanged;
 
     public RfbClient(IHostTransport transport, string host, int port, string? user, string? password, ILogger logger)
     {

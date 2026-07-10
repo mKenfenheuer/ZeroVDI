@@ -1,7 +1,7 @@
-namespace KSol.ZeroVDI.RDP.Vnc;
+namespace KSol.ZeroVDI.RDP.Bridge;
 
 /// <summary>
-/// The <b>shared RDP encoder</b>: drives any <see cref="IProtocolSource"/> (VNC today) into the browser
+/// The <b>shared RDP encoder</b>: drives any <see cref="IProtocolSource"/> (VNC or SPICE) into the browser
 /// RDP client, independent of the source protocol. It owns the RDP server handshake
 /// (<see cref="RdpServerFrontEnd"/>), presents the browser-requested desktop size, and letterbox-scales
 /// the source's native desktop into that size, emitting RDP output (bitmap today; H.264/GFX etc. later).
@@ -57,6 +57,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         // Fallback size = source native size; overridden by the browser's requested size at handshake.
         _frontEnd = new RdpServerFrontEnd(serverSide, source.Width, source.Height, logger);
         _source.OnRectangle += OnSourceRectangle;
+        _source.OnGeometryChanged += OnSourceGeometryChanged;
         _frontEnd.OnMouse += OnBrowserMouse;
         _frontEnd.OnScancode += OnBrowserScancode;
         _frontEnd.OnUnicode += OnBrowserUnicode;
@@ -77,12 +78,16 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
             _fb = new byte[_fbW * _fbH * 4]; // opaque black (BGRX, x=0) — the letterbox bars
             _fit = PixelConvert.Letterbox(_source.Width, _source.Height, _fbW, _fbH);
         }
-        _logger.LogInformation("VNC: session {SW}x{SH}, source {W}x{H} fit @({X},{Y}) {FW}x{FH}",
+        _logger.LogInformation("Bridge: session {SW}x{SH}, source {W}x{H} fit @({X},{Y}) {FW}x{FH}",
             _fbW, _fbH, _source.Width, _source.Height, _fit.x, _fit.y, _fit.w, _fit.h);
 
         // Bring up the GFX/H.264 pipeline over drdynvc. If the browser advertises AVC we switch to H.264;
         // otherwise the bitmap fastpath below keeps working. Negotiation runs asynchronously.
         SetupGfx(ct);
+
+        // Ask the source to match the browser's session size 1:1 from the start (no letterbox scaling).
+        // Best-effort — sources without a resizable guest ignore it and we keep the letterbox above.
+        try { await _source.RequestResizeAsync(_fbW, _fbH, ct); } catch (Exception ex) { _logger.LogDebug(ex, "Bridge: initial resize request failed"); }
 
         var sourcePump = _source.RunAsync(ct);
         await _source.RequestFullFrameAsync(ct);
@@ -100,7 +105,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     {
         if (_frontEnd.DrdynvcChannelId == 0)
         {
-            _logger.LogInformation("VNC: client did not request drdynvc — bitmap path only");
+            _logger.LogInformation("Bridge: client did not request drdynvc — bitmap path only");
             return;
         }
         // DVC over the drdynvc static channel. Its send callback wraps the drdynvc payload in a
@@ -108,7 +113,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         _dvc = new DvcServer(
             payload => { try { _frontEnd.SendOnChannelAsync(_frontEnd.DrdynvcChannelId, payload, ct).GetAwaiter().GetResult(); } catch { } },
             _logger);
-        _frontEnd.OnDrdynvcData += data => { try { _dvc!.HandleChannelChunk(data); } catch (Exception ex) { _logger.LogDebug(ex, "VNC: drdynvc handling failed"); } };
+        _frontEnd.OnDrdynvcData += data => { try { _dvc!.HandleChannelChunk(data); } catch (Exception ex) { _logger.LogDebug(ex, "Bridge: drdynvc handling failed"); } };
 
         _gfx = new RdpGfxServer(_frontEnd.Width, _frontEnd.Height,
             msg => { try { _dvc!.SendData(_gfxChannelId, msg); } catch { } }, _logger);
@@ -117,11 +122,134 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         _dvc.Start();
         // Open the Graphics dynamic channel; when the client accepts, route its data to the GFX server.
         _gfxChannelId = _dvc.CreateChannel("Microsoft::Windows::RDS::Graphics",
-            onOpen: () => _logger.LogInformation("VNC: GFX channel open"),
-            onData: data => { try { _gfx!.OnChannelData(data); } catch (Exception ex) { _logger.LogDebug(ex, "VNC: GFX data failed"); } });
+            onOpen: () => _logger.LogInformation("Bridge: GFX channel open"),
+            onData: data => { try { _gfx!.OnChannelData(data); } catch (Exception ex) { _logger.LogDebug(ex, "Bridge: GFX data failed"); } });
+
+        // Open the DisplayControl channel (MS-RDPEDISP). The browser sends MONITOR_LAYOUT on it to tell us
+        // the resolution it wants; we relay that to the source (guest resize). We must send the CAPS PDU
+        // first so the client marks the channel active and starts sending layouts.
+        _dispChannelId = _dvc.CreateChannel(DisplayControlChannelName,
+            onOpen: () => { try { SendDisplayControlCaps(); } catch (Exception ex) { _logger.LogDebug(ex, "Bridge: RDPEDISP caps failed"); } },
+            onData: data => { try { OnDisplayControlData(data); } catch (Exception ex) { _logger.LogDebug(ex, "Bridge: RDPEDISP data failed"); } });
     }
 
     private uint _gfxChannelId;
+    private uint _dispChannelId;
+    private const string DisplayControlChannelName = "Microsoft::Windows::RDS::DisplayControl";
+
+    // MS-RDPEDISP PDU types.
+    private const uint DISPLAYCONTROL_PDU_TYPE_CAPS = 0x00000005;
+    private const uint DISPLAYCONTROL_PDU_TYPE_MONITOR_LAYOUT = 0x00000002;
+
+    // Sends DISPLAYCONTROL_CAPS: header(type,length) + maxNumMonitors, maxMonitorAreaFactorA/B. Advertising
+    // caps marks the channel active on the client, unlocking its MONITOR_LAYOUT sends.
+    private void SendDisplayControlCaps()
+    {
+        var body = new W();
+        body.U32le(1);          // maxNumMonitors
+        body.U32le(8192);       // maxMonitorAreaFactorA
+        body.U32le(8192);       // maxMonitorAreaFactorB
+        var b = body.ToArray();
+        var pdu = new W();
+        pdu.U32le(DISPLAYCONTROL_PDU_TYPE_CAPS);
+        pdu.U32le((uint)(8 + b.Length));
+        pdu.Bytes(b);
+        _dvc!.SendData(_dispChannelId, pdu.ToArray());
+        _logger.LogInformation("Bridge: RDPEDISP caps sent");
+    }
+
+    // Parses a DISPLAYCONTROL_MONITOR_LAYOUT_PDU from the client and relays the requested primary-monitor
+    // size to the source. [MS-RDPEDISP] 2.2.2.2: header(type,length), MonitorLayoutSize u32(=40),
+    // NumMonitors u32, then per-monitor: Flags, Left, Top, Width, Height, ... (we take monitor 0's W/H).
+    private void OnDisplayControlData(byte[] data)
+    {
+        if (data.Length < 8) return;
+        var r = new Cur(data);
+        uint type = r.U32le();
+        r.U32le();  // length
+        if (type != DISPLAYCONTROL_PDU_TYPE_MONITOR_LAYOUT) return;
+        if (r.Remaining < 8) return;
+        r.U32le();                       // MonitorLayoutSize (40)
+        uint numMon = r.U32le();
+        if (numMon == 0 || r.Remaining < 40) return;
+        r.U32le();                       // Flags
+        r.U32le(); r.U32le();            // Left, Top
+        int w = (int)r.U32le();
+        int h = (int)r.U32le();
+        if (w <= 0 || h <= 0) return;
+        _logger.LogInformation("Bridge: client requested resolution {W}x{H} (MONITOR_LAYOUT)", w, h);
+        // Relay to the source; a successful guest resize returns via OnGeometryChanged → ResizeSession.
+        try { _source.RequestResizeAsync(w, h, CancellationToken.None).GetAwaiter().GetResult(); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Bridge: resize request failed"); }
+    }
+
+    // The source's native desktop changed size (e.g. SPICE guest re-created its surface). Two things must
+    // update: (1) the letterbox mapping `_fit` — ALWAYS, since the source dimensions changed; when the
+    // source now matches the session this makes `_fit` identity (no bars). (2) the session/GFX surface — only
+    // if we want the session to follow the source (we drove the guest to the session size, so they usually
+    // match already and no GFX rebuild is needed). Recompute the fit first, then resize the session if the
+    // source size differs from it.
+    private void OnSourceGeometryChanged(int w, int h)
+    {
+        try
+        {
+            int targetW = w & ~1, targetH = h & ~1;
+            bool sessionChanged;
+            lock (_fbLock)
+            {
+                sessionChanged = targetW != _fbW || targetH != _fbH;
+                if (!sessionChanged)
+                {
+                    // Session unchanged (source now matches it): just refresh the fit — it becomes identity
+                    // for a 1:1 source, clearing the stale letterbox bars from the initial mismatched size.
+                    _fit = PixelConvert.Letterbox(_source.Width, _source.Height, _fbW, _fbH);
+                    // Repaint the whole framebuffer black first so any old letterbox bars are overwritten,
+                    // then the source's next full frame fills the (now full-bleed) fit region.
+                    Array.Clear(_fb, 0, _fb.Length);
+                }
+            }
+            if (sessionChanged) { ResizeSession(targetW, targetH); return; }
+            _logger.LogInformation("Bridge: source resized to {W}x{H}; fit @({X},{Y}) {FW}x{FH} (session {SW}x{SH})",
+                w, h, _fit.x, _fit.y, _fit.w, _fit.h, _fbW, _fbH);
+            _ = _source.RequestFullFrameAsync(CancellationToken.None);
+            Interlocked.Exchange(ref _frameDirty, 1);
+        }
+        catch (Exception ex) { _logger.LogWarning(ex, "Bridge: source resize handling failed"); }
+    }
+
+    // Resize the whole output chain to a new session size. Runs the RDP client through a GFX
+    // RESET_GRAPHICS + surface recreate (its canvas follows), rebuilds the letterbox framebuffer (now 1:1),
+    // and restarts the H.264 encoder at the new dimensions.
+    private void ResizeSession(int newW, int newH)
+    {
+        newW &= ~1; newH &= ~1; // even dims for H.264/GFX
+        if (newW <= 0 || newH <= 0) return;
+        lock (_fbLock)
+        {
+            if (newW == _fbW && newH == _fbH) return;
+            _fbW = newW; _fbH = newH;
+            _fb = new byte[_fbW * _fbH * 4];
+            _fit = PixelConvert.Letterbox(_source.Width, _source.Height, _fbW, _fbH);
+        }
+        _frontEnd.SetSize(newW, newH);
+        _logger.LogInformation("Bridge: resized session to {W}x{H}, source {SW}x{SH} fit @({X},{Y}) {FW}x{FH}",
+            newW, newH, _source.Width, _source.Height, _fit.x, _fit.y, _fit.w, _fit.h);
+
+        // Rebuild the GFX surface at the new size (RESET_GRAPHICS + DELETE/CREATE/MAP → client canvas follows).
+        _gfx?.Resize(newW, newH);
+
+        // Restart the H.264 encoder sized to the new surface (progressive re-sizes itself on next Encode).
+        if (_h264 != null)
+        {
+            var old = _h264;
+            _ = old.DisposeAsync();
+            var enc = new H264Encoder(newW, newH, fps: 30, _ffmpegPath, _logger);
+            enc.OnFrame += annexB => { try { if (_gfx!.CanSubmitFrame) _gfx.SubmitFrame(annexB); } catch (Exception ex) { _logger.LogDebug(ex, "Bridge: GFX submit failed"); } };
+            try { enc.Start(); _h264 = enc; } catch (Exception ex) { _logger.LogWarning(ex, "Bridge: H.264 restart failed"); _h264 = null; }
+        }
+        if (_rfxProg != null) _rfxProg = new RfxProgressiveEncoder(newW, newH);
+        Interlocked.Exchange(ref _frameDirty, 1);
+    }
 
     private void OnGfxActivated(CancellationToken ct)
     {
@@ -133,7 +261,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
             _rfxProg = new RfxProgressiveEncoder(_frontEnd.Width, _frontEnd.Height);
             _rfxProg.Reset();
             _gfxActive = true;
-            _logger.LogInformation("VNC: switched to RemoteFX Progressive/GFX output");
+            _logger.LogInformation("Bridge: switched to RemoteFX Progressive/GFX output");
             return;
         }
         // AVC420/444: stand up the ffmpeg H.264 encoder sized to the (even) session dimensions.
@@ -141,10 +269,10 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         enc.OnFrame += annexB =>
         {
             try { if (_gfx!.CanSubmitFrame) _gfx.SubmitFrame(annexB); }
-            catch (Exception ex) { _logger.LogDebug(ex, "VNC: GFX submit failed"); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Bridge: GFX submit failed"); }
         };
-        try { enc.Start(); _h264 = enc; _gfxActive = true; _logger.LogInformation("VNC: switched to H.264/GFX output"); }
-        catch (Exception ex) { _logger.LogWarning(ex, "VNC: H.264 encoder failed to start; staying on bitmap"); }
+        try { enc.Start(); _h264 = enc; _gfxActive = true; _logger.LogInformation("Bridge: switched to H.264/GFX output"); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Bridge: H.264 encoder failed to start; staying on bitmap"); }
     }
 
     // Encodes the session framebuffer to H.264 at a steady cadence whenever GFX is active and the frame
@@ -226,7 +354,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         }
         try { await _frontEnd.SendBitmapAsync(new[] { rect }, ct); }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { _logger.LogDebug(ex, "VNC: region flush failed"); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Bridge: region flush failed"); }
     }
 
     // Browser input → source. RunInputAsync decodes fastpath events and raises OnMouse (+ OnScancode/
@@ -278,7 +406,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     private void Forward(int x, int y, int mask)
     {
         try { _source.PointerAsync(x, y, mask, CancellationToken.None).GetAwaiter().GetResult(); }
-        catch (Exception ex) { _logger.LogDebug(ex, "VNC: pointer forward failed"); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Bridge: pointer forward failed"); }
     }
 
     private bool _shiftDown;
@@ -291,6 +419,14 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     // Shift+'/'→'-' bug). Left/Right Shift = scancodes 0x2A/0x36 (non-extended).
     private void OnBrowserScancode(byte scancode, bool released, bool extended)
     {
+        // Sources that speak the same AT set-1 scancode set as the browser (SPICE) take scancodes
+        // directly — no keysym round-trip, which avoids the layout re-derivation the VNC path needs.
+        if (_source.PrefersScancodes)
+        {
+            try { _source.KeyScancodeAsync(scancode, extended, !released, CancellationToken.None).GetAwaiter().GetResult(); }
+            catch (Exception ex) { _logger.LogDebug(ex, "SPICE: scancode forward failed"); }
+            return;
+        }
         if (!extended && (scancode == 0x2A || scancode == 0x36)) _shiftDown = !released;
         int slot = (extended ? 0x100 : 0) | scancode;
         uint keysym;
@@ -319,6 +455,6 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     private void ForwardKey(uint keysym, bool down)
     {
         try { _source.KeyAsync(keysym, down, CancellationToken.None).GetAwaiter().GetResult(); }
-        catch (Exception ex) { _logger.LogDebug(ex, "VNC: key forward failed"); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Bridge: key forward failed"); }
     }
 }

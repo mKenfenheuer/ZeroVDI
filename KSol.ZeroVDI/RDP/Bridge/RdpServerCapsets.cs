@@ -1,4 +1,4 @@
-namespace KSol.ZeroVDI.RDP.Vnc;
+namespace KSol.ZeroVDI.RDP.Bridge;
 
 /// <summary>
 /// The capability sets the VNC bridge's Demand Active advertises. The browser client

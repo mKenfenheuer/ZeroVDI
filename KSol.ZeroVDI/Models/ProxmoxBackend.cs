@@ -56,9 +56,18 @@ public class ProxmoxBackend
 
     // --- Per-backend VDI lifecycle policy ---
 
-    /// <summary>Default RDP port assigned to discovered VMs.</summary>
+    /// <summary>Default RDP port assigned to discovered VMs (protocol = RDP).</summary>
     [Display(Name = "Default RDP port")]
     public int DefaultRdpPort { get; set; } = 3389;
+
+    /// <summary>Default VNC port assigned to discovered VMs whose protocol is VNC.</summary>
+    [Display(Name = "Default VNC port")]
+    public int DefaultVncPort { get; set; } = 5900;
+
+    /// <summary>Default SPICE port assigned to discovered VMs whose protocol is SPICE. (Proxmox SPICE VMs
+    /// are reached via spiceproxy, so this is mostly informational for those, but used for direct SPICE.)</summary>
+    [Display(Name = "Default SPICE port")]
+    public int DefaultSpicePort { get; set; } = 5900;
 
     /// <summary>Hours a resource may sit with no active session before it is paused.</summary>
     [Display(Name = "Idle timeout (hours)")]
@@ -91,4 +100,12 @@ public class ProxmoxBackend
         !string.IsNullOrWhiteSpace(Host)
         && !string.IsNullOrWhiteSpace(ApiTokenId)
         && !string.IsNullOrWhiteSpace(ApiTokenSecret);
+
+    /// <summary>The default host port for a discovered VM given its wire protocol.</summary>
+    public int DefaultPortFor(RdpProtocol protocol) => protocol switch
+    {
+        RdpProtocol.Vnc => DefaultVncPort,
+        RdpProtocol.Spice => DefaultSpicePort,
+        _ => DefaultRdpPort,
+    };
 }

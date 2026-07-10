@@ -167,8 +167,11 @@ Client.prototype.cursorScaleRatio = function () {
 // devicePixelRatio property. The captured _sessionScale is preferred over the probe on reconnects so a
 // reconnect stays on the session's established scale.
 Client.prototype.panelPixelRatio = function (wrapEl) {
-    // A canvas that has already been sized and fitted is the ground truth: measure it directly.
-    if (this.canvas.width && this.canvas.height) {
+    // A canvas that a PRIOR connect actually sized and fitted is the ground truth: measure it directly.
+    // Gate on _appliedW (set only by applyDesktopSize) — the <canvas> ships with a static placeholder
+    // width/height in the markup, so `canvas.width` alone is truthy even on the very first connect and
+    // would make us measure the 1:1 placeholder ratio instead of probing the real device-pixel ratio.
+    if (this._appliedW && this.canvas.width && this.canvas.height) {
         const measured = this.cursorScaleRatio();
         if (measured > 0) return measured;
     }

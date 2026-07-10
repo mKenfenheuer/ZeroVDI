@@ -1,4 +1,4 @@
-namespace KSol.ZeroVDI.RDP.Vnc;
+namespace KSol.ZeroVDI.RDP.Bridge;
 
 /// <summary>
 /// Pixel-format conversion for the VNC→RDP bitmap path. The browser client's uncompressed bitmap path is

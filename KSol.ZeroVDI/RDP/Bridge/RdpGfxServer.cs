@@ -1,4 +1,4 @@
-namespace KSol.ZeroVDI.RDP.Vnc;
+namespace KSol.ZeroVDI.RDP.Bridge;
 
 /// <summary>
 /// Server side of the MS-RDPEGFX graphics pipeline on the "Microsoft::Windows::RDS::Graphics" dynamic

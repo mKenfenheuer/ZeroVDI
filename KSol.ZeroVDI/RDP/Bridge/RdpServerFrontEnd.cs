@@ -1,4 +1,4 @@
-namespace KSol.ZeroVDI.RDP.Vnc;
+namespace KSol.ZeroVDI.RDP.Bridge;
 
 /// <summary>
 /// A minimal RDP <b>server</b> state machine that drives the browser console client through the
@@ -44,6 +44,13 @@ internal sealed class RdpServerFrontEnd
     public bool IsActive => _active;
     public int Width => _width;
     public int Height => _height;
+
+    /// <summary>
+    /// Updates the recorded session size after a live resize. The RDP-level size change itself is driven
+    /// by the GFX RESET_GRAPHICS the encoder sends (the client canvas follows that); this just keeps the
+    /// front-end's Width/Height consistent for any later bitmap-path sizing.
+    /// </summary>
+    public void SetSize(int width, int height) { _width = width; _height = height; }
     public int UserId => _userId;
     public int IoChannel => IoChannelId;
 
@@ -57,7 +64,7 @@ internal sealed class RdpServerFrontEnd
         if (TryParseClientDesktopSize(connectInitial, out int reqW, out int reqH))
         {
             _width = reqW; _height = reqH;
-            _logger.LogInformation("VNC/RDP-server: client requested {W}x{H}", _width, _height);
+            _logger.LogInformation("Bridge/RDP-server: client requested {W}x{H}", _width, _height);
         }
         // Parse the client's requested static virtual channels (CS_NET). We grant them positionally at
         // ids 1003+idx (matching the client's expectation). drdynvc carries the GFX dynamic channels.
@@ -73,7 +80,7 @@ internal sealed class RdpServerFrontEnd
         await SendRawAsync(RdpServerEncoders.TpktX224(
             RdpServerEncoders.ConnectResponse(IoChannelId, 0x00000001 /* PROTOCOL_SSL selected */,
                 channelIds)), ct);
-        _logger.LogInformation("VNC/RDP-server: sent MCS Connect-Response (channels: {Names}; drdynvc id={Dv})",
+        _logger.LogInformation("Bridge/RDP-server: sent MCS Connect-Response (channels: {Names}; drdynvc id={Dv})",
             string.Join(",", _channelNames), DrdynvcChannelId);
 
         // 2) Erect-Domain (drop) then Attach-User-Request → Confirm.
@@ -82,7 +89,7 @@ internal sealed class RdpServerFrontEnd
         // Attach-User-Confirm / Channel-Join-Confirm are BARE MCS domain PDUs in the X.224 Data payload
         // — NOT wrapped in a Send-Data-Indication (that wrapper is only for share PDUs post-join).
         await SendMcsDomainAsync(RdpServerEncoders.AttachUserConfirm(_userId), ct);
-        _logger.LogInformation("VNC/RDP-server: sent Attach-User-Confirm (user {User})", _userId);
+        _logger.LogInformation("Bridge/RDP-server: sent Attach-User-Confirm (user {User})", _userId);
 
         // 3) Channel joins: client joins [userId, ioChannel, ...staticChannels]. Confirm whatever channel
         // the client actually requests (its exact id) so drdynvc etc. join cleanly.
@@ -93,7 +100,7 @@ internal sealed class RdpServerFrontEnd
             await SendMcsDomainAsync(RdpServerEncoders.ChannelJoinConfirm(_userId, ch), ct);
             _joinsRemaining--;
         }
-        _logger.LogInformation("VNC/RDP-server: {N} channels joined", 2 + _channelNames.Count);
+        _logger.LogInformation("Bridge/RDP-server: {N} channels joined", 2 + _channelNames.Count);
 
         // 4) Client Info PDU (drop — VNC auth happened host-side, credentials irrelevant here).
         await ReadTpktAsync(ct);
@@ -101,7 +108,7 @@ internal sealed class RdpServerFrontEnd
         // 5) Licensing valid-client, 6) Demand Active.
         await SendMcsAsync(RdpServerEncoders.LicensingValidClient(), ct);
         await SendMcsAsync(RdpServerEncoders.DemandActive(_shareId, _width, _height), ct);
-        _logger.LogInformation("VNC/RDP-server: sent Licensing + Demand-Active (share {Share:X})", _shareId);
+        _logger.LogInformation("Bridge/RDP-server: sent Licensing + Demand-Active (share {Share:X})", _shareId);
 
         // 7) Confirm Active (drop), then finalization. The client sends Sync/Control/Control/FontList;
         // we answer Sync/Control(Coop)/Control(Granted)/FontMap. Read the client's confirm+finalization
@@ -112,7 +119,7 @@ internal sealed class RdpServerFrontEnd
         await SendMcsAsync(RdpServerEncoders.ControlCooperate(_shareId), ct);
         await SendMcsAsync(RdpServerEncoders.ControlGrantedControl(_shareId, _userId), ct);
         await SendMcsAsync(RdpServerEncoders.FontMap(_shareId), ct);
-        _logger.LogInformation("VNC/RDP-server: sent finalization; session ACTIVE");
+        _logger.LogInformation("Bridge/RDP-server: sent finalization; session ACTIVE");
         _active = true;
     }
 
@@ -289,7 +296,7 @@ internal sealed class RdpServerFrontEnd
     private async Task<byte[]> ReadTpktAsync(CancellationToken ct)
     {
         var hdr = await RdpHostConnection.ReadExactAsync(_s, 4, ct);
-        if (hdr[0] != 0x03) throw new IOException("VNC/RDP-server: bad TPKT version");
+        if (hdr[0] != 0x03) throw new IOException("Bridge/RDP-server: bad TPKT version");
         int len = (hdr[2] << 8) | hdr[3];
         var body = await RdpHostConnection.ReadExactAsync(_s, len - 4, ct);
         return body;
@@ -308,7 +315,7 @@ internal sealed class RdpServerFrontEnd
     {
         var mcs = await ReadMcsDomainPduAsync(ct);
         // Channel-Join-Request: choice(1), initiator(2, PER 1001-based), channelId(2, PER 0-based).
-        if (mcs.Length < 5) throw new IOException("VNC/RDP-server: short channel-join request");
+        if (mcs.Length < 5) throw new IOException("Bridge/RDP-server: short channel-join request");
         int channelId = (mcs[3] << 8) | mcs[4];
         return channelId;
     }

@@ -187,7 +187,8 @@ public class Program
         // Pluggable host-protocol resolvers: native RDP (NLA) and the VNC→RDP bridge, chosen per
         // resource by RdpProtocol via the factory.
         builder.Services.AddSingleton<RDP.NlaRdpResolver>();
-        builder.Services.AddSingleton<RDP.Vnc.VncRdpResolver>();
+        builder.Services.AddSingleton<RDP.Bridge.VncRdpResolver>();
+        builder.Services.AddSingleton<RDP.Spice.SpiceRdpResolver>();
         builder.Services.AddSingleton<RDP.IRdpResolverFactory, RDP.RdpResolverFactory>();
         builder.Services.AddSingleton<RDP.VdiProvisioningService>();
         builder.Services.AddSingleton<RDP.VdiResourceResolver>();
