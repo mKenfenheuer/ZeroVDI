@@ -7,6 +7,9 @@
     ViewData["Subtitle"] = "Edit resource";
     var isProxmox = r.Source == ResourceSource.Proxmox;
     var isManual = r.Source == ResourceSource.Manual;
+    // SPICE connections authenticate via the Proxmox spiceproxy ticket (fetched with an API token),
+    // so stored username/password credentials are useless — hide the SSO credential UI for them.
+    var isSpice = r.Protocol == RdpProtocol.Spice;
 
     var tabs = new (string Id, string Label, string Icon)[]
     {
@@ -393,6 +396,8 @@
                                     </form>
                                 </div>
                                 <!-- Stored credentials -->
+                                @if (!isSpice)
+                                {
                                 <div class="pt-3 border-t border-border">
                                     <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Stored credentials (SSO)</h4>
                                     @if (a.HasStoredCredentials)
@@ -415,6 +420,7 @@
                                         </div>
                                     </form>
                                 </div>
+                                }
                                 <!-- Revoke -->
                                 <div class="pt-3 border-t border-border">
                                     <form asp-action="Revoke" asp-route-id="@r.Id" asp-route-authId="@a.Id" method="post"
