@@ -21,6 +21,12 @@ All notable changes to ZeroVDI are recorded here. The format is based on
   display no longer progressively lags behind the guest under sustained updates.
 
 ### Fixed
+- **SPICE sessions no longer drop after an idle moment.** The Proxmox spiceproxy reaps CONNECT tunnels that
+  see no traffic, which killed quiet SPICE channels — most often the **inputs** channel, which sends nothing
+  until the user moves the mouse, so its tunnel idled out and the first pointer/key event failed with a
+  broken pipe (read loops meanwhile timed out with `Operation timed out`). Each SPICE channel now runs a
+  lightweight keepalive (an unsolicited `MSGC_PONG` every 10s) that keeps every tunnel warm, so sessions
+  survive idle periods.
 - **HiDPI console setting is now honored.** The "HiDPI (native resolution)" option had no effect on the
   first connect: the web client mis-read the `<canvas>` element's static placeholder dimensions as a
   laid-out session canvas and derived a device-pixel ratio of 1, so the requested desktop resolution never

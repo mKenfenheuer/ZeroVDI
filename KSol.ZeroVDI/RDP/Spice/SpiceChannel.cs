@@ -138,8 +138,25 @@ internal abstract class SpiceChannel : IAsyncDisposable
     /// <summary>
     /// Reads mini-header messages until cancelled, dispatching common messages here and channel-specific
     /// ones to <see cref="HandleMessageAsync"/>. Called after the channel has done any post-link setup.
+    /// A background keepalive runs alongside so an idle channel's tunnel never gets reaped (see
+    /// <see cref="KeepAliveAsync"/>).
     /// </summary>
     public async Task RunAsync(CancellationToken ct)
+    {
+        using var keepAlive = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var keepAliveTask = KeepAliveAsync(keepAlive.Token);
+        try
+        {
+            await ReadLoopAsync(ct);
+        }
+        finally
+        {
+            keepAlive.Cancel();
+            try { await keepAliveTask; } catch { }
+        }
+    }
+
+    private async Task ReadLoopAsync(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
@@ -163,6 +180,29 @@ internal abstract class SpiceChannel : IAsyncDisposable
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Keeps the channel's transport warm while it is idle. The Proxmox spiceproxy reaps CONNECT tunnels
+    /// that see no traffic, which is fatal for quiet channels — the inputs channel sends nothing until the
+    /// user acts, so its tunnel would idle out and the next write (or a pending read) fails with
+    /// broken-pipe / timeout. An unsolicited MSGC_PONG every few seconds keeps bytes flowing; SPICE servers
+    /// accept and ignore stray PONGs. Send failures are swallowed — the read loop surfaces a dead channel.
+    /// </summary>
+    private async Task KeepAliveAsync(CancellationToken ct)
+    {
+        var body = new byte[12]; // PONG echoes id u32 + timestamp u64; zeros are fine for an unsolicited one.
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(10), ct);
+                try { await SendAsync(SpiceConst.MSGC_PONG, body, ct); }
+                catch (OperationCanceledException) { throw; }
+                catch { /* dead transport — the read loop will observe and exit */ }
+            }
+        }
+        catch (OperationCanceledException) { }
     }
 
     private async Task<bool> HandleCommonAsync(int type, byte[] data, CancellationToken ct)
