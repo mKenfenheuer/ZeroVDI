@@ -6,6 +6,17 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **Tight encoding for VNC hosts.** The VNC bridge now negotiates **Tight** (zlib + JPEG, with the
+  copy/palette/gradient filters) in preference to Raw, plus **CopyRect** (moved regions aren't resent) and
+  the **DesktopSize** pseudo-encoding (mid-session host resizes now follow). Tight cuts VNC bandwidth by an
+  order of magnitude versus the previous Raw-only path — the difference between usable and unusable over a
+  slow link. Raw remains the universal fallback.
+- **Adaptive quality on slow links (VNC + SPICE).** The bridge now measures client backpressure (the
+  GFX unacked-frame window for H.264/progressive, or the browser-side PDU queue for the bitmap path) and,
+  when the link falls behind, automatically trades quality for bandwidth on **both** sides: it raises the
+  H.264 CRF toward the client **and** asks the VNC host itself for cheaper frames (lower Tight JPEG quality,
+  higher zlib compression). It ramps quality back up as the link recovers, with hysteresis so it doesn't
+  oscillate. No configuration needed.
 - **RemoteFX Progressive selectable as a saved default.** The "GFX — RemoteFX Progressive" display mode is
   now offered in the admin/connection-defaults editor too, not just the live console popup, so it can be
   saved as a resource/user default. The console and admin display-mode dropdowns now match exactly.
@@ -21,6 +32,24 @@ All notable changes to ZeroVDI are recorded here. The format is based on
   display no longer progressively lags behind the guest under sustained updates.
 
 ### Fixed
+- **First frame no longer takes ~20 s on VNC/SPICE (H.264/GFX).** When the browser negotiated the H.264
+  GFX path, the encoder switched to H.264 but only encoded a frame when the framebuffer was next marked
+  dirty — which waited for the *next* host rectangle. On an otherwise-idle desktop the first real screen
+  change could be many seconds away, so the console stayed black until then. The encoder now primes the
+  first frame the instant GFX activates, so the current desktop is encoded and sent immediately (the
+  RemoteFX Progressive path already did this). Affected both bridges since it was in the shared encoder.
+- **VNC/SPICE desktop no longer lags behind input.** The bitmap display path only repainted when a source
+  rectangle happened to arrive, and it flushed that update *synchronously on the host receive loop* — which
+  for VNC also stalled the next framebuffer-update request. The result: the desktop appeared frozen until
+  you moved the mouse, and you had to wiggle the cursor to nudge it forward. Frame delivery is now driven by
+  an independent frame clock that coalesces changed regions and flushes on its own cadence, fully decoupled
+  from input and from the host read loop, so the desktop updates smoothly on its own.
+- **Linux/xrdp hosts (e.g. Ubuntu) now connect.** The gateway asked every host for NLA (X.224 `HYBRID`).
+  Windows answers an unsupported request with a clean negotiation failure, but xrdp (the common Ubuntu RDP
+  server) simply **resets the TCP connection** the moment it sees an NLA request — so the connect died at
+  X.224 with `Connection reset by peer`, never reaching credentials. The gateway now retries with plain
+  `SSL` (TLS-only, in-band login) when the NLA negotiation fails, exactly as mstsc/FreeRDP do, and tells the
+  browser which protocol was selected so it stamps the matching `serverSelectedProtocol` into CS_CORE.
 - **SPICE sessions no longer drop after an idle moment.** The Proxmox spiceproxy reaps CONNECT tunnels that
   see no traffic, which killed quiet SPICE channels — most often the **inputs** channel, which sends nothing
   until the user moves the mouse, so its tunnel idled out and the first pointer/key event failed with a

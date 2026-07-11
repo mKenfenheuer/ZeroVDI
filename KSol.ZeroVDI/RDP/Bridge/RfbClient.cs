@@ -9,8 +9,10 @@ namespace KSol.ZeroVDI.RDP.Bridge;
 /// encoding, and the FramebufferUpdate loop. Runs over whatever <see cref="Stream"/> the transport yields
 /// (direct TCP or connector tunnel), so connector-reachable VNC hosts work for free.
 ///
-/// M2 supports full-frame Raw only; M3 adds incremental requests + more encodings. Pixels are delivered
-/// to the caller as top-down 32bpp BGRX rectangles via <see cref="OnRectangle"/>.
+/// Encodings: Tight (preferred, zlib+JPEG — the bandwidth win on slow links), CopyRect, and Raw fallback,
+/// plus the DesktopSize pseudo-encoding for mid-session resizes. Adaptive Tight quality/compression levels
+/// are re-advertised on the fly (see <see cref="SetQualityAsync"/>). Pixels are delivered to the caller as
+/// top-down 32bpp BGRX rectangles via <see cref="OnRectangle"/>.
 /// </summary>
 internal sealed class RfbClient : IProtocolSource
 {
@@ -21,6 +23,24 @@ internal sealed class RfbClient : IProtocolSource
     private readonly string? _password;
     private readonly ILogger _logger;
     private Stream _s = Stream.Null;
+    private TightDecoder? _tight;
+    // Native-resolution source framebuffer (top-down BGRX). Kept so CopyRect can copy already-received
+    // pixels from a source region, and so DesktopSize resizes have a backing buffer. Sized at ServerInit.
+    private byte[] _srcFb = Array.Empty<byte>();
+
+    // RFB encoding ids we handle. Tight is the fast path; CopyRect avoids resending moved regions;
+    // DesktopSize (a pseudo-encoding) lets the server tell us it resized mid-session.
+    private const int EncRaw = 0, EncCopyRect = 1, EncTight = 7;
+    private const int EncDesktopSize = -223;
+    // Tight quality-level (-23..-32 = quality 0..9) and compression-level (-247..-256 = level 0..9)
+    // pseudo-encodings tune the JPEG quality / zlib effort. Advertised order also = preference order.
+    private const int EncTightQualityBase = -23;   // quality N → EncTightQualityBase - N
+    private const int EncTightCompressBase = -247;  // level N   → EncTightCompressBase - N
+
+    // Current adaptive quality (0=worst/smallest … 9=best/largest) and zlib compression level. Re-advertised
+    // via SetEncodings when the backpressure controller changes them, so the server adapts on the next frame.
+    private volatile int _jpegQuality = 7;
+    private volatile int _compressLevel = 6;
 
     public int FramebufferWidth { get; private set; }
     public int FramebufferHeight { get; private set; }
@@ -33,7 +53,7 @@ internal sealed class RfbClient : IProtocolSource
     /// <summary>Raised for each decoded rectangle: (x, y, w, h, top-down 32bpp BGRX pixels).</summary>
     public event Action<int, int, int, int, byte[]>? OnRectangle;
 
-    /// <summary>Not raised yet — VNC DesktopSize pseudo-encoding (mid-session resize) is deferred.</summary>
+    /// <summary>Raised when the server resizes via the DesktopSize pseudo-encoding (mid-session resize).</summary>
     public event Action<int, int>? OnGeometryChanged;
 
     public RfbClient(IHostTransport transport, string host, int port, string? user, string? password, ILogger logger)
@@ -130,14 +150,65 @@ internal sealed class RfbClient : IProtocolSource
         FramebufferHeight = (si[2] << 8) | si[3];
         int nameLen = (int)ReadU32be(si.AsSpan(20, 4));
         DesktopName = nameLen > 0 ? Encoding.UTF8.GetString(await ReadExactAsync(nameLen, ct)) : "";
+        _srcFb = new byte[FramebufferWidth * FramebufferHeight * 4];
         _logger.LogInformation("RFB: ServerInit {W}x{H} '{Name}'", FramebufferWidth, FramebufferHeight, DesktopName);
 
         // 6) SetPixelFormat → 32bpp little-endian true-colour BGRX (blue in the low byte), so incoming Raw
         // pixels are B,G,R,x per pixel — a straight source for RGB565 conversion.
         await WriteAsync(SetPixelFormatBgrx32(), ct);
-        // 7) SetEncodings → Raw(0) only for M2.
-        await WriteAsync(SetEncodings(new[] { 0 }), ct);
+        // 7) SetEncodings → prefer Tight (compressed, big win on slow links), then CopyRect, then Raw as the
+        // universal fallback, plus the DesktopSize + Tight quality/compression pseudo-encodings. The Tight
+        // decoder needs a JPEG decoder for photographic subrects; reuse the SPICE ImageSharp path.
+        _tight = new TightDecoder(
+            (n, c) => ReadExactAsync(n, c),
+            jpeg =>
+            {
+                var d = Spice.SpiceJpeg.DecodeToBgra(jpeg, null);
+                return d ?? (0, 0, Array.Empty<byte>());
+            });
+        await SendEncodingsAsync(ct);
     }
+
+    // Advertises our encoding preferences plus the current adaptive Tight quality/compression levels. Called
+    // at handshake and again whenever the backpressure controller changes quality (the server honours the
+    // most recent SetEncodings).
+    private Task SendEncodingsAsync(CancellationToken ct)
+    {
+        int q = Math.Clamp(_jpegQuality, 0, 9);
+        int cl = Math.Clamp(_compressLevel, 0, 9);
+        return WriteAsync(SetEncodings(new[]
+        {
+            EncTight, EncCopyRect, EncRaw,
+            EncTightQualityBase - q,     // JPEG quality level
+            EncTightCompressBase - cl,   // zlib compression level
+            EncDesktopSize,
+        }), ct);
+    }
+
+    /// <summary>
+    /// Sets the adaptive Tight quality (0..9) and zlib compression level (0..9) and re-advertises them to
+    /// the server. Lower quality / higher compression trade image fidelity for bandwidth on slow links.
+    /// Called by the encoder's backpressure controller. No-op before the handshake completes.
+    /// </summary>
+    public Task SetQualityAsync(int jpegQuality, int compressLevel, CancellationToken ct)
+    {
+        int q = Math.Clamp(jpegQuality, 0, 9), cl = Math.Clamp(compressLevel, 0, 9);
+        if (q == _jpegQuality && cl == _compressLevel) return Task.CompletedTask;
+        _jpegQuality = q; _compressLevel = cl;
+        _logger.LogDebug("VNC: adaptive quality → JPEG {Q}, zlib {C}", q, cl);
+        return SendEncodingsAsync(ct);
+    }
+
+    // Congestion tier → Tight knobs. Tier 0 (link healthy): high JPEG quality, moderate zlib effort. As the
+    // tier rises we drop JPEG quality hard (biggest bandwidth lever) and lean harder on zlib. This is the
+    // host-to-gateway adaptation: we ask the VNC server itself to send us cheaper frames.
+    public Task SetQualityTierAsync(int tier, CancellationToken ct) => tier switch
+    {
+        <= 0 => SetQualityAsync(8, 6, ct),   // best
+        1 => SetQualityAsync(6, 7, ct),
+        2 => SetQualityAsync(4, 8, ct),
+        _ => SetQualityAsync(2, 9, ct),      // worst / smallest
+    };
 
     /// <summary>Requests a framebuffer update over the whole screen. incremental=false forces a full frame.</summary>
     public Task RequestUpdateAsync(bool incremental, CancellationToken ct)
@@ -217,17 +288,86 @@ internal sealed class RfbClient : IProtocolSource
             int w = (rh[4] << 8) | rh[5];
             int h = (rh[6] << 8) | rh[7];
             int enc = (int)ReadU32be(rh.AsSpan(8, 4));
-            if (enc == 0)
+            switch (enc)
             {
-                // Raw: w*h pixels, 4 bytes each (our SetPixelFormat), top-down.
-                var pixels = await ReadExactAsync(w * h * 4, ct);
-                OnRectangle?.Invoke(x, y, w, h, pixels);
-            }
-            else
-            {
-                throw new IOException($"RFB: unsupported encoding {enc} (M2 is Raw-only)");
+                case EncRaw:
+                {
+                    // Raw: w*h pixels, 4 bytes each (our SetPixelFormat), top-down.
+                    var pixels = await ReadExactAsync(w * h * 4, ct);
+                    StoreAndEmit(x, y, w, h, pixels);
+                    break;
+                }
+                case EncTight:
+                {
+                    var pixels = await _tight!.DecodeRectAsync(w, h, ct);
+                    StoreAndEmit(x, y, w, h, pixels);
+                    break;
+                }
+                case EncCopyRect:
+                {
+                    // CopyRect: srcX(2) srcY(2) — copy an already-received region to (x,y). Serve it from
+                    // our source framebuffer and re-emit the destination box.
+                    var sp = await ReadExactAsync(4, ct);
+                    int srcX = (sp[0] << 8) | sp[1], srcY = (sp[2] << 8) | sp[3];
+                    var pixels = CopyRegion(srcX, srcY, w, h);
+                    StoreAndEmit(x, y, w, h, pixels);
+                    break;
+                }
+                case EncDesktopSize:
+                {
+                    // DesktopSize pseudo-encoding: the (w,h) in the rect header is the NEW framebuffer size.
+                    ResizeFramebuffer(w, h);
+                    break;
+                }
+                default:
+                    throw new IOException($"RFB: unsupported encoding {enc}");
             }
         }
+    }
+
+    // Writes a decoded rect into the source framebuffer (for later CopyRect) and emits it downstream.
+    private void StoreAndEmit(int x, int y, int w, int h, byte[] pixels)
+    {
+        if (w <= 0 || h <= 0) return;
+        int fbw = FramebufferWidth;
+        if (_srcFb.Length == fbw * FramebufferHeight * 4)
+        {
+            for (int row = 0; row < h; row++)
+            {
+                int dy = y + row;
+                if (dy < 0 || dy >= FramebufferHeight) continue;
+                int copyW = Math.Min(w, fbw - x);
+                if (copyW <= 0) continue;
+                Buffer.BlockCopy(pixels, row * w * 4, _srcFb, (dy * fbw + x) * 4, copyW * 4);
+            }
+        }
+        OnRectangle?.Invoke(x, y, w, h, pixels);
+    }
+
+    // Extracts a w×h top-down BGRX region from the source framebuffer (for CopyRect).
+    private byte[] CopyRegion(int srcX, int srcY, int w, int h)
+    {
+        var outb = new byte[w * h * 4];
+        int fbw = FramebufferWidth;
+        if (_srcFb.Length != fbw * FramebufferHeight * 4) return outb;
+        for (int row = 0; row < h; row++)
+        {
+            int sy = srcY + row;
+            if (sy < 0 || sy >= FramebufferHeight) continue;
+            int copyW = Math.Min(w, fbw - srcX);
+            if (copyW <= 0) continue;
+            Buffer.BlockCopy(_srcFb, (sy * fbw + srcX) * 4, outb, row * w * 4, copyW * 4);
+        }
+        return outb;
+    }
+
+    private void ResizeFramebuffer(int w, int h)
+    {
+        if (w <= 0 || h <= 0 || (w == FramebufferWidth && h == FramebufferHeight)) return;
+        _logger.LogInformation("RFB: DesktopSize → {W}x{H}", w, h);
+        FramebufferWidth = w; FramebufferHeight = h;
+        _srcFb = new byte[w * h * 4];
+        OnGeometryChanged?.Invoke(w, h);
     }
 
     private async Task ReadColourMapAsync(CancellationToken ct)

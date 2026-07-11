@@ -23,6 +23,15 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     private readonly KeysymMap _keymap;
     private readonly string _ffmpegPath;
     private readonly ILogger _logger;
+    private readonly Func<int>? _bitmapCongestion;   // browser-side pending PDU depth, or null if unavailable
+
+    // TEMP first-frame timing tracer (chasing the "first frame only after mouse move" delay). Δms since
+    // the session started running; one line per milestone. Remove once the delay is confirmed fixed.
+    private readonly System.Diagnostics.Stopwatch _ff = System.Diagnostics.Stopwatch.StartNew();
+    private readonly HashSet<string> _ffSeen = new();
+    private void FF(string tag) => _logger.LogInformation("[ff {Wall}] +{Ms}ms {Tag}",
+        DateTime.Now.ToString("HH:mm:ss.fff"), _ff.ElapsedMilliseconds, tag);
+    private void FFOnce(string tag) { lock (_ffSeen) { if (!_ffSeen.Add(tag)) return; } FF(tag); }
 
     // GFX / H.264 pipeline (engaged only when the browser advertises AVC over the GFX channel).
     private DvcServer? _dvc;
@@ -31,6 +40,19 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     private RfxProgressiveEncoder? _rfxProg;   // RemoteFX Progressive path (fallback for no-AVC clients)
     private volatile bool _gfxActive;   // true once GFX streaming (AVC or progressive) is negotiated → stop bitmap output
     private int _frameDirty;            // set when the framebuffer changed since the last H.264 encode
+    // H.264 keepalive: even with no change, re-feed the current frame at least this often so ffmpeg's input
+    // pipeline keeps flushing (a lone buffered frame would otherwise never come out). ~4fps idle floor.
+    private long _lastH264Encode;
+    private const long H264KeepaliveMs = 250;
+
+    // Bitmap-path dirty accumulator. Source rectangles NEVER flush inline (that coupled display updates to
+    // the source receive loop and, for VNC, stalled the next FramebufferUpdateRequest — the "display lags
+    // behind input, wiggle to advance" bug). Instead they union their touched session box into `_dirtyBox`
+    // and a steady bitmap frame clock (BitmapClockAsync) flushes the accumulated region. This decouples
+    // delivery from input and coalesces a burst of small rects into one send.
+    private readonly object _dirtyLock = new();
+    private bool _dirty;
+    private int _dx0, _dy0, _dx1, _dy1;   // inclusive dirty bounding box in session coords
 
     // Session-sized top-down 32bpp BGRX framebuffer (the letterboxed composition target). Sized once the
     // RDP handshake fixes the browser-requested session size.
@@ -48,12 +70,14 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     private int _rfbButtons;
     private int _lastSrcX, _lastSrcY;
 
-    public RdpEncoderSession(IProtocolSource source, Stream serverSide, KeysymMap keymap, string ffmpegPath, ILogger logger)
+    public RdpEncoderSession(IProtocolSource source, Stream serverSide, KeysymMap keymap, string ffmpegPath,
+        ILogger logger, Func<int>? bitmapCongestion = null)
     {
         _source = source;
         _keymap = keymap;
         _ffmpegPath = ffmpegPath;
         _logger = logger;
+        _bitmapCongestion = bitmapCongestion;
         // Fallback size = source native size; overridden by the browser's requested size at handshake.
         _frontEnd = new RdpServerFrontEnd(serverSide, source.Width, source.Height, logger);
         _source.OnRectangle += OnSourceRectangle;
@@ -69,7 +93,10 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     /// </summary>
     public async Task RunAsync(CancellationToken ct)
     {
+        _ff.Restart();
+        FF("RunAsync: starting RDP handshake");
         await _frontEnd.RunHandshakeAsync(ct);
+        FF("RDP handshake done (session ACTIVE)");
 
         // The browser fixed the session size in its Connect-Initial; letterbox the source into it.
         lock (_fbLock)
@@ -97,7 +124,9 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
 
         var drain = DrainBrowserInputAsync(ct);
         var frameClock = FrameClockAsync(ct);   // drives H.264 frames when GFX is active
-        await Task.WhenAny(sourcePump, drain, frameClock);
+        var bitmapClock = BitmapClockAsync(ct); // drives coalesced bitmap flushes when GFX is inactive
+        var congestion = CongestionControlAsync(ct); // adapts quality (client + host) to link backpressure
+        await Task.WhenAny(sourcePump, drain, frameClock, bitmapClock, congestion);
     }
 
     // ── GFX / H.264 ─────────────────────────────────────────────────────────────────────────────
@@ -213,6 +242,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
                 w, h, _fit.x, _fit.y, _fit.w, _fit.h, _fbW, _fbH);
             _ = _source.RequestFullFrameAsync(CancellationToken.None);
             Interlocked.Exchange(ref _frameDirty, 1);
+            MarkDirty(0, 0, _fbW - 1, _fbH - 1); // bitmap path: repaint whole (now full-bleed) framebuffer
         }
         catch (Exception ex) { _logger.LogWarning(ex, "Bridge: source resize handling failed"); }
     }
@@ -243,7 +273,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         {
             var old = _h264;
             _ = old.DisposeAsync();
-            var enc = new H264Encoder(newW, newH, fps: 30, _ffmpegPath, _logger);
+            var enc = new H264Encoder(newW, newH, fps: 30, _ffmpegPath, _logger, crf: TierCrf[_tier]);
             enc.OnFrame += annexB => { try { if (_gfx!.CanSubmitFrame) _gfx.SubmitFrame(annexB); } catch (Exception ex) { _logger.LogDebug(ex, "Bridge: GFX submit failed"); } };
             try { enc.Start(); _h264 = enc; } catch (Exception ex) { _logger.LogWarning(ex, "Bridge: H.264 restart failed"); _h264 = null; }
         }
@@ -264,14 +294,25 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
             _logger.LogInformation("Bridge: switched to RemoteFX Progressive/GFX output");
             return;
         }
-        // AVC420/444: stand up the ffmpeg H.264 encoder sized to the (even) session dimensions.
-        var enc = new H264Encoder(_frontEnd.Width, _frontEnd.Height, fps: 30, _ffmpegPath, _logger);
+        // AVC420/444: stand up the ffmpeg H.264 encoder sized to the (even) session dimensions, at the
+        // current congestion tier's CRF.
+        var enc = new H264Encoder(_frontEnd.Width, _frontEnd.Height, fps: 30, _ffmpegPath, _logger, crf: TierCrf[_tier]);
         enc.OnFrame += annexB =>
         {
-            try { if (_gfx!.CanSubmitFrame) _gfx.SubmitFrame(annexB); }
+            try { FFOnce($"H.264 first AU from ffmpeg ({annexB.Length}B)"); if (_gfx!.CanSubmitFrame) { _gfx.SubmitFrame(annexB); FFOnce("first GFX SubmitFrame (frame sent to client)"); } else FFOnce("H.264 AU ready but CanSubmitFrame=false (dropped)"); }
             catch (Exception ex) { _logger.LogDebug(ex, "Bridge: GFX submit failed"); }
         };
-        try { enc.Start(); _h264 = enc; _gfxActive = true; _logger.LogInformation("Bridge: switched to H.264/GFX output"); }
+        try
+        {
+            enc.Start(); _h264 = enc; _gfxActive = true;
+            // Prime the FIRST frame. The framebuffer already holds the source's initial full frame (painted
+            // during the bitmap phase), but H.264 only encodes when _frameDirty is set — which otherwise
+            // waits for the NEXT source rectangle. On an idle desktop that could be many seconds (the
+            // "first frame takes 20s" bug), so mark dirty now to encode+send immediately on the next tick.
+            Interlocked.Exchange(ref _frameDirty, 1);
+            FF("GFX activated → H.264 (primed first frame dirty)");
+            _logger.LogInformation("Bridge: switched to H.264/GFX output");
+        }
         catch (Exception ex) { _logger.LogWarning(ex, "Bridge: H.264 encoder failed to start; staying on bitmap"); }
     }
 
@@ -286,11 +327,27 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
                 await Task.Delay(33, ct); // ~30fps
                 if (!_gfxActive) continue;
                 bool progressive = _rfxProg != null;
+                // Order matters: check the GFX submit window BEFORE consuming the dirty flag. If we cleared
+                // dirty first and then found we couldn't submit (e.g. GFX just activated and the surface/ack
+                // window isn't ready yet), the dirty signal would be LOST and no frame would go out until the
+                // NEXT source change — the "first frame only after a mouse move" bug. So bail here while
+                // leaving _frameDirty set, and retry on the next tick.
+                if (!_gfx!.CanSubmitFrame) { if (_frameDirty == 1) FFOnce("frame-clock: dirty but CanSubmitFrame=false (waiting)"); continue; }
+                FFOnce("frame-clock: CanSubmitFrame=true");
                 // Progressive refines idle tiles over successive frames, so it must keep ticking even when
-                // the framebuffer is unchanged (until every tile reaches lossless). H.264 only encodes on
-                // change. Either way we need room in the GFX unacked window.
-                if (!progressive && Interlocked.Exchange(ref _frameDirty, 0) == 0) continue;
-                if (!_gfx!.CanSubmitFrame) continue;
+                // the framebuffer is unchanged (until every tile reaches lossless). For H.264 we encode when
+                // the frame changed OR when a keepalive interval elapsed: ffmpeg's rawvideo input pipeline
+                // needs a steady frame cadence to flush the CURRENT frame out (a lone frame can sit buffered
+                // until the next one arrives), so a purely change-driven feed could leave the very first
+                // frame stuck inside ffmpeg — "nothing reaches the client" on an idle desktop.
+                if (!progressive)
+                {
+                    bool dirty = Interlocked.Exchange(ref _frameDirty, 0) == 1;
+                    long now = Environment.TickCount64;
+                    if (!dirty && now - _lastH264Encode < H264KeepaliveMs) continue;
+                    _lastH264Encode = now;
+                }
+                FFOnce("frame-clock: encoding first frame");
                 byte[] frame;
                 lock (_fbLock)
                 {
@@ -313,11 +370,77 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         catch (OperationCanceledException) { }
     }
 
+    // ── adaptive quality / congestion control ───────────────────────────────────────────────────
+    // Current congestion tier (0 = link healthy … 3 = badly congested). Drives BOTH the client-facing
+    // encoder (H.264 CRF / progressive already self-adapts) AND the host-facing source
+    // (IProtocolSource.SetQualityTierAsync — e.g. VNC Tight quality). Hysteresis avoids oscillation.
+    private int _tier;
+    // H.264 CRF per tier (higher = smaller/softer). Rebuilding ffmpeg is disruptive, so we only do it on a
+    // committed tier change.
+    private static readonly int[] TierCrf = { 23, 27, 31, 35 };
+
+    private async Task CongestionControlAsync(CancellationToken ct)
+    {
+        try
+        {
+            int badStreak = 0, goodStreak = 0;
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(500, ct); // sample twice a second — slow enough not to thrash ffmpeg
+                if (!_frontEnd.IsActive) continue;
+
+                // Congestion signal, normalised to 0..1. GFX path: unacked-frame window fill. Bitmap path:
+                // browser-side pending PDU queue depth (outrunning the relay/link).
+                double load;
+                if (_gfxActive && _gfx != null)
+                {
+                    int win = Math.Max(1, _gfx.UnackedWindow);
+                    load = Math.Min(1.0, _gfx.UnackedDepth / (double)win);
+                }
+                else
+                {
+                    int pending = _bitmapCongestion?.Invoke() ?? 0;
+                    load = Math.Min(1.0, pending / 24.0); // ~24 queued PDUs = saturated
+                }
+
+                // Map load → desired tier with hysteresis: need a few consecutive bad/good samples to move.
+                int desired = load switch { >= 0.75 => 3, >= 0.5 => 2, >= 0.25 => 1, _ => 0 };
+                if (desired > _tier) { if (++badStreak >= 2) { await SetTierAsync(_tier + 1, ct); badStreak = 0; goodStreak = 0; } }
+                else if (desired < _tier) { if (++goodStreak >= 4) { await SetTierAsync(_tier - 1, ct); goodStreak = 0; badStreak = 0; } }
+                else { badStreak = 0; goodStreak = 0; }
+            }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private async Task SetTierAsync(int tier, CancellationToken ct)
+    {
+        tier = Math.Clamp(tier, 0, 3);
+        if (tier == _tier) return;
+        _tier = tier;
+        _logger.LogInformation("Bridge: congestion tier → {Tier} (CRF {Crf})", tier, TierCrf[tier]);
+
+        // Host-facing: ask the source for cheaper frames (VNC Tight quality; SPICE no-op today).
+        try { await _source.SetQualityTierAsync(tier, ct); } catch (Exception ex) { _logger.LogDebug(ex, "Bridge: source tier failed"); }
+
+        // Client-facing H.264: rebuild ffmpeg at the new CRF (only when AVC is the active GFX codec).
+        if (_gfxActive && _h264 != null && _h264.Crf != TierCrf[tier])
+        {
+            var old = _h264;
+            _ = old.DisposeAsync();
+            var enc = new H264Encoder(_frontEnd.Width, _frontEnd.Height, fps: 30, _ffmpegPath, _logger, crf: TierCrf[tier]);
+            enc.OnFrame += annexB => { try { if (_gfx!.CanSubmitFrame) _gfx.SubmitFrame(annexB); } catch (Exception ex) { _logger.LogDebug(ex, "Bridge: GFX submit failed"); } };
+            try { enc.Start(); _h264 = enc; Interlocked.Exchange(ref _frameDirty, 1); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Bridge: H.264 CRF change restart failed"); _h264 = null; }
+        }
+    }
+
     // A source rectangle arrived (native coords). Scale-blit it into the letterboxed session framebuffer,
     // then emit the touched session region as a bitmap update. Runs on the source's receive loop.
     private void OnSourceRectangle(int x, int y, int w, int h, byte[] bgrx)
     {
         if (!_frontEnd.IsActive || _fb.Length == 0) return;
+        FFOnce($"first source rectangle {w}x{h} (gfxActive={_gfxActive})");
         int dx, dy, dw, dh;
         lock (_fbLock)
         {
@@ -337,8 +460,48 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         // When GFX/H.264 is active the frame clock encodes whole frames; just mark the framebuffer dirty
         // and skip the legacy bitmap update (sending both would double-paint / fight the surface).
         if (_gfxActive) { Interlocked.Exchange(ref _frameDirty, 1); return; }
-        // Otherwise the bitmap fastpath: emit the touched session region (outside the lock).
-        FlushRegionAsync(dx, dy, dw, dh, CancellationToken.None).GetAwaiter().GetResult();
+        // Otherwise the bitmap fastpath: union this rect into the pending dirty box. We do NOT flush here —
+        // BitmapClockAsync flushes on its own cadence so display delivery is independent of the source
+        // receive loop (and, for VNC, of the incremental-request round-trip).
+        MarkDirty(dx, dy, dx + dw - 1, dy + dh - 1);
+    }
+
+    // Union an inclusive session-space box into the pending bitmap dirty region.
+    private void MarkDirty(int x0, int y0, int x1, int y1)
+    {
+        lock (_dirtyLock)
+        {
+            if (!_dirty) { _dx0 = x0; _dy0 = y0; _dx1 = x1; _dy1 = y1; _dirty = true; }
+            else
+            {
+                if (x0 < _dx0) _dx0 = x0; if (y0 < _dy0) _dy0 = y0;
+                if (x1 > _dx1) _dx1 = x1; if (y1 > _dy1) _dy1 = y1;
+            }
+        }
+    }
+
+    // Bitmap frame clock: flushes the coalesced dirty region at a steady cadence whenever GFX is NOT active.
+    // This is what makes the bitmap path advance on its own timer instead of only when a source rectangle
+    // arrives — fixing the input-coupled lag. It skips work when nothing changed and when GFX takes over.
+    private async Task BitmapClockAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(16, ct); // ~60fps ceiling; only sends when there's a dirty region
+                if (_gfxActive || !_frontEnd.IsActive) continue;
+                int x0, y0, x1, y1;
+                lock (_dirtyLock)
+                {
+                    if (!_dirty) continue;
+                    x0 = _dx0; y0 = _dy0; x1 = _dx1; y1 = _dy1;
+                    _dirty = false;
+                }
+                await FlushRegionAsync(x0, y0, x1 - x0 + 1, y1 - y0 + 1, ct);
+            }
+        }
+        catch (OperationCanceledException) { }
     }
 
     private async Task FlushRegionAsync(int x, int y, int w, int h, CancellationToken ct)

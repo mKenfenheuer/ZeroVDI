@@ -30,6 +30,13 @@ public sealed class DuplexPipeStream
     /// <summary>The end the RDP server front-end reads client PDUs from and writes server PDUs to.</summary>
     public Stream ServerSide { get; }
 
+    /// <summary>
+    /// Number of server→browser PDUs written but not yet consumed by the relay reader — the bitmap-path
+    /// congestion signal (the browser/relay isn't draining fast enough → we're outrunning the link). Reads
+    /// the pending item count of the server→browser channel.
+    /// </summary>
+    public int ServerToBrowserPending => _b2a.Reader.CanCount ? _b2a.Reader.Count : 0;
+
     /// <summary>Tears down both directions so blocked reads on either endpoint return EOF.</summary>
     public void Complete()
     {

@@ -49,6 +49,15 @@ internal interface IProtocolSource : IAsyncDisposable
     Task RequestFullFrameAsync(CancellationToken ct);
     Task RequestIncrementalAsync(CancellationToken ct);
 
+    /// <summary>
+    /// Adapts the <b>host-to-gateway</b> quality/bandwidth to a congestion tier (0 = best quality … higher =
+    /// more compression / lower quality). Driven by the encoder's backpressure controller so that on a slow
+    /// client link we also pull cheaper frames FROM the host, not just compress harder toward the client.
+    /// Best-effort: sources map the tier onto their own knobs (VNC → Tight JPEG quality + zlib level;
+    /// SPICE → image-codec preference). Sources with no such knob ignore it.
+    /// </summary>
+    Task SetQualityTierAsync(int tier, CancellationToken ct) => Task.CompletedTask;
+
     // ── input (source coordinate space; the encoder maps browser input into it) ──
     /// <summary>Pointer moved/clicked at native (x, y) with an absolute button mask (bit0=L,1=M,2=R,3=up,4=down).</summary>
     Task PointerAsync(int x, int y, int buttonMask, CancellationToken ct);

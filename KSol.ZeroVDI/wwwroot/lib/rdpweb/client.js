@@ -4,6 +4,22 @@
 // hits, region/tile headers, quant indices) — noisy, but the fastest way to chase a specific black or
 // stale tile back to the PDU that produced it. Use 1 for normal diagnostic logging.
 window.RDP_LOG = window.RDP_LOG || 0;
+
+// ---- first-frame timing tracer (TEMP: chasing the "first frame only after mouse move" delay) ----
+// One line per lifecycle milestone, gated behind RDP_LOG like the rest of the client's diagnostics
+// (set window.RDP_LOG = 1 in devtools to enable). Each line carries a wall-clock time and Δms since
+// connect start (t0, set in connect()) so interleaved logs are unambiguous. Remove once the delay is fixed.
+Client_ffT0 = 0;
+var Client_ffSeen = {};
+function FF(tag, extra) {
+    if (window.RDP_LOG < 1) return;
+    var now = (typeof performance !== "undefined" ? performance.now() : Date.now());
+    var dt = Client_ffT0 ? Math.round(now - Client_ffT0) : 0;
+    var wall = new Date().toISOString().substr(11, 12); // HH:MM:SS.mmm
+    console.log("rdp: [ff " + wall + "] +" + dt + "ms " + tag + (extra ? " " + extra : ""));
+}
+function FF_once(tag, extra) { if (Client_ffSeen[tag]) return; Client_ffSeen[tag] = 1; FF(tag, extra); }
+
 // client.js — browser RDP client over the gateway WebSocket relay.
 //
 // Flow:
@@ -244,6 +260,9 @@ Client.prototype._fit = function (wrapEl) {
 Client.prototype.connect = function (creds) {
     const self = this;
     this.creds = creds;
+    Client_ffT0 = (typeof performance !== "undefined" ? performance.now() : Date.now());
+    Client_ffSeen = {};
+    FF("connect() called", "canvas " + this.canvas.width + "x" + this.canvas.height);
 
     // _sessionScale was captured in applyDesktopSize (derived from the chosen native/logical ratio);
     // fall back to a fresh derivation here in case connect() is ever called without it.
@@ -259,6 +278,7 @@ Client.prototype.connect = function (creds) {
     this._handshakeDone = false;
 
     this.socket.onopen = function () {
+        FF("ws open");
         // First frame: credentials JSON (text). SKIP this when the gateway already holds the
         // credentials (SSO auto-connect, window.RDP_AUTOCONNECT): the relay then bridges immediately
         // and would mis-read a credentials frame as RDP bytes. The browser still uses creds for the
@@ -282,6 +302,7 @@ Client.prototype.connect = function (creds) {
         }
         // Binary: relayed RDP bytes.
         const bytes = (e.data instanceof ArrayBuffer) ? new Uint8Array(e.data) : new Uint8Array(e.data);
+        FF_once("first RDP bytes from gateway", bytes.length + "B");
         if (self.proto) self.proto.feed(bytes);
     };
 
@@ -302,9 +323,14 @@ Client.prototype._onControlFrame = function (text) {
             this._status("connecting", msg.message || "connecting…");
             break;
         case "ready":
+            FF("gateway 'ready' (relay bridging)", "proto=" + msg.selectedProtocol);
             // The gateway includes this tunnel's session id so the quality worker can open its own
             // /ws/rdp-quality/{sessionId} socket once the session goes active (_onActive).
             this._gatewaySessionId = msg.sessionId || null;
+            // Which X.224 protocol the gateway negotiated with the host. Usually 2 (HYBRID/NLA); for hosts
+            // that reject NLA (xrdp/Linux) the gateway falls back to 1 (SSL) and we must stamp that same
+            // value into CS_CORE.serverSelectedProtocol. Default 2 for older gateways that omit the field.
+            this._selectedProtocol = (typeof msg.selectedProtocol === "number") ? msg.selectedProtocol : 2;
             this._status("connecting", "negotiating session…");
             this._startProtocol();
             break;
@@ -444,7 +470,7 @@ Client.prototype._startProtocol = function () {
         domain: this.creds.domain || "",
         width: this.canvas.width,
         height: this.canvas.height,
-        selectedProtocol: 2, // HYBRID (NLA) — matches the gateway's X.224 negotiation
+        selectedProtocol: this._selectedProtocol ?? 2, // the protocol the gateway's X.224 negotiation selected (2=HYBRID/NLA, 1=SSL for xrdp)
         // width/height are DEVICE pixels (chooseDesktopSize × dpr) for a crisp 1:1 framebuffer, and the
         // display DPI is carried as the DesktopScaleFactor so the remote Windows UI is sized correctly on
         // HiDPI panels (native res @ 200%, not a tiny 100% desktop). deviceScaleFactor MUST be 100/140/180
@@ -1034,6 +1060,7 @@ Client.prototype._onActive = function () {
     }
     this.connected = true;
     this._activeSince = performance.now(); // for maybeResize's settle guard
+    FF("session ACTIVE (_onActive)");
     this._status("ready", null);
     this._startQualityProbe();
     // Display Control may have signalled ready before the session was ACTIVE; now canResize() is true.
@@ -1223,6 +1250,7 @@ Client.prototype.handleBitmap = function (r) {
 // (MAP_SURFACE_TO_OUTPUT origin + the region offset). drawImage handles the OffscreenCanvas source.
 Client.prototype._onGfxPaint = function (canvas, sx, sy, sw, sh, dx, dy) {
     if (sw <= 0 || sh <= 0) return;
+    FF_once("first GFX paint", sw + "x" + sh + " @(" + dx + "," + dy + ")");
     try {
         // The source GFX surface canvas is opaque-backed (see _onCreateSurface's getContext alpha:false),
         // so this source-over drawImage fully replaces the destination rect — no alpha bleed-through of
@@ -1238,6 +1266,7 @@ Client.prototype._onGfxPaint = function (canvas, sx, sy, sw, sh, dx, dy) {
 Client.prototype._onGfxDirectFrame = function (frame, surfaceId, map) {
     const self = this;
     const ox = (map && map.originX) || 0, oy = (map && map.originY) || 0;
+    FF_once("first GFX direct frame", "surf=" + surfaceId);
     try {
         this.ctx.drawImage(frame, ox, oy);
         if (frame.close) frame.close();

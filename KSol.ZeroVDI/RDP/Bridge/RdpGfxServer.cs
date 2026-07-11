@@ -208,6 +208,17 @@ internal sealed class RdpGfxServer
         get { lock (_lock) { if (!Active) return false; if (_acksSuspended) return true; return _frameId - _lastAckedFrameId < MaxUnacked; } }
     }
 
+    /// <summary>Number of frames sent but not yet acknowledged by the client — the congestion signal the
+    /// adaptive-quality controller reads. 0 = client keeping up; near <c>MaxUnacked</c> = falling behind.
+    /// Returns 0 while acks are suspended (client asked us to stop counting).</summary>
+    public int UnackedDepth
+    {
+        get { lock (_lock) { if (!Active || _acksSuspended) return 0; return (int)(_frameId - _lastAckedFrameId); } }
+    }
+
+    /// <summary>The saturation point of the unacked window (frames), for scaling the congestion signal.</summary>
+    public int UnackedWindow => (int)MaxUnacked;
+
     /// <summary>Ships one Annex-B H.264 frame covering the whole surface as START_FRAME +
     /// WIRE_TO_SURFACE_1 (AVC420 metablock, wrapped in the AVC444 envelope with LC=1 for codec 0x0e) +
     /// END_FRAME, batched into one ZGFX message.</summary>

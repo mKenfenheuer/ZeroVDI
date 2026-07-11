@@ -52,7 +52,7 @@ public sealed class RdpHostConnection
     /// <see cref="System.IO.Stream"/> so a bridge resolver (e.g. VNC) can hand back a plain in-memory
     /// duplex stream — the relay pumps use only base-<see cref="System.IO.Stream"/> members.
     /// </summary>
-    public sealed record Connected(Stream Stream, Stream Inner) : IDisposable
+    public sealed record Connected(Stream Stream, Stream Inner, uint SelectedProtocol = PROTOCOL_HYBRID) : IDisposable
     {
         public void Dispose()
         {
@@ -173,7 +173,7 @@ public sealed class RdpHostConnection
         }
 
         _logger.LogInformation("RDP host: connected {Host}:{Port} (protocol=0x{Proto:X})", _host, _port, selected);
-        return new Connected(ssl, netStream);
+        return new Connected(ssl, netStream, selected);
     }
 
     /// <summary>

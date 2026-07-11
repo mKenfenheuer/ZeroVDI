@@ -151,7 +151,12 @@ public sealed class RdpRelaySession
 
         // "ready" carries the tracked session id so the browser's quality worker can open its own
         // /ws/rdp-quality/{sessionId} socket (RTT probing runs off the browser main thread there).
-        await SendJsonAsync(new { status = "ready", message = (string?)null, sessionId = TrackedSessionId }, ct);
+        // Tell the browser which X.224 protocol the host actually selected. Normally HYBRID (NLA), but for
+        // hosts that reject NLA (xrdp/Linux) the connect falls back to plain SSL and the login screen is
+        // served in-band — the browser must stamp the matching serverSelectedProtocol into CS_CORE, else the
+        // host rejects the MCS connect. Default HYBRID keeps every other path (bridges) unchanged.
+        await SendJsonAsync(new { status = "ready", message = (string?)null, sessionId = TrackedSessionId,
+            selectedProtocol = host.SelectedProtocol }, ct);
         _logger.LogInformation("RDP relay: bridging {Host}:{Port}", _host, _port);
 
         // 5) Relay the decrypted RDP stream both ways until either side closes.
