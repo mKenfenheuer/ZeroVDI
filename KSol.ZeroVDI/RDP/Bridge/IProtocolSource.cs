@@ -50,6 +50,18 @@ internal interface IProtocolSource : IAsyncDisposable
     Task RequestIncrementalAsync(CancellationToken ct);
 
     /// <summary>
+    /// End-to-end frame-ack gate. When set by the encoder, a self-clocking source (one that pulls its own
+    /// next delta from the host after each update, like VNC/RFB) must <c>await</c> this <b>before</b>
+    /// requesting the next incremental. The encoder completes it only once the client has acknowledged the
+    /// previous frame end-to-end (GFX FRAME_ACKNOWLEDGE, or the bitmap frame draining to the client) — so the
+    /// pipeline runs closed-loop: target frame → server → client → ack → server → target → next delta.
+    ///
+    /// Sources with a fixed in-flight window of 1 get strict lockstep; a larger window pipelines that many
+    /// frames. Sources that are not self-clocking (the encoder pulls them explicitly) leave this null.
+    /// </summary>
+    Func<CancellationToken, Task>? BeforeNextFrame { get; set; }
+
+    /// <summary>
     /// Adapts the <b>host-to-gateway</b> quality/bandwidth to a congestion tier (0 = best quality … higher =
     /// more compression / lower quality). Driven by the encoder's backpressure controller so that on a slow
     /// client link we also pull cheaper frames FROM the host, not just compress harder toward the client.

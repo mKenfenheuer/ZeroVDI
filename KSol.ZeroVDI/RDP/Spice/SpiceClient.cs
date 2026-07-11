@@ -38,6 +38,11 @@ internal sealed class SpiceClient : IProtocolSource
     /// <summary>Raised when the guest re-creates its primary surface at a new size (post-resize).</summary>
     public event Action<int, int>? OnGeometryChanged;
 
+    // SPICE is a server-push source (the guest streams frames autonomously; RequestIncrementalAsync is a
+    // no-op), so it is not self-clocking and never awaits this gate. Client-ack back-pressure for SPICE is
+    // applied on the client side only, by the encoder's GFX unacked-frame window. See IProtocolSource.
+    public Func<CancellationToken, Task>? BeforeNextFrame { get; set; }
+
     // SPICE takes AT set-1 scancodes directly — no keysym round-trip (see IProtocolSource).
     public bool PrefersScancodes => true;
 

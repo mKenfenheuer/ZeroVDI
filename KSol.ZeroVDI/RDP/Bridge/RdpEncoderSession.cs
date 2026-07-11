@@ -16,6 +16,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (_h264 != null) await _h264.DisposeAsync();
+        _frameCredits.Dispose();
     }
 
     private readonly IProtocolSource _source;
@@ -24,6 +25,21 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     private readonly IH264EncoderFactory _h264Factory;
     private readonly ILogger _logger;
     private readonly Func<int>? _bitmapCongestion;   // browser-side pending PDU depth, or null if unavailable
+
+    // ── end-to-end frame-ack gate ───────────────────────────────────────────────────────────────
+    // Closes the loop: target frame → server → client → client ACK → server → target → next frame/delta,
+    // so the target never runs ahead of the client by more than _maxFramesInFlight frames (1 = strict
+    // lockstep). The mechanism differs per output path because source-delta ↔ client-frame cardinality does:
+    //   • Bitmap path (request-driven, 1:1): the source (VNC, self-clocking) awaits BeforeNextFrame before
+    //     pulling its next incremental. That wait is this frame-credit semaphore, replenished when the
+    //     just-sent bitmap frame drains out of the server→browser queue (the synthetic "client received it"
+    //     signal — RDP bitmap fastpath has no per-frame client ACK). See WaitForFrameCreditAsync / the
+    //     bitmap clock. Credits are capped at _maxFramesInFlight so a burst can't over-credit the window.
+    //   • GFX/H.264 path (clock-driven, N:1): back-pressure is the RDPEGFX unacked-frame window inside
+    //     RdpGfxServer (CanSubmitFrame, also sized to _maxFramesInFlight, driven by the real client
+    //     FRAME_ACKNOWLEDGE). The source runs credit-free there — see WaitForFrameCreditAsync.
+    private readonly int _maxFramesInFlight;
+    private readonly SemaphoreSlim _frameCredits;
 
     // TEMP first-frame timing tracer (chasing the "first frame only after mouse move" delay). Δms since
     // the session started running; one line per milestone. Remove once the delay is confirmed fixed.
@@ -71,15 +87,21 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     private int _lastSrcX, _lastSrcY;
 
     public RdpEncoderSession(IProtocolSource source, Stream serverSide, KeysymMap keymap, IH264EncoderFactory h264Factory,
-        ILogger logger, Func<int>? bitmapCongestion = null)
+        ILogger logger, Func<int>? bitmapCongestion = null, int? maxFramesInFlight = null)
     {
         _source = source;
         _keymap = keymap;
         _h264Factory = h264Factory;
         _logger = logger;
         _bitmapCongestion = bitmapCongestion;
+        // Frames-in-flight window (end-to-end ack gate). Precedence: explicit ctor arg → ZEROVDI_MAX_FRAMES_IN_FLIGHT
+        // env var → default 1 (strict lockstep). Clamped to ≥ 1.
+        _maxFramesInFlight = Math.Max(1, maxFramesInFlight ?? ResolveMaxFramesInFlightEnv());
+        _frameCredits = new SemaphoreSlim(_maxFramesInFlight, _maxFramesInFlight);
         // Fallback size = source native size; overridden by the browser's requested size at handshake.
         _frontEnd = new RdpServerFrontEnd(serverSide, source.Width, source.Height, logger);
+        // Self-clocking sources await this before pulling their next delta — closed-loop on the client ack.
+        _source.BeforeNextFrame = WaitForFrameCreditAsync;
         _source.OnRectangle += OnSourceRectangle;
         _source.OnGeometryChanged += OnSourceGeometryChanged;
         _frontEnd.OnMouse += OnBrowserMouse;
@@ -129,6 +151,52 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         await Task.WhenAny(sourcePump, drain, frameClock, bitmapClock, congestion);
     }
 
+    // Reads ZEROVDI_MAX_FRAMES_IN_FLIGHT (a positive int) if set; otherwise 1 (strict lockstep).
+    private static int ResolveMaxFramesInFlightEnv()
+    {
+        var s = Environment.GetEnvironmentVariable("ZEROVDI_MAX_FRAMES_IN_FLIGHT");
+        return int.TryParse(s, out var n) && n >= 1 ? n : 1;
+    }
+
+    // ── end-to-end frame-ack gate ───────────────────────────────────────────────────────────────
+    // The gate a self-clocking source (VNC) awaits before pulling its next delta.
+    //
+    // Path-dependent, because source-delta ↔ client-frame cardinality differs:
+    //   • Bitmap path (request-driven, 1:1): a source pull produces exactly one bitmap frame that drains to
+    //     the client and releases exactly one credit. Blocking here on a credit gives true end-to-end
+    //     lockstep (window == _maxFramesInFlight). This is where the closed loop lives.
+    //   • GFX/H.264 path (clock-driven, N:1): source deltas are accumulated non-destructively into the
+    //     shared framebuffer and the frame clock re-encodes whole-frame snapshots on its own cadence, so
+    //     deltas and client frames are NOT 1:1 (several deltas can fold into one encoded frame). Gating the
+    //     source pull per client-ack would desync (credits consumed per-delta, released per-frame) and
+    //     stall. Client back-pressure in this path is instead applied where it belongs — RdpGfxServer's
+    //     unacked-frame window (also sized to _maxFramesInFlight) gates CanSubmitFrame. So here the source
+    //     runs free: we do not consume a credit.
+    // A source parked on a credit when GFX activates is released by WakeSourceForGfxHandover().
+    private async Task WaitForFrameCreditAsync(CancellationToken ct)
+    {
+        if (_gfxActive) return;
+        await _frameCredits.WaitAsync(ct);
+        // Re-check: GFX may have activated while we were parked. If so, don't hold the credit hostage —
+        // hand it straight back so the bitmap-drain accounting stays balanced for a later GFX→bitmap fallback.
+        if (_gfxActive) ReleaseFrameCredit();
+    }
+
+    // Called the moment GFX activates. If the source is parked on a frame credit (it pulled a bitmap-phase
+    // frame and is waiting for that frame's drain-ack, which won't come now that the bitmap clock has stood
+    // down), release one credit to wake it; it re-checks _gfxActive and proceeds credit-free from here on.
+    private void WakeSourceForGfxHandover() => ReleaseFrameCredit();
+
+    // Returns one frame credit — called when a bitmap frame drains to the client (the bitmap path's
+    // end-to-end ack). Capped at the window size so a burst can't inflate the in-flight budget.
+    private void ReleaseFrameCredit()
+    {
+        // SemaphoreSlim has no "current count" ceiling of its own beyond maxCount; we constructed it with
+        // maxCount == _maxFramesInFlight, so Release past that throws. Guard by only releasing when below cap.
+        try { if (_frameCredits.CurrentCount < _maxFramesInFlight) _frameCredits.Release(); }
+        catch (SemaphoreFullException) { /* already at cap — ignore */ }
+    }
+
     // ── GFX / H.264 ─────────────────────────────────────────────────────────────────────────────
     private void SetupGfx(CancellationToken ct)
     {
@@ -145,8 +213,11 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         _frontEnd.OnDrdynvcData += data => { try { _dvc!.HandleChannelChunk(data); } catch (Exception ex) { _logger.LogDebug(ex, "Bridge: drdynvc handling failed"); } };
 
         _gfx = new RdpGfxServer(_frontEnd.Width, _frontEnd.Height,
-            msg => { try { _dvc!.SendData(_gfxChannelId, msg); } catch { } }, _logger);
+            msg => { try { _dvc!.SendData(_gfxChannelId, msg); } catch { } }, _logger, (uint)_maxFramesInFlight);
         _gfx.OnActivated = () => OnGfxActivated(ct);
+        // Note: the GFX path's client-ack back-pressure is applied inside RdpGfxServer (CanSubmitFrame gates
+        // sends at the unacked-frame window). It deliberately does NOT touch the source-side frame-credit
+        // semaphore, which is the bitmap path's 1:1 end-to-end gate — see WaitForFrameCreditAsync.
 
         _dvc.Start();
         // Open the Graphics dynamic channel; when the client accepts, route its data to the GFX server.
@@ -291,6 +362,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
             _rfxProg = new RfxProgressiveEncoder(_frontEnd.Width, _frontEnd.Height);
             _rfxProg.Reset();
             _gfxActive = true;
+            WakeSourceForGfxHandover();
             _logger.LogInformation("Bridge: switched to RemoteFX Progressive/GFX output");
             return;
         }
@@ -305,6 +377,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         try
         {
             enc.Start(); _h264 = enc; _gfxActive = true;
+            WakeSourceForGfxHandover();
             // Prime the FIRST frame. The framebuffer already holds the source's initial full frame (painted
             // during the bitmap phase), but H.264 only encodes when _frameDirty is set — which otherwise
             // waits for the NEXT source rectangle. On an idle desktop that could be many seconds (the
@@ -483,6 +556,11 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     // Bitmap frame clock: flushes the coalesced dirty region at a steady cadence whenever GFX is NOT active.
     // This is what makes the bitmap path advance on its own timer instead of only when a source rectangle
     // arrives — fixing the input-coupled lag. It skips work when nothing changed and when GFX takes over.
+    //
+    // Closed-loop ack: after flushing a frame it waits for that frame to drain out of the server→browser
+    // queue (the synthetic "client received it" signal — RDP bitmap fastpath has no per-frame ACK), then
+    // hands a frame credit back to the source so the next delta is pulled. With _maxFramesInFlight == 1 this
+    // is strict lockstep: one bitmap frame is in flight to the client before the source produces the next.
     private async Task BitmapClockAsync(CancellationToken ct)
     {
         try
@@ -499,9 +577,30 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
                     _dirty = false;
                 }
                 await FlushRegionAsync(x0, y0, x1 - x0 + 1, y1 - y0 + 1, ct);
+                await AwaitBitmapDrainThenCreditAsync(ct);
             }
         }
         catch (OperationCanceledException) { }
+    }
+
+    // Waits for the just-flushed bitmap frame to drain from the server→browser queue, then releases one frame
+    // credit. This is the bitmap path's stand-in for a client FRAME_ACKNOWLEDGE: the RDP bitmap fastpath is
+    // not frame-acked, so "the frame left the server toward the client" (queue back to ~empty) is the closest
+    // observable delivered signal. A time cap prevents a wedged/slow reader from stalling the pipeline forever
+    // (we then credit anyway and let the congestion controller shed quality). No-op when GFX is active.
+    private async Task AwaitBitmapDrainThenCreditAsync(CancellationToken ct)
+    {
+        if (_gfxActive) return;
+        if (_bitmapCongestion == null) { ReleaseFrameCredit(); return; } // no signal → don't stall the loop
+        const int capMs = 1000;
+        long start = Environment.TickCount64;
+        while (!ct.IsCancellationRequested)
+        {
+            if (_bitmapCongestion() <= 0) break;
+            if (Environment.TickCount64 - start >= capMs) break;
+            await Task.Delay(4, ct);
+        }
+        ReleaseFrameCredit();
     }
 
     private async Task FlushRegionAsync(int x, int y, int w, int h, CancellationToken ct)

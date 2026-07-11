@@ -38,7 +38,11 @@ internal sealed class RdpGfxServer
     private const uint FLAG_AVC420_ENABLED = 0x00000010; // v8.1 only
     private const uint FLAG_AVC_DISABLED = 0x00000020;   // v10+
 
-    private const uint MaxUnacked = 8;
+    // Maximum frames the server may have in flight (sent but not yet FRAME_ACKNOWLEDGE'd by the client)
+    // before it must stop and wait. 1 = strict end-to-end lockstep (server sends frame N, waits for the
+    // client's ack of N, only then releases N+1). Larger values pipeline more frames to hide RTT at the
+    // cost of buffer growth. Configured by the encoder session from the bridge's frame-in-flight setting.
+    private readonly uint _maxUnacked;
 
     private int _width, _height;
     private const ushort SurfaceId = 0;
@@ -60,9 +64,10 @@ internal sealed class RdpGfxServer
     public bool IsProgressive { get { lock (_lock) { return Active && _codecId == CODECID_CAPROGRESSIVE; } } }
     public bool IsAvc444 { get { lock (_lock) { return _codecId == CODECID_AVC444; } } }
 
-    public RdpGfxServer(int width, int height, Action<byte[]> send, ILogger logger)
+    public RdpGfxServer(int width, int height, Action<byte[]> send, ILogger logger, uint maxUnacked = 1)
     {
         _width = width; _height = height; _send = send; _logger = logger;
+        _maxUnacked = Math.Max(1, maxUnacked);
     }
 
     // ── Inbound (client → server) ───────────────────────────────────────────────────────────────
@@ -205,7 +210,7 @@ internal sealed class RdpGfxServer
     // ── Frame streaming ─────────────────────────────────────────────────────────────────────────
     public bool CanSubmitFrame
     {
-        get { lock (_lock) { if (!Active) return false; if (_acksSuspended) return true; return _frameId - _lastAckedFrameId < MaxUnacked; } }
+        get { lock (_lock) { if (!Active) return false; if (_acksSuspended) return true; return _frameId - _lastAckedFrameId < _maxUnacked; } }
     }
 
     /// <summary>Number of frames sent but not yet acknowledged by the client — the congestion signal the
@@ -217,7 +222,7 @@ internal sealed class RdpGfxServer
     }
 
     /// <summary>The saturation point of the unacked window (frames), for scaling the congestion signal.</summary>
-    public int UnackedWindow => (int)MaxUnacked;
+    public int UnackedWindow => (int)_maxUnacked;
 
     /// <summary>Ships one Annex-B H.264 frame covering the whole surface as START_FRAME +
     /// WIRE_TO_SURFACE_1 (AVC420 metablock, wrapped in the AVC444 envelope with LC=1 for codec 0x0e) +

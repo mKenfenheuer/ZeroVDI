@@ -56,6 +56,11 @@ internal sealed class RfbClient : IProtocolSource
     /// <summary>Raised when the server resizes via the DesktopSize pseudo-encoding (mid-session resize).</summary>
     public event Action<int, int>? OnGeometryChanged;
 
+    // End-to-end frame-ack gate (see IProtocolSource). RFB is self-clocking — it pulls the next incremental
+    // after each update — so we await this before that pull, blocking until the encoder confirms the client
+    // acked the previous frame. Null until the encoder sets it (or in unit tests) → no gating.
+    public Func<CancellationToken, Task>? BeforeNextFrame { get; set; }
+
     public RfbClient(IHostTransport transport, string host, int port, string? user, string? password, ILogger logger)
     {
         _transport = transport; _host = host; _port = port; _user = user; _password = password; _logger = logger;
@@ -262,6 +267,10 @@ internal sealed class RfbClient : IProtocolSource
             {
                 case 0:
                     await ReadFramebufferUpdateAsync(ct);
+                    // End-to-end frame-ack gate: wait until the encoder says the client acknowledged the
+                    // previous frame (closed-loop back-pressure) before pulling the next delta from the host.
+                    // Unset (tests / no encoder) → no wait.
+                    if (BeforeNextFrame is { } gate) await gate(ct);
                     // RFB is request-driven: ask for the next incremental update so changed regions keep
                     // flowing. The server replies only when something changes, so this self-clocks the
                     // live stream without polling. Coalescing (one outstanding request) avoids flooding.

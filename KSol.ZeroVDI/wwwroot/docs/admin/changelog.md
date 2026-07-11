@@ -6,6 +6,14 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **End-to-end frame-ack flow control on bridged sessions.** The VNC/SPICE→RDP bridge now runs the whole
+  pipeline as a closed loop: a frame generated at the target flows target → server → client, and only once
+  the client acknowledges it does the server release the next frame/delta from the target — no unbounded
+  buffering ahead of a slow client. Both output paths are covered: the GFX/H.264 path gates client sends on
+  the RDPEGFX `FRAME_ACKNOWLEDGE` window, and the (previously un-acked) bitmap path now waits for each frame
+  to drain to the client before pulling the next host delta. The in-flight window is configurable via
+  `ZEROVDI_MAX_FRAMES_IN_FLIGHT` and defaults to **1** (strict lockstep — one frame outstanding end-to-end);
+  raise it to pipeline more frames and hide RTT on a healthy link.
 - **In-process libx264 H.264 encoder.** The GFX/AVC420 real-time encoder can now run **libx264 directly
   in-process** (via native P/Invoke) instead of spawning a per-session `ffmpeg` subprocess: a full-frame BGRA
   buffer is colour-converted to I420 and encoded in the gateway's own address space, with no process
