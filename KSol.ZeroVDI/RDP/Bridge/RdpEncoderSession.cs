@@ -21,7 +21,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     private readonly IProtocolSource _source;
     private readonly RdpServerFrontEnd _frontEnd;
     private readonly KeysymMap _keymap;
-    private readonly string _ffmpegPath;
+    private readonly IH264EncoderFactory _h264Factory;
     private readonly ILogger _logger;
     private readonly Func<int>? _bitmapCongestion;   // browser-side pending PDU depth, or null if unavailable
 
@@ -36,7 +36,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     // GFX / H.264 pipeline (engaged only when the browser advertises AVC over the GFX channel).
     private DvcServer? _dvc;
     private RdpGfxServer? _gfx;
-    private H264Encoder? _h264;
+    private IH264Encoder? _h264;
     private RfxProgressiveEncoder? _rfxProg;   // RemoteFX Progressive path (fallback for no-AVC clients)
     private volatile bool _gfxActive;   // true once GFX streaming (AVC or progressive) is negotiated → stop bitmap output
     private int _frameDirty;            // set when the framebuffer changed since the last H.264 encode
@@ -70,12 +70,12 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     private int _rfbButtons;
     private int _lastSrcX, _lastSrcY;
 
-    public RdpEncoderSession(IProtocolSource source, Stream serverSide, KeysymMap keymap, string ffmpegPath,
+    public RdpEncoderSession(IProtocolSource source, Stream serverSide, KeysymMap keymap, IH264EncoderFactory h264Factory,
         ILogger logger, Func<int>? bitmapCongestion = null)
     {
         _source = source;
         _keymap = keymap;
-        _ffmpegPath = ffmpegPath;
+        _h264Factory = h264Factory;
         _logger = logger;
         _bitmapCongestion = bitmapCongestion;
         // Fallback size = source native size; overridden by the browser's requested size at handshake.
@@ -273,7 +273,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         {
             var old = _h264;
             _ = old.DisposeAsync();
-            var enc = new H264Encoder(newW, newH, fps: 30, _ffmpegPath, _logger, crf: TierCrf[_tier]);
+            var enc = _h264Factory.Create(newW, newH, fps: 30, crf: TierCrf[_tier], _logger);
             enc.OnFrame += annexB => { try { if (_gfx!.CanSubmitFrame) _gfx.SubmitFrame(annexB); } catch (Exception ex) { _logger.LogDebug(ex, "Bridge: GFX submit failed"); } };
             try { enc.Start(); _h264 = enc; } catch (Exception ex) { _logger.LogWarning(ex, "Bridge: H.264 restart failed"); _h264 = null; }
         }
@@ -296,7 +296,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         }
         // AVC420/444: stand up the ffmpeg H.264 encoder sized to the (even) session dimensions, at the
         // current congestion tier's CRF.
-        var enc = new H264Encoder(_frontEnd.Width, _frontEnd.Height, fps: 30, _ffmpegPath, _logger, crf: TierCrf[_tier]);
+        var enc = _h264Factory.Create(_frontEnd.Width, _frontEnd.Height, fps: 30, crf: TierCrf[_tier], _logger);
         enc.OnFrame += annexB =>
         {
             try { FFOnce($"H.264 first AU from ffmpeg ({annexB.Length}B)"); if (_gfx!.CanSubmitFrame) { _gfx.SubmitFrame(annexB); FFOnce("first GFX SubmitFrame (frame sent to client)"); } else FFOnce("H.264 AU ready but CanSubmitFrame=false (dropped)"); }
@@ -428,7 +428,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         {
             var old = _h264;
             _ = old.DisposeAsync();
-            var enc = new H264Encoder(_frontEnd.Width, _frontEnd.Height, fps: 30, _ffmpegPath, _logger, crf: TierCrf[tier]);
+            var enc = _h264Factory.Create(_frontEnd.Width, _frontEnd.Height, fps: 30, crf: TierCrf[tier], _logger);
             enc.OnFrame += annexB => { try { if (_gfx!.CanSubmitFrame) _gfx.SubmitFrame(annexB); } catch (Exception ex) { _logger.LogDebug(ex, "Bridge: GFX submit failed"); } };
             try { enc.Start(); _h264 = enc; Interlocked.Exchange(ref _frameDirty, 1); }
             catch (Exception ex) { _logger.LogWarning(ex, "Bridge: H.264 CRF change restart failed"); _h264 = null; }

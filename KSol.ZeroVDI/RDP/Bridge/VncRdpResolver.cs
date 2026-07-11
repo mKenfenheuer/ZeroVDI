@@ -12,12 +12,11 @@ namespace KSol.ZeroVDI.RDP.Bridge;
 /// </summary>
 public sealed class VncRdpResolver : IRdpResolver
 {
-    private readonly string _ffmpegPath;
+    private readonly IH264EncoderFactory _h264Factory;
 
-    public VncRdpResolver(IConfiguration config)
+    public VncRdpResolver(IH264EncoderFactory h264Factory)
     {
-        // Reuse the recording ffmpeg for real-time H.264 encoding of the GFX path.
-        _ffmpegPath = config["Recording:FfmpegPath"] ?? "ffmpeg";
+        _h264Factory = h264Factory;
     }
 
     public async Task<RdpHostConnection.Connected> ConnectAsync(RdpResolveRequest request, CancellationToken ct)
@@ -53,7 +52,7 @@ public sealed class VncRdpResolver : IRdpResolver
         // 2) Hand the source to the shared RDP encoder over an in-memory duplex; the browser reads the
         // RDP stream from BrowserSide.
         var pipe = new DuplexPipeStream();
-        var encoder = new RdpEncoderSession(source, pipe.ServerSide, KeysymMap.For(request.KeyboardLayout), _ffmpegPath, logger,
+        var encoder = new RdpEncoderSession(source, pipe.ServerSide, KeysymMap.For(request.KeyboardLayout), _h264Factory, logger,
             bitmapCongestion: () => pipe.ServerToBrowserPending);
         var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 

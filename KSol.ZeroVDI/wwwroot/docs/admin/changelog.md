@@ -31,6 +31,12 @@ All notable changes to ZeroVDI are recorded here. The format is based on
   instead of inline on the SPICE channel read loop, so heavy decode no longer stalls network reads and the
   display no longer progressively lags behind the guest under sustained updates.
 
+### Changed
+- **Exchangeable H.264 encoder backend.** The real-time H.264 codec used by the GFX/AVC420 path is now
+  behind an `IH264Encoder` / `IH264EncoderFactory` seam and resolved from DI. The default is unchanged
+  (ffmpeg/libx264, now `FfmpegH264Encoder`), but an alternative backend (e.g. a hardware encoder) can be
+  dropped in by swapping a single service registration — no changes to the shared bridge encoder.
+
 ### Fixed
 - **First frame no longer takes ~20 s on VNC/SPICE (H.264/GFX).** When the browser negotiated the H.264
   GFX path, the encoder switched to H.264 but only encoded a frame when the framebuffer was next marked

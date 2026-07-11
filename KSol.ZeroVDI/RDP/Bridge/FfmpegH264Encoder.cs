@@ -11,8 +11,11 @@ namespace KSol.ZeroVDI.RDP.Bridge;
 ///
 /// AVC420 wants YUV420p at even dimensions; the caller sizes the surface to even width/height. Each output
 /// access unit is handed to <see cref="OnFrame"/> ready to wrap in an RFX_AVC420_METABLOCK.
+///
+/// This is the default <see cref="IH264Encoder"/>; the codec backend is exchangeable via
+/// <see cref="IH264EncoderFactory"/> (see <see cref="FfmpegH264EncoderFactory"/>).
 /// </summary>
-internal sealed class H264Encoder : IAsyncDisposable
+internal sealed class FfmpegH264Encoder : IH264Encoder
 {
     private readonly int _width, _height, _fps, _crf;
     private readonly string _ffmpegPath;
@@ -26,7 +29,7 @@ internal sealed class H264Encoder : IAsyncDisposable
 
     /// <param name="crf">x264 constant-rate-factor (quality/size knob): ~18 = visually lossless, ~28 =
     /// smaller/softer. The adaptive controller raises it on slow links. Clamped to a sane 16..40.</param>
-    public H264Encoder(int width, int height, int fps, string ffmpegPath, ILogger logger, int crf = 23)
+    public FfmpegH264Encoder(int width, int height, int fps, string ffmpegPath, ILogger logger, int crf = 23)
     {
         _width = width & ~1; _height = height & ~1; _fps = Math.Clamp(fps, 5, 60);
         _crf = Math.Clamp(crf, 16, 40);
@@ -269,4 +272,23 @@ internal sealed class H264Encoder : IAsyncDisposable
         try { if (_proc is { HasExited: false }) _proc.Kill(true); } catch { }
         try { _proc?.Dispose(); } catch { }
     }
+}
+
+/// <summary>
+/// Default <see cref="IH264EncoderFactory"/>: hands out <see cref="FfmpegH264Encoder"/> instances backed by
+/// the configured <c>ffmpeg</c> binary (reused from the recording pipeline). Registered in DI so the codec
+/// backend is a one-line swap.
+/// </summary>
+internal sealed class FfmpegH264EncoderFactory : IH264EncoderFactory
+{
+    private readonly string _ffmpegPath;
+
+    public FfmpegH264EncoderFactory(IConfiguration config)
+    {
+        // Reuse the recording ffmpeg for real-time H.264 encoding of the GFX path.
+        _ffmpegPath = config["Recording:FfmpegPath"] ?? "ffmpeg";
+    }
+
+    public IH264Encoder Create(int width, int height, int fps, int crf, ILogger logger)
+        => new FfmpegH264Encoder(width, height, fps, _ffmpegPath, logger, crf);
 }

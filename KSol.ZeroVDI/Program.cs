@@ -187,6 +187,9 @@ public class Program
         // Pluggable host-protocol resolvers: native RDP (NLA) and the VNC→RDP bridge, chosen per
         // resource by RdpProtocol via the factory.
         builder.Services.AddSingleton<RDP.NlaRdpResolver>();
+        // Exchangeable real-time H.264 codec backend for the GFX/AVC420 path. Default is ffmpeg/libx264;
+        // swap this single registration to plug in another IH264Encoder implementation.
+        builder.Services.AddSingleton<RDP.Bridge.IH264EncoderFactory, RDP.Bridge.FfmpegH264EncoderFactory>();
         builder.Services.AddSingleton<RDP.Bridge.VncRdpResolver>();
         builder.Services.AddSingleton<RDP.Spice.SpiceRdpResolver>();
         builder.Services.AddSingleton<RDP.IRdpResolverFactory, RDP.RdpResolverFactory>();
