@@ -9,8 +9,9 @@ namespace KSol.ZeroVDI.RDP.Bridge;
 /// encoding, and the FramebufferUpdate loop. Runs over whatever <see cref="Stream"/> the transport yields
 /// (direct TCP or connector tunnel), so connector-reachable VNC hosts work for free.
 ///
-/// Encodings: Tight (preferred, zlib+JPEG — the bandwidth win on slow links), CopyRect, and Raw fallback,
-/// plus the DesktopSize pseudo-encoding for mid-session resizes. Adaptive Tight quality/compression levels
+/// Encodings: Tight (preferred, zlib+JPEG — the bandwidth win on slow links), ZRLE (zlib tiles — macOS ARD's
+/// strong path when its Tight falls back toward Raw), CopyRect, and Raw fallback, plus the DesktopSize
+/// pseudo-encoding for mid-session resizes. Adaptive Tight quality/compression levels
 /// are re-advertised on the fly (see <see cref="SetQualityAsync"/>). Pixels are delivered to the caller as
 /// top-down 32bpp BGRX rectangles via <see cref="OnRectangle"/>.
 /// </summary>
@@ -24,13 +25,16 @@ internal sealed class RfbClient : IProtocolSource
     private readonly ILogger _logger;
     private Stream _s = Stream.Null;
     private TightDecoder? _tight;
+    private ZrleDecoder? _zrle;
+    // Encoding ids already logged this session (so "server used encoding X" fires once per distinct encoding).
+    private readonly HashSet<int> _seenEncodings = new();
     // Native-resolution source framebuffer (top-down BGRX). Kept so CopyRect can copy already-received
     // pixels from a source region, and so DesktopSize resizes have a backing buffer. Sized at ServerInit.
     private byte[] _srcFb = Array.Empty<byte>();
 
     // RFB encoding ids we handle. Tight is the fast path; CopyRect avoids resending moved regions;
     // DesktopSize (a pseudo-encoding) lets the server tell us it resized mid-session.
-    private const int EncRaw = 0, EncCopyRect = 1, EncTight = 7;
+    private const int EncRaw = 0, EncCopyRect = 1, EncZrle = 16, EncTight = 7;
     private const int EncDesktopSize = -223;
     // Tight quality-level (-23..-32 = quality 0..9) and compression-level (-247..-256 = level 0..9)
     // pseudo-encodings tune the JPEG quality / zlib effort. Advertised order also = preference order.
@@ -171,6 +175,8 @@ internal sealed class RfbClient : IProtocolSource
                 var d = Spice.SpiceJpeg.DecodeToBgra(jpeg, null);
                 return d ?? (0, 0, Array.Empty<byte>());
             });
+        // ZRLE shares the same 32bpp BGRX pixel format; its single persistent zlib stream reads from the socket.
+        _zrle = new ZrleDecoder((n, c) => ReadExactAsync(n, c));
         await SendEncodingsAsync(ct);
     }
 
@@ -181,13 +187,16 @@ internal sealed class RfbClient : IProtocolSource
     {
         int q = Math.Clamp(_jpegQuality, 0, 9);
         int cl = Math.Clamp(_compressLevel, 0, 9);
-        return WriteAsync(SetEncodings(new[]
+        var encodings = new[]
         {
-            EncTight, EncCopyRect, EncRaw,
+            EncTight, EncZrle, EncCopyRect, EncRaw,
             EncTightQualityBase - q,     // JPEG quality level
             EncTightCompressBase - cl,   // zlib compression level
             EncDesktopSize,
-        }), ct);
+        };
+        _logger.LogInformation("RFB: advertising encodings [{Encs}] (Tight,ZRLE,CopyRect,Raw + Tight q{Q}/zlib{C} + DesktopSize)",
+            string.Join(",", encodings), q, cl);
+        return WriteAsync(SetEncodings(encodings), ct);
     }
 
     /// <summary>
@@ -297,6 +306,11 @@ internal sealed class RfbClient : IProtocolSource
             int w = (rh[4] << 8) | rh[5];
             int h = (rh[6] << 8) | rh[7];
             int enc = (int)ReadU32be(rh.AsSpan(8, 4));
+            // Log the first time each encoding is actually RECEIVED this session, so we can confirm which the
+            // server really picks (advertising ZRLE ≠ the server using it). One line per distinct encoding.
+            if (_seenEncodings.Add(enc))
+                _logger.LogInformation("RFB: server used encoding {Enc} ({Name}) — first {W}x{H} rect",
+                    enc, EncodingName(enc), w, h);
             switch (enc)
             {
                 case EncRaw:
@@ -309,6 +323,12 @@ internal sealed class RfbClient : IProtocolSource
                 case EncTight:
                 {
                     var pixels = await _tight!.DecodeRectAsync(w, h, ct);
+                    StoreAndEmit(x, y, w, h, pixels);
+                    break;
+                }
+                case EncZrle:
+                {
+                    var pixels = await _zrle!.DecodeRectAsync(w, h, ct);
                     StoreAndEmit(x, y, w, h, pixels);
                     break;
                 }
@@ -580,6 +600,17 @@ internal sealed class RfbClient : IProtocolSource
     }
 
     private static uint ReadU32be(ReadOnlySpan<byte> b) => (uint)((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]);
+
+    // Human-readable name for a received RFB encoding id (for the "server used encoding" log line).
+    private static string EncodingName(int enc) => enc switch
+    {
+        EncRaw => "Raw",
+        EncCopyRect => "CopyRect",
+        EncTight => "Tight",
+        EncZrle => "ZRLE",
+        EncDesktopSize => "DesktopSize",
+        _ => "?",
+    };
 
     /// <summary>Parses the minor version from an "RFB 003.008\n" banner; defaults to 3 (most conservative).</summary>
     private static int ParseMinor(string banner)

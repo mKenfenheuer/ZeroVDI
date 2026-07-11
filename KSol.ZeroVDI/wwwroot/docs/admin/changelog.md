@@ -5,7 +5,24 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **VNC sessions never upscale the target.** When the browser requests a larger session than the VNC host's
+  native desktop (e.g. macOS ARD serves a fixed 1280×720 and can't be resized over RFB), the bridge now
+  clamps the RDP session **down** to the source size instead of stretching a smaller framebuffer up. This
+  removes the per-rectangle CPU scale-blit tax and the blur of upscaling; the source is presented 1:1
+  (sharp) and the browser client letterboxes the smaller canvas in its own window. Downscaling a
+  larger-than-requested source is still performed.
+
 ### Added
+- **ZRLE encoding for VNC hosts.** The VNC bridge now also negotiates **ZRLE** (zlib-compressed 64×64 tiles
+  with solid / packed-palette / RLE subencodings), advertised after Tight and ahead of Raw. macOS's built-in
+  Screen Sharing / Apple Remote Desktop server supports ZRLE well and its own Tight implementation is weak
+  (it frequently falls back to near-Raw rectangles); ZRLE gives Apple's server a genuinely compact path for
+  flat UI and palettised regions, cutting the host→gateway bandwidth that dominated macOS VNC sluggishness.
+  The bridge now logs both the **advertised** encoding list and the **first rectangle received in each
+  encoding**, so it's verifiable which codec the server actually selected (advertising ZRLE ≠ using it). The
+  VNC leg's frames-in-flight window is also wired to `ZEROVDI_MAX_FRAMES_IN_FLIGHT` (default 1 = strict
+  lockstep; raise it to pipeline the host RTT + browser ack on a healthy link).
 - **End-to-end frame-ack flow control on bridged sessions.** The VNC/SPICE→RDP bridge now runs the whole
   pipeline as a closed loop: a frame generated at the target flows target → server → client, and only once
   the client acknowledges it does the server release the next frame/delta from the target — no unbounded

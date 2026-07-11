@@ -120,7 +120,25 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         await _frontEnd.RunHandshakeAsync(ct);
         FF("RDP handshake done (session ACTIVE)");
 
-        // The browser fixed the session size in its Connect-Initial; letterbox the source into it.
+        // Never upscale. The browser fixes a requested session size in its Connect-Initial, but if the source
+        // desktop is smaller (e.g. macOS ARD serves a fixed 1280x720 and can't be resized over RFB), stretching
+        // it up to the request is both blurry and a per-rect CPU scale-blit tax. So clamp the session down to the
+        // source when the source is smaller in either axis — the letterbox fit is then identity (1:1, sharp) and
+        // the browser client letterboxes the smaller canvas in its own window. Downscaling a larger source is
+        // still allowed (the fit shrinks it). Applied BEFORE SetupGfx so the GFX surface is built at the final size.
+        {
+            int reqW = _frontEnd.Width, reqH = _frontEnd.Height;
+            int sesW = Math.Min(reqW, _source.Width) & ~1;
+            int sesH = Math.Min(reqH, _source.Height) & ~1;
+            if (sesW != reqW || sesH != reqH)
+            {
+                _logger.LogInformation("Bridge: clamping session {ReqW}x{ReqH} down to source {SW}x{SH} (no upscaling)",
+                    reqW, reqH, sesW, sesH);
+                _frontEnd.SetSize(sesW, sesH);
+            }
+        }
+
+        // Letterbox (now identity when we clamped to the source, or a downscale for a larger source).
         lock (_fbLock)
         {
             _fbW = _frontEnd.Width; _fbH = _frontEnd.Height;

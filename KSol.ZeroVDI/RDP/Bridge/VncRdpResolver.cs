@@ -52,8 +52,13 @@ public sealed class VncRdpResolver : IRdpResolver
         // 2) Hand the source to the shared RDP encoder over an in-memory duplex; the browser reads the
         // RDP stream from BrowserSide.
         var pipe = new DuplexPipeStream();
+        // Frames-in-flight window for the VNC leg (default 1 = strict lockstep; ZEROVDI_MAX_FRAMES_IN_FLIGHT
+        // raises it). VNC is self-clocking — it only pulls the next incremental after the previous frame is
+        // acked — so a larger window overlaps the host FramebufferUpdateRequest RTT (macOS ARD is notably slow
+        // to answer) and the browser frame-ack instead of serialising them at ~1/RTT.
         var encoder = new RdpEncoderSession(source, pipe.ServerSide, KeysymMap.For(request.KeyboardLayout), _h264Factory, logger,
-            bitmapCongestion: () => pipe.ServerToBrowserPending);
+            bitmapCongestion: () => pipe.ServerToBrowserPending,
+            maxFramesInFlight: ResolveVncFramesInFlight());
         var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
         _ = Task.Run(async () =>
@@ -71,6 +76,15 @@ public sealed class VncRdpResolver : IRdpResolver
             _ = source.DisposeAsync();
         });
         return new RdpHostConnection.Connected(pipe.BrowserSide, disposer);
+    }
+
+    // Frames-in-flight window for the VNC leg. Defaults to 1 (strict lockstep — one frame outstanding
+    // end-to-end); ZEROVDI_MAX_FRAMES_IN_FLIGHT (a positive int) raises it to pipeline more frames and hide
+    // the host request RTT + browser ack on a healthy link.
+    private static int ResolveVncFramesInFlight()
+    {
+        var s = Environment.GetEnvironmentVariable("ZEROVDI_MAX_FRAMES_IN_FLIGHT");
+        return int.TryParse(s, out var n) && n >= 1 ? n : 1;
     }
 
     /// <summary>A <see cref="Stream"/>-typed disposer so <c>Connected.Inner</c> can carry teardown.</summary>
