@@ -55,7 +55,13 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     private IH264Encoder? _h264;
     private RfxProgressiveEncoder? _rfxProg;   // RemoteFX Progressive path (fallback for no-AVC clients)
     private volatile bool _gfxActive;   // true once GFX streaming (AVC or progressive) is negotiated → stop bitmap output
-    private int _frameDirty;            // set when the framebuffer changed since the last H.264 encode
+    // GFX-path dirty region: the union of every source rect touched since the last GFX encode, in session
+    // coords. Unlike the bitmap `_dirty` box (consumed by BitmapClockAsync), this one is consumed by the
+    // frame clock so the GFX encoders can (a) skip encoding entirely when nothing changed and (b) restrict
+    // work to the changed area (progressive tile scan).
+    private readonly object _gfxDirtyLock = new();
+    private bool _gfxDirty;
+    private int _gx0, _gy0, _gx1, _gy1;   // inclusive dirty bounding box (session coords)
     // H.264 keepalive: even with no change, re-feed the current frame at least this often so ffmpeg's input
     // pipeline keeps flushing (a lone buffered frame would otherwise never come out). ~4fps idle floor.
     private long _lastH264Encode;
@@ -330,8 +336,8 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
             _logger.LogInformation("Bridge: source resized to {W}x{H}; fit @({X},{Y}) {FW}x{FH} (session {SW}x{SH})",
                 w, h, _fit.x, _fit.y, _fit.w, _fit.h, _fbW, _fbH);
             _ = _source.RequestFullFrameAsync(CancellationToken.None);
-            Interlocked.Exchange(ref _frameDirty, 1);
-            MarkDirty(0, 0, _fbW - 1, _fbH - 1); // bitmap path: repaint whole (now full-bleed) framebuffer
+            MarkGfxDirty(0, 0, _fbW - 1, _fbH - 1); // GFX path: repaint whole (now full-bleed) framebuffer
+            MarkDirty(0, 0, _fbW - 1, _fbH - 1);    // bitmap path: same
         }
         catch (Exception ex) { _logger.LogWarning(ex, "Bridge: source resize handling failed"); }
     }
@@ -367,7 +373,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
             try { enc.Start(); _h264 = enc; } catch (Exception ex) { _logger.LogWarning(ex, "Bridge: H.264 restart failed"); _h264 = null; }
         }
         if (_rfxProg != null) _rfxProg = new RfxProgressiveEncoder(newW, newH);
-        Interlocked.Exchange(ref _frameDirty, 1);
+        MarkGfxDirty(0, 0, newW - 1, newH - 1); // force a full re-encode against the rebuilt surface
     }
 
     private void OnGfxActivated(CancellationToken ct)
@@ -381,6 +387,10 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
             _rfxProg.Reset();
             _gfxActive = true;
             WakeSourceForGfxHandover();
+            // Prime a full-frame dirty so the frame clock encodes the initial screen immediately (the clock
+            // now gates progressive on the dirty box too — a fresh handover would otherwise wait for the next
+            // source rect). Reset() already forces every tile on that first encode.
+            MarkGfxDirty(0, 0, _fbW - 1, _fbH - 1);
             _logger.LogInformation("Bridge: switched to RemoteFX Progressive/GFX output");
             return;
         }
@@ -389,7 +399,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         var enc = _h264Factory.Create(_frontEnd.Width, _frontEnd.Height, fps: 30, crf: TierCrf[_tier], _logger);
         enc.OnFrame += annexB =>
         {
-            try { FFOnce($"H.264 first AU from ffmpeg ({annexB.Length}B)"); if (_gfx!.CanSubmitFrame) { _gfx.SubmitFrame(annexB); FFOnce("first GFX SubmitFrame (frame sent to client)"); } else FFOnce("H.264 AU ready but CanSubmitFrame=false (dropped)"); }
+            try { if (_gfx!.CanSubmitFrame) { _gfx.SubmitFrame(annexB); FFOnce("first GFX SubmitFrame (frame sent to client)"); } else FFOnce("H.264 AU ready but CanSubmitFrame=false (dropped)"); }
             catch (Exception ex) { _logger.LogDebug(ex, "Bridge: GFX submit failed"); }
         };
         try
@@ -397,10 +407,10 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
             enc.Start(); _h264 = enc; _gfxActive = true;
             WakeSourceForGfxHandover();
             // Prime the FIRST frame. The framebuffer already holds the source's initial full frame (painted
-            // during the bitmap phase), but H.264 only encodes when _frameDirty is set — which otherwise
+            // during the bitmap phase), but H.264 only encodes when the GFX dirty box is set — which otherwise
             // waits for the NEXT source rectangle. On an idle desktop that could be many seconds (the
-            // "first frame takes 20s" bug), so mark dirty now to encode+send immediately on the next tick.
-            Interlocked.Exchange(ref _frameDirty, 1);
+            // "first frame takes 20s" bug), so mark the whole frame dirty now to encode+send immediately.
+            MarkGfxDirty(0, 0, _fbW - 1, _fbH - 1);
             FF("GFX activated → H.264 (primed first frame dirty)");
             _logger.LogInformation("Bridge: switched to H.264/GFX output");
         }
@@ -423,38 +433,45 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
                 // window isn't ready yet), the dirty signal would be LOST and no frame would go out until the
                 // NEXT source change — the "first frame only after a mouse move" bug. So bail here while
                 // leaving _frameDirty set, and retry on the next tick.
-                if (!_gfx!.CanSubmitFrame) { if (_frameDirty == 1) FFOnce("frame-clock: dirty but CanSubmitFrame=false (waiting)"); continue; }
+                if (!_gfx!.CanSubmitFrame) { lock (_gfxDirtyLock) { if (_gfxDirty) FFOnce("frame-clock: dirty but CanSubmitFrame=false (waiting)"); } continue; }
                 FFOnce("frame-clock: CanSubmitFrame=true");
-                // Progressive refines idle tiles over successive frames, so it must keep ticking even when
-                // the framebuffer is unchanged (until every tile reaches lossless). For H.264 we encode when
-                // the frame changed OR when a keepalive interval elapsed: ffmpeg's rawvideo input pipeline
-                // needs a steady frame cadence to flush the CURRENT frame out (a lone frame can sit buffered
-                // until the next one arrives), so a purely change-driven feed could leave the very first
-                // frame stuck inside ffmpeg — "nothing reaches the client" on an idle desktop.
-                if (!progressive)
+
+                // Take the accumulated dirty box (clears it). This is the shared change signal for both paths.
+                bool dirty = TakeGfxDirty(out int gx0, out int gy0, out int gx1, out int gy1);
+
+                if (progressive)
                 {
-                    bool dirty = Interlocked.Exchange(ref _frameDirty, 0) == 1;
+                    // Progressive must keep ticking while any tile is still below lossless (to refine idle
+                    // tiles), even with an unchanged framebuffer — so run on dirty OR pending refinement.
+                    if (!dirty && !_rfxProg!.HasPendingRefinement) continue;
+                    FFOnce("frame-clock: encoding first frame");
+                    byte[] pframe;
+                    lock (_fbLock) { if (_fb.Length == 0) continue; pframe = (byte[])_fb.Clone(); }
+                    // Pass the dirty box so only changed tiles are re-hashed (idle screen hashes nothing);
+                    // refinement of already-sent tiles happens regardless inside the encoder.
+                    (int, int, int, int)? box = dirty ? (gx0, gy0, gx1, gy1) : null;
+                    var streams = _rfxProg!.Encode(pframe, box);
+                    if (streams.Count > 0) _gfx.SubmitProgressiveFrame(streams);
+                    continue;
+                }
+
+                // H.264: encode when the frame changed OR when the keepalive interval elapsed. ffmpeg's
+                // rawvideo input pipeline needs a steady frame cadence to flush the CURRENT frame out (a lone
+                // frame can sit buffered until the next arrives), so a purely change-driven feed could leave
+                // the first frame stuck inside ffmpeg — "nothing reaches the client" on an idle desktop.
+                {
                     long now = Environment.TickCount64;
                     if (!dirty && now - _lastH264Encode < H264KeepaliveMs) continue;
                     _lastH264Encode = now;
                 }
                 FFOnce("frame-clock: encoding first frame");
+                if (_h264 == null) continue;
                 byte[] frame;
                 lock (_fbLock)
                 {
                     if (_fb.Length == 0) continue;
                     frame = (byte[])_fb.Clone();   // top-down BGRA, session-sized
                 }
-                if (progressive)
-                {
-                    // Consume the dirty flag so we don't spin; the encoder's own per-tile hashing decides
-                    // what actually changed and what to refine.
-                    Interlocked.Exchange(ref _frameDirty, 0);
-                    var streams = _rfxProg!.Encode(frame);
-                    if (streams.Count > 0) _gfx.SubmitProgressiveFrame(streams);
-                    continue;
-                }
-                if (_h264 == null) continue;
                 await _h264.EncodeAsync(frame, ct);
             }
         }
@@ -521,7 +538,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
             _ = old.DisposeAsync();
             var enc = _h264Factory.Create(_frontEnd.Width, _frontEnd.Height, fps: 30, crf: TierCrf[tier], _logger);
             enc.OnFrame += annexB => { try { if (_gfx!.CanSubmitFrame) _gfx.SubmitFrame(annexB); } catch (Exception ex) { _logger.LogDebug(ex, "Bridge: GFX submit failed"); } };
-            try { enc.Start(); _h264 = enc; Interlocked.Exchange(ref _frameDirty, 1); }
+            try { enc.Start(); _h264 = enc; MarkGfxDirty(0, 0, _fbW - 1, _fbH - 1); }
             catch (Exception ex) { _logger.LogWarning(ex, "Bridge: H.264 CRF change restart failed"); _h264 = null; }
         }
     }
@@ -548,13 +565,41 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
             if (dw <= 0 || dh <= 0) return;
             PixelConvert.ScaleBlitBgrx(bgrx, w, h, _fb, _fbW, dx, dy, dw, dh);
         }
-        // When GFX/H.264 is active the frame clock encodes whole frames; just mark the framebuffer dirty
-        // and skip the legacy bitmap update (sending both would double-paint / fight the surface).
-        if (_gfxActive) { Interlocked.Exchange(ref _frameDirty, 1); return; }
+        // When GFX/H.264 is active the frame clock encodes whole frames; accumulate the touched session box
+        // into the GFX dirty region (so the encoders can skip idle frames and scope work to what changed) and
+        // skip the legacy bitmap update (sending both would double-paint / fight the surface).
+        if (_gfxActive) { MarkGfxDirty(dx, dy, dx + dw - 1, dy + dh - 1); return; }
         // Otherwise the bitmap fastpath: union this rect into the pending dirty box. We do NOT flush here —
         // BitmapClockAsync flushes on its own cadence so display delivery is independent of the source
         // receive loop (and, for VNC, of the incremental-request round-trip).
         MarkDirty(dx, dy, dx + dw - 1, dy + dh - 1);
+    }
+
+    // Union an inclusive session-space box into the pending GFX dirty region (H.264 / progressive path).
+    private void MarkGfxDirty(int x0, int y0, int x1, int y1)
+    {
+        lock (_gfxDirtyLock)
+        {
+            if (!_gfxDirty) { _gx0 = x0; _gy0 = y0; _gx1 = x1; _gy1 = y1; _gfxDirty = true; }
+            else
+            {
+                if (x0 < _gx0) _gx0 = x0; if (y0 < _gy0) _gy0 = y0;
+                if (x1 > _gx1) _gx1 = x1; if (y1 > _gy1) _gy1 = y1;
+            }
+        }
+    }
+
+    // Atomically takes the accumulated GFX dirty box and clears it. Returns false when nothing changed since
+    // the last take. The returned box is inclusive session coords, clamped to the framebuffer by the caller.
+    private bool TakeGfxDirty(out int x0, out int y0, out int x1, out int y1)
+    {
+        lock (_gfxDirtyLock)
+        {
+            if (!_gfxDirty) { x0 = y0 = x1 = y1 = 0; return false; }
+            x0 = _gx0; y0 = _gy0; x1 = _gx1; y1 = _gy1;
+            _gfxDirty = false;
+            return true;
+        }
     }
 
     // Union an inclusive session-space box into the pending bitmap dirty region.

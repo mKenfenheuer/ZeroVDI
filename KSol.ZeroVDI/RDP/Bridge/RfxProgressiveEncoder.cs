@@ -72,40 +72,70 @@ internal sealed class RfxProgressiveEncoder
     // larger than ~17 KB. 16384 keeps every stream under that proven-safe ceiling with margin.
     private const int MaxStreamBytes = 16_384;
 
+    /// <summary>True while at least one tile has been sent but has not yet reached lossless — i.e. the frame
+    /// clock should keep ticking (to refine idle tiles) even if the framebuffer is unchanged.</summary>
+    public bool HasPendingRefinement { get; private set; }
+
     /// <summary>
     /// Encode one top-down BGRA session frame (length must be width*height*4) into zero or more complete
     /// RFX_PROGRESSIVE bitstreams — one WIRE_TO_SURFACE_2 payload each. Returns an empty list when no tile
-    /// changed. Change detection is a per-tile pixel hash against the last-sent state (no reliance on dirty
-    /// rects): a changed tile is reset to stage 0 (coarse), an unchanged-but-unrefined tile advances one
-    /// stage, a lossless idle tile is skipped.
+    /// changed and nothing needs refining.
+    ///
+    /// <paramref name="dirty"/> is the caller's accumulated changed region (inclusive session coords) since
+    /// the last call, or null to hash the whole surface. Only tiles that INTERSECT the dirty box are hashed
+    /// for change this call (the CPU win — an idle screen hashes nothing); tiles already sent but not yet
+    /// lossless are refined regardless of the dirty box (progressive convergence). On a forced full frame the
+    /// dirty box is ignored and every tile is (re)hashed and sent coarse.
     /// </summary>
-    public IReadOnlyList<byte[]> Encode(byte[] bgra)
+    public IReadOnlyList<byte[]> Encode(byte[] bgra, (int x0, int y0, int x1, int y1)? dirty = null)
     {
         if (bgra.Length != _curFrame.Length) return Array.Empty<byte[]>();
         Buffer.BlockCopy(bgra, 0, _curFrame, 0, bgra.Length);
 
+        // Dirty box → inclusive tile range that needs change-hashing this call. Clamp to the tile grid; a
+        // null box (or a forced full frame) means "the whole surface".
+        int htx0 = 0, hty0 = 0, htx1 = _tilesX - 1, hty1 = _tilesY - 1;
+        if (dirty is { } d && !_forceFullFrame)
+        {
+            htx0 = Math.Clamp(d.x0 / 64, 0, _tilesX - 1);
+            hty0 = Math.Clamp(d.y0 / 64, 0, _tilesY - 1);
+            htx1 = Math.Clamp(d.x1 / 64, 0, _tilesX - 1);
+            hty1 = Math.Clamp(d.y1 / 64, 0, _tilesY - 1);
+        }
+
         int lastStage = ProgStages.Length - 1;
         var changed = new List<(int tx, int ty, int stage)>();
+        bool pendingRefine = false;
         for (int ty = 0; ty < _tilesY; ty++)
         {
             for (int tx = 0; tx < _tilesX; tx++)
             {
                 int idx = ty * _tilesX + tx;
-                ulong h = HashTile(_curFrame, tx, ty, _width, _height);
-                if (_forceFullFrame || h != _tileHashes[idx])
+                // Hash for change only inside the dirty tile range (or everywhere on a forced full frame).
+                bool inDirty = _forceFullFrame || (tx >= htx0 && tx <= htx1 && ty >= hty0 && ty <= hty1);
+                if (inDirty)
                 {
-                    _tileHashes[idx] = h;
-                    _tileStage[idx] = 0;
-                    changed.Add((tx, ty, 0));
+                    ulong h = HashTile(_curFrame, tx, ty, _width, _height);
+                    if (_forceFullFrame || h != _tileHashes[idx])
+                    {
+                        _tileHashes[idx] = h;
+                        _tileStage[idx] = 0;
+                        changed.Add((tx, ty, 0));
+                        pendingRefine = true;   // stage 0 < lossless → will need refining
+                        continue;
+                    }
                 }
-                else if (_tileStage[idx] >= 0 && _tileStage[idx] < lastStage)
+                // Outside the dirty box, or unchanged inside it: refine if previously sent but not lossless.
+                if (_tileStage[idx] >= 0 && _tileStage[idx] < lastStage)
                 {
                     _tileStage[idx]++;
                     changed.Add((tx, ty, _tileStage[idx]));
+                    if (_tileStage[idx] < lastStage) pendingRefine = true;
                 }
             }
         }
         _forceFullFrame = false;
+        HasPendingRefinement = pendingRefine;
         if (changed.Count == 0) return Array.Empty<byte[]>();
 
         // Encode each changed tile (fully independent) — fan out across cores for busy frames.
