@@ -6,6 +6,14 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **In-process libx264 H.264 encoder.** The GFX/AVC420 real-time encoder can now run **libx264 directly
+  in-process** (via native P/Invoke) instead of spawning a per-session `ffmpeg` subprocess: a full-frame BGRA
+  buffer is colour-converted to I420 and encoded in the gateway's own address space, with no process
+  boundary or stdin/stdout copy, and each access unit is emitted synchronously (no reader thread, no
+  idle-flush timer). It produces the same Main@L4.2 Annex-B stream the browser decoder requires. The codec
+  backend stays a one-line DI swap (`IH264EncoderFactory`); the ffmpeg-subprocess encoder remains available
+  as the fallback. libx264 is resolved automatically on both Linux and macOS (Homebrew paths included), so
+  no `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH` setup is needed.
 - **Tight encoding for VNC hosts.** The VNC bridge now negotiates **Tight** (zlib + JPEG, with the
   copy/palette/gradient filters) in preference to Raw, plus **CopyRect** (moved regions aren't resent) and
   the **DesktopSize** pseudo-encoding (mid-session host resizes now follow). Tight cuts VNC bandwidth by an

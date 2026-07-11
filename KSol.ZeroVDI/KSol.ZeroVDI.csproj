@@ -4,6 +4,7 @@
     <TargetFramework>net9.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <UserSecretsId>aspnet-KSol.ZeroVDI.-250bca5b-7027-4c51-90d4-0bba1f01bd40</UserSecretsId>
   </PropertyGroup>
 
