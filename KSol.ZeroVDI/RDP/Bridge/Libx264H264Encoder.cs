@@ -25,7 +25,7 @@ namespace KSol.ZeroVDI.RDP.Bridge;
 /// </summary>
 internal sealed class Libx264H264Encoder : IH264Encoder
 {
-    private readonly int _width, _height, _fps, _crf;
+    private readonly int _width, _height, _fps, _crf, _maxKbps;
     private readonly ILogger _logger;
     private readonly int _frameBytes;
 
@@ -44,10 +44,12 @@ internal sealed class Libx264H264Encoder : IH264Encoder
 
     /// <param name="crf">x264 constant-rate-factor (quality/size knob): ~18 = visually lossless, ~28 =
     /// smaller/softer. The adaptive controller raises it on slow links. Clamped to a sane 16..40.</param>
-    public Libx264H264Encoder(int width, int height, int fps, ILogger logger, int crf = 23)
+    /// <param name="maxKbps">Bitrate ceiling (kbit/s) for capped-CRF via VBV, or 0 for unbounded CRF.</param>
+    public Libx264H264Encoder(int width, int height, int fps, ILogger logger, int crf = 23, int maxKbps = 0)
     {
         _width = width & ~1; _height = height & ~1; _fps = Math.Clamp(fps, 5, 60);
         _crf = Math.Clamp(crf, 16, 40);
+        _maxKbps = Math.Max(0, maxKbps);
         _logger = logger;
         _frameBytes = _width * _height * 4;
     }
@@ -55,6 +57,7 @@ internal sealed class Libx264H264Encoder : IH264Encoder
     public int Width => _width;
     public int Height => _height;
     public int Crf => _crf;
+    public int MaxKbps => _maxKbps;
 
     public unsafe void Start()
     {
@@ -77,6 +80,15 @@ internal sealed class Libx264H264Encoder : IH264Encoder
 
             // Quality + framing knobs (mirror the ffmpeg backend's -x264-params string).
             Parse(param, "crf", _crf.ToString());
+            // Capped CRF: keep CRF as the quality target but clamp the instantaneous bitrate with VBV so a
+            // busy/animated desktop can't spike the 5264 stream to tens of Mbit/s. vbv-maxrate is the ceiling
+            // (kbit/s); vbv-bufsize is the rate-control window — small (~0.5s of the cap) so we bound bursts
+            // and hold latency down rather than smoothing over seconds. maxKbps==0 ⇒ pure CRF (no cap).
+            if (_maxKbps > 0)
+            {
+                Parse(param, "vbv-maxrate", _maxKbps.ToString());
+                Parse(param, "vbv-bufsize", Math.Max(1, _maxKbps / 2).ToString());
+            }
             Parse(param, "cabac", "1");        // → Main profile (Constrained Baseline is rejected by WebCodecs)
             Parse(param, "level", "4.2");      // Main@L4.2 (avc1.4d402a) is the only level the decoder accepts
             Parse(param, "slices", "1");       // one VCL slice per picture (our AU framing assumes this)
@@ -119,7 +131,7 @@ internal sealed class Libx264H264Encoder : IH264Encoder
         IntPtr* planes = (IntPtr*)(img + OffImgPlane);
         planes[0] = _yPlane; planes[1] = _uPlane; planes[2] = _vPlane; planes[3] = IntPtr.Zero;
 
-        _logger.LogInformation("Bridge/H264: libx264 encoder started {W}x{H}@{F} crf={C}", _width, _height, _fps, _crf);
+        _logger.LogInformation("Bridge/H264: libx264 encoder started {W}x{H}@{F} crf={C} maxKbps={M}", _width, _height, _fps, _crf, _maxKbps);
     }
 
     private int _fedCount;
@@ -388,9 +400,9 @@ internal static unsafe class X264
 /// </summary>
 internal sealed class Libx264H264EncoderFactory : IH264EncoderFactory
 {
-    public IH264Encoder Create(int width, int height, int fps, int crf, ILogger logger)
+    public IH264Encoder Create(int width, int height, int fps, int crf, int maxKbps, ILogger logger)
     {
         X264.Init();   // idempotent: loads libx264 + binds the build-suffixed symbols on first use
-        return new Libx264H264Encoder(width, height, fps, logger, crf);
+        return new Libx264H264Encoder(width, height, fps, logger, crf, maxKbps);
     }
 }

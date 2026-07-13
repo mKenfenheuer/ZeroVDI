@@ -21,6 +21,9 @@ public interface IH264Encoder : IAsyncDisposable
     int Height { get; }
     /// <summary>The quality knob this encoder was created with (x264 CRF), for the adaptive controller.</summary>
     int Crf { get; }
+    /// <summary>The bitrate ceiling (kbit/s) this encoder was created with, or 0 for unbounded. The adaptive
+    /// controller lowers it on a congested link (capped-CRF: quality-driven under the cap, VBV-clamped at it).</summary>
+    int MaxKbps { get; }
 
     /// <summary>Spins up the encoder and begins draining its output to <see cref="OnFrame"/>.</summary>
     void Start();
@@ -36,5 +39,6 @@ public interface IH264Encoder : IAsyncDisposable
 /// </summary>
 public interface IH264EncoderFactory
 {
-    IH264Encoder Create(int width, int height, int fps, int crf, ILogger logger);
+    /// <param name="maxKbps">Bitrate ceiling in kbit/s for capped-CRF rate control, or 0 for unbounded CRF.</param>
+    IH264Encoder Create(int width, int height, int fps, int crf, int maxKbps, ILogger logger);
 }

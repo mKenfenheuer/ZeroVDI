@@ -62,10 +62,35 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     private readonly object _gfxDirtyLock = new();
     private bool _gfxDirty;
     private int _gx0, _gy0, _gx1, _gy1;   // inclusive dirty bounding box (session coords)
-    // H.264 keepalive: even with no change, re-feed the current frame at least this often so ffmpeg's input
-    // pipeline keeps flushing (a lone buffered frame would otherwise never come out). ~4fps idle floor.
-    private long _lastH264Encode;
-    private const long H264KeepaliveMs = 250;
+
+    // H.264 in-flight accounting. ffmpeg encodes asynchronously: the frame clock FEEDS a frame, and its AU
+    // emerges later on the reader thread → SubmitFrame. The GFX unacked-frame window (_frameId, consumed in
+    // SubmitFrame) therefore isn't consumed at feed time, so a naive feed-time CanSubmitFrame check would let
+    // the clock overrun the window while frames sit in ffmpeg. We bridge the gap with a fed-not-yet-submitted
+    // counter: the effective in-flight depth is (GFX unacked) + (frames in the ffmpeg pipeline). Incremented
+    // when we feed, decremented when the AU is submitted.
+    private int _h264Inflight;
+
+    // TEMP rate tracer (chasing "video stutters unless the mouse moves"). Counts, per one-second window:
+    // source rectangles received, frames fed to the encoder, and frames submitted to the client — plus the
+    // window/inflight state at report time. If _rectCount goes to ~0 during a stutter the SERVER stopped
+    // pushing (input-gated upstream); if rects keep coming but fed/submitted stall, the bottleneck is our
+    // window/ack gate. Remove once diagnosed.
+    private int _rectCount, _fedCount, _submitCount;
+    private long _rateWindowStart;
+    private long _lastFbSample;   // TEMP encoder-fb color sampler
+    // Shared OnFrame handler for every H.264 encoder instance. ALWAYS submits the AU (the window is gated at
+    // feed time, not here — dropping a late AU would freeze the stream until the next source change), and
+    // releases the fed-time in-flight reservation. Held as a field so it can be detached from a retiring
+    // encoder on restart, keeping that encoder's trailing AUs off the new pipeline's counter.
+    private void H264Submit(byte[] annexB)
+    {
+        try { _gfx!.SubmitFrame(annexB); Interlocked.Increment(ref _submitCount); FFOnce("first GFX SubmitFrame (frame sent to client)"); }
+        catch (Exception ex) { _logger.LogDebug(ex, "Bridge: GFX submit failed"); }
+        finally { Interlocked.Decrement(ref _h264Inflight); }
+    }
+    private Action<byte[]>? _h264SubmitCache;
+    private Action<byte[]> _h264Submit => _h264SubmitCache ??= H264Submit;
 
     // Bitmap-path dirty accumulator. Source rectangles NEVER flush inline (that coupled display updates to
     // the source receive loop and, for VNC, stalled the next FramebufferUpdateRequest — the "display lags
@@ -367,9 +392,11 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         if (_h264 != null)
         {
             var old = _h264;
+            old.OnFrame -= _h264Submit;      // old encoder's trailing AUs must NOT touch the new pipeline's counter
             _ = old.DisposeAsync();
-            var enc = _h264Factory.Create(newW, newH, fps: 30, crf: TierCrf[_tier], _logger);
-            enc.OnFrame += annexB => { try { if (_gfx!.CanSubmitFrame) _gfx.SubmitFrame(annexB); } catch (Exception ex) { _logger.LogDebug(ex, "Bridge: GFX submit failed"); } };
+            Interlocked.Exchange(ref _h264Inflight, 0);  // pipeline rebuilt: reset the fed-not-submitted count
+            var enc = _h264Factory.Create(newW, newH, fps: 30, crf: TierCrf[_tier], maxKbps: TierKbps(_tier, 30), _logger);
+            enc.OnFrame += _h264Submit;
             try { enc.Start(); _h264 = enc; } catch (Exception ex) { _logger.LogWarning(ex, "Bridge: H.264 restart failed"); _h264 = null; }
         }
         if (_rfxProg != null) _rfxProg = new RfxProgressiveEncoder(newW, newH);
@@ -395,15 +422,12 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
             return;
         }
         // AVC420/444: stand up the ffmpeg H.264 encoder sized to the (even) session dimensions, at the
-        // current congestion tier's CRF.
-        var enc = _h264Factory.Create(_frontEnd.Width, _frontEnd.Height, fps: 30, crf: TierCrf[_tier], _logger);
-        enc.OnFrame += annexB =>
-        {
-            try { if (_gfx!.CanSubmitFrame) { _gfx.SubmitFrame(annexB); FFOnce("first GFX SubmitFrame (frame sent to client)"); } else FFOnce("H.264 AU ready but CanSubmitFrame=false (dropped)"); }
-            catch (Exception ex) { _logger.LogDebug(ex, "Bridge: GFX submit failed"); }
-        };
+        // current congestion tier's CRF and (resolution-scaled) bitrate ceiling.
+        var enc = _h264Factory.Create(_frontEnd.Width, _frontEnd.Height, fps: 30, crf: TierCrf[_tier], maxKbps: TierKbps(_tier, 30), _logger);
+        enc.OnFrame += _h264Submit;
         try
         {
+            Interlocked.Exchange(ref _h264Inflight, 0);
             enc.Start(); _h264 = enc; _gfxActive = true;
             WakeSourceForGfxHandover();
             // Prime the FIRST frame. The framebuffer already holds the source's initial full frame (painted
@@ -427,43 +451,58 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
             {
                 await Task.Delay(33, ct); // ~30fps
                 if (!_gfxActive) continue;
-                bool progressive = _rfxProg != null;
-                // Order matters: check the GFX submit window BEFORE consuming the dirty flag. If we cleared
-                // dirty first and then found we couldn't submit (e.g. GFX just activated and the surface/ack
-                // window isn't ready yet), the dirty signal would be LOST and no frame would go out until the
-                // NEXT source change — the "first frame only after a mouse move" bug. So bail here while
-                // leaving _frameDirty set, and retry on the next tick.
-                if (!_gfx!.CanSubmitFrame) { lock (_gfxDirtyLock) { if (_gfxDirty) FFOnce("frame-clock: dirty but CanSubmitFrame=false (waiting)"); } continue; }
-                FFOnce("frame-clock: CanSubmitFrame=true");
 
-                // Take the accumulated dirty box (clears it). This is the shared change signal for both paths.
-                bool dirty = TakeGfxDirty(out int gx0, out int gy0, out int gx1, out int gy1);
+                // TEMP: once-per-second rate report — see _rectCount comment.
+                long nowMs = Environment.TickCount64;
+                if (nowMs - _rateWindowStart >= 1000)
+                {
+                    _rateWindowStart = nowMs;
+                    int rects = Interlocked.Exchange(ref _rectCount, 0);
+                    int fed = Interlocked.Exchange(ref _fedCount, 0);
+                    int sub = Interlocked.Exchange(ref _submitCount, 0);
+                    _logger.LogInformation("[rate] rects={Rects}/s fed={Fed}/s submitted={Sub}/s inflight={IF} unacked={UA} canSubmit={CS}",
+                        rects, fed, sub, _h264Inflight, _gfx?.UnackedDepth ?? -1, _gfx?.CanSubmitH264(_h264Inflight) ?? false);
+                }
+
+                bool progressive = _rfxProg != null;
 
                 if (progressive)
                 {
-                    // Progressive must keep ticking while any tile is still below lossless (to refine idle
-                    // tiles), even with an unchanged framebuffer — so run on dirty OR pending refinement.
-                    if (!dirty && !_rfxProg!.HasPendingRefinement) continue;
+                    // Progressive submits synchronously, so the GFX unacked window (CanSubmitFrame) is the whole
+                    // story. Check it BEFORE consuming the dirty box: if we cleared dirty then found we couldn't
+                    // submit, the signal would be lost until the next source change ("first frame only after a
+                    // mouse move"). Bail with the box intact and retry next tick.
+                    if (!_gfx!.CanSubmitFrame) { lock (_gfxDirtyLock) { if (_gfxDirty) FFOnce("frame-clock: dirty but CanSubmitFrame=false (waiting)"); } continue; }
+                    bool pdirty = TakeGfxDirty(out int px0, out int py0, out int px1, out int py1);
+                    // Must keep ticking while any tile is still below lossless (to refine idle tiles), even
+                    // with an unchanged framebuffer — so run on dirty OR pending refinement.
+                    if (!pdirty && !_rfxProg!.HasPendingRefinement) continue;
                     FFOnce("frame-clock: encoding first frame");
                     byte[] pframe;
                     lock (_fbLock) { if (_fb.Length == 0) continue; pframe = (byte[])_fb.Clone(); }
                     // Pass the dirty box so only changed tiles are re-hashed (idle screen hashes nothing);
                     // refinement of already-sent tiles happens regardless inside the encoder.
-                    (int, int, int, int)? box = dirty ? (gx0, gy0, gx1, gy1) : null;
+                    (int, int, int, int)? box = pdirty ? (px0, py0, px1, py1) : null;
                     var streams = _rfxProg!.Encode(pframe, box);
                     if (streams.Count > 0) _gfx.SubmitProgressiveFrame(streams);
                     continue;
                 }
 
-                // H.264: encode when the frame changed OR when the keepalive interval elapsed. ffmpeg's
-                // rawvideo input pipeline needs a steady frame cadence to flush the CURRENT frame out (a lone
-                // frame can sit buffered until the next arrives), so a purely change-driven feed could leave
-                // the first frame stuck inside ffmpeg — "nothing reaches the client" on an idle desktop.
+                // H.264: ffmpeg encodes asynchronously, so the effective in-flight depth is the GFX unacked
+                // window PLUS frames sitting in the ffmpeg pipeline (fed but not yet submitted). Gate the FEED
+                // on that combined depth — otherwise the clock overruns the window while frames are in-flight
+                // in ffmpeg, and the AUs that emerge past the window used to be dropped, freezing the stream
+                // until the next source change (the "video plays a second then freezes" stall). We reserve a
+                // slot here (++_h264Inflight) and release it in the OnFrame submit.
+                if (!_gfx!.CanSubmitH264(_h264Inflight))
                 {
-                    long now = Environment.TickCount64;
-                    if (!dirty && now - _lastH264Encode < H264KeepaliveMs) continue;
-                    _lastH264Encode = now;
+                    lock (_gfxDirtyLock) { if (_gfxDirty) FFOnce("frame-clock: dirty but window full (waiting)"); }
+                    continue;
                 }
+                FFOnce("frame-clock: CanSubmitFrame=true");
+                // Take the dirty box (clears it) only once we know we'll feed — purely change-driven.
+                bool dirty = TakeGfxDirty(out _, out _, out _, out _);
+                if (!dirty) continue;
                 FFOnce("frame-clock: encoding first frame");
                 if (_h264 == null) continue;
                 byte[] frame;
@@ -472,6 +511,18 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
                     if (_fb.Length == 0) continue;
                     frame = (byte[])_fb.Clone();   // top-down BGRA, session-sized
                 }
+                // TEMP: sample the encoder-fb pixel at the video center (surface (595,478)-ish inside the
+                // 1160x653@(15,152) stream) to see if COLOR reaches the encoder input, isolating grey to
+                // before vs after the encoder.
+                if (_fbW > 600 && _fbH > 480 && Environment.TickCount64 - _lastFbSample >= 2000)
+                {
+                    _lastFbSample = Environment.TickCount64;
+                    int ci = (478 * _fbW + 595) * 4;
+                    _logger.LogInformation("[fb-sample] encoderFB center BGRA=({B},{G},{R}) fbW={W} fbH={H}",
+                        frame[ci], frame[ci + 1], frame[ci + 2], _fbW, _fbH);
+                }
+                Interlocked.Increment(ref _h264Inflight);   // reserve the in-flight slot; released on submit
+                Interlocked.Increment(ref _fedCount);
                 await _h264.EncodeAsync(frame, ct);
             }
         }
@@ -486,6 +537,20 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     // H.264 CRF per tier (higher = smaller/softer). Rebuilding ffmpeg is disruptive, so we only do it on a
     // committed tier change.
     private static readonly int[] TierCrf = { 23, 27, 31, 35 };
+    // H.264 bitrate ceiling per tier, expressed as bits-per-pixel-per-second so it scales with the session
+    // resolution and framerate — a 1080p desktop gets a proportionally higher cap than a 720p one at the same
+    // tier. The cap turns the CRF stream into capped-CRF (VBV): quality-driven when the scene is cheap, but the
+    // instantaneous bitrate never runs away on a busy/animated desktop, which is what made the 5264 stream's
+    // bitrate spike on bridged sessions. Tier 0 ≈ 0.10 bpp (≈6.2 Mbit/s @1080p30), tightening down to tier 3.
+    private static readonly double[] TierBpp = { 0.10, 0.06, 0.035, 0.02 };
+
+    // The bitrate ceiling (kbit/s) for a tier at the current session size/fps, from TierBpp. Clamped to a sane
+    // floor so a tiny session still gets a usable cap.
+    private int TierKbps(int tier, int fps)
+    {
+        long bitsPerSec = (long)(TierBpp[tier] * _frontEnd.Width * _frontEnd.Height * fps);
+        return Math.Max(800, (int)(bitsPerSec / 1000));   // kbit/s, ≥800
+    }
 
     private async Task CongestionControlAsync(CancellationToken ct)
     {
@@ -526,18 +591,22 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         tier = Math.Clamp(tier, 0, 3);
         if (tier == _tier) return;
         _tier = tier;
-        _logger.LogInformation("Bridge: congestion tier → {Tier} (CRF {Crf})", tier, TierCrf[tier]);
+        int kbps = TierKbps(tier, 30);
+        _logger.LogInformation("Bridge: congestion tier → {Tier} (CRF {Crf}, cap {Kbps} kbit/s)", tier, TierCrf[tier], kbps);
 
         // Host-facing: ask the source for cheaper frames (VNC Tight quality; SPICE no-op today).
         try { await _source.SetQualityTierAsync(tier, ct); } catch (Exception ex) { _logger.LogDebug(ex, "Bridge: source tier failed"); }
 
-        // Client-facing H.264: rebuild ffmpeg at the new CRF (only when AVC is the active GFX codec).
-        if (_gfxActive && _h264 != null && _h264.Crf != TierCrf[tier])
+        // Client-facing H.264: rebuild the encoder at the new CRF and bitrate ceiling (only when AVC is the
+        // active GFX codec). Rebuild when either the quality target or the cap changed for this tier.
+        if (_gfxActive && _h264 != null && (_h264.Crf != TierCrf[tier] || _h264.MaxKbps != kbps))
         {
             var old = _h264;
+            old.OnFrame -= _h264Submit;
             _ = old.DisposeAsync();
-            var enc = _h264Factory.Create(_frontEnd.Width, _frontEnd.Height, fps: 30, crf: TierCrf[tier], _logger);
-            enc.OnFrame += annexB => { try { if (_gfx!.CanSubmitFrame) _gfx.SubmitFrame(annexB); } catch (Exception ex) { _logger.LogDebug(ex, "Bridge: GFX submit failed"); } };
+            Interlocked.Exchange(ref _h264Inflight, 0);
+            var enc = _h264Factory.Create(_frontEnd.Width, _frontEnd.Height, fps: 30, crf: TierCrf[tier], maxKbps: kbps, _logger);
+            enc.OnFrame += _h264Submit;
             try { enc.Start(); _h264 = enc; MarkGfxDirty(0, 0, _fbW - 1, _fbH - 1); }
             catch (Exception ex) { _logger.LogWarning(ex, "Bridge: H.264 CRF change restart failed"); _h264 = null; }
         }
@@ -548,7 +617,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
     private void OnSourceRectangle(int x, int y, int w, int h, byte[] bgrx)
     {
         if (!_frontEnd.IsActive || _fb.Length == 0) return;
-        FFOnce($"first source rectangle {w}x{h} (gfxActive={_gfxActive})");
+        FFOnce("first source rectangle");   // dedup key is size-independent → logs exactly once, not per-size
         int dx, dy, dw, dh;
         lock (_fbLock)
         {
@@ -568,7 +637,7 @@ internal sealed class RdpEncoderSession : IAsyncDisposable
         // When GFX/H.264 is active the frame clock encodes whole frames; accumulate the touched session box
         // into the GFX dirty region (so the encoders can skip idle frames and scope work to what changed) and
         // skip the legacy bitmap update (sending both would double-paint / fight the surface).
-        if (_gfxActive) { MarkGfxDirty(dx, dy, dx + dw - 1, dy + dh - 1); return; }
+        if (_gfxActive) { Interlocked.Increment(ref _rectCount); MarkGfxDirty(dx, dy, dx + dw - 1, dy + dh - 1); return; }
         // Otherwise the bitmap fastpath: union this rect into the pending dirty box. We do NOT flush here —
         // BitmapClockAsync flushes on its own cadence so display delivery is independent of the source
         // receive loop (and, for VNC, of the incremental-request round-trip).

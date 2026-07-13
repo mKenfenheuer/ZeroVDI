@@ -32,6 +32,16 @@ internal sealed class SpiceDisplayChannel : SpiceChannel
             new System.Threading.Channels.UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
     private Task? _drawWorker;
 
+    // Active video streams. The SPICE server sends moving-image regions (e.g. a playing video) as a codec
+    // stream instead of per-frame DRAW_COPY: STREAM_CREATE announces the region + codec, STREAM_DATA carries
+    // each encoded frame, STREAM_DESTROY ends it. We decode MJPEG frames and composite them into the shared
+    // framebuffer exactly like a draw, so the region updates without any client input. Keyed by stream id.
+    private readonly Dictionary<int, StreamInfo> _streams = new();
+    private readonly record struct StreamInfo(int Codec, int Left, int Top, int Width, int Height);
+    // Per-stream persistent JPEG decoder — retains the Huffman/quant tables that abbreviated MJPEG frames
+    // omit after the first frame. Keyed by stream id; created on first frame, dropped on STREAM_DESTROY.
+    private readonly Dictionary<int, SpiceJpeg> _streamDecoders = new();
+
     public int Width => _width;
     public int Height => _height;
 
@@ -69,22 +79,33 @@ internal sealed class SpiceDisplayChannel : SpiceChannel
                 _drawWorker ??= Task.Run(() => DrawWorkerAsync(ct), ct);
                 _drawQueue.Writer.TryWrite((type, data));
                 break;
-            case SpiceConst.MSG_DISPLAY_SURFACE_DESTROY:
-            case SpiceConst.MSG_DISPLAY_RESET:
+            // Video streams (STREAM_CREATE/DATA/DESTROY): the server's codec path for moving-image regions.
+            // Route through the same ordered draw queue as draws — they composite into the shared framebuffer
+            // and must stay ordered relative to draws that touch the same pixels.
             case SpiceConst.MSG_DISPLAY_STREAM_CREATE:
             case SpiceConst.MSG_DISPLAY_STREAM_DATA:
             case SpiceConst.MSG_DISPLAY_STREAM_DATA_SIZED:
-            case SpiceConst.MSG_DISPLAY_STREAM_CLIP:
             case SpiceConst.MSG_DISPLAY_STREAM_DESTROY:
             case SpiceConst.MSG_DISPLAY_STREAM_DESTROY_ALL:
-                // Video streams (MJPEG/VP8) — M5. We didn't advertise codec caps, so a compliant server
-                // shouldn't send these, but ignore them defensively.
+                _drawWorker ??= Task.Run(() => DrawWorkerAsync(ct), ct);
+                _drawQueue.Writer.TryWrite((type, data));
+                break;
+            case SpiceConst.MSG_DISPLAY_SURFACE_DESTROY:
+            case SpiceConst.MSG_DISPLAY_RESET:
+            case SpiceConst.MSG_DISPLAY_STREAM_CLIP:
+                // Clip changes not tracked (we always composite the full stream dest rect); surface destroy /
+                // reset handled elsewhere. Ignored.
                 break;
             default:
+                // TEMP: surface unhandled draw/display message types once each — a large unhandled paint (e.g.
+                // DRAW_OPAQUE=303, DRAW_BLEND=305, COPY_BITS=104) would leave the desktop grey behind the video.
+                if (_unhandledLogged.Add(type))
+                    Logger.LogInformation("SPICE display: UNHANDLED msg type={Type} ({Size}B)", type, data.Length);
                 break;
         }
         return Task.CompletedTask;
     }
+    private readonly HashSet<int> _unhandledLogged = new();
 
     // Single ordered consumer of the draw queue: decode + composite off the read loop. Ordering is
     // preserved (one reader), which is required because draws mutate the shared framebuffer.
@@ -99,6 +120,11 @@ internal sealed class SpiceDisplayChannel : SpiceChannel
                     case SpiceConst.MSG_DISPLAY_SURFACE_CREATE: HandleSurfaceCreate(data); break;
                     case SpiceConst.MSG_DISPLAY_DRAW_COPY: HandleDrawCopy(data); break;
                     case SpiceConst.MSG_DISPLAY_DRAW_FILL: HandleDrawFill(data); break;
+                    case SpiceConst.MSG_DISPLAY_STREAM_CREATE: HandleStreamCreate(data); break;
+                    case SpiceConst.MSG_DISPLAY_STREAM_DATA: HandleStreamData(data, sized: false); break;
+                    case SpiceConst.MSG_DISPLAY_STREAM_DATA_SIZED: HandleStreamData(data, sized: true); break;
+                    case SpiceConst.MSG_DISPLAY_STREAM_DESTROY: HandleStreamDestroy(data); break;
+                    case SpiceConst.MSG_DISPLAY_STREAM_DESTROY_ALL: _streams.Clear(); _streamDecoders.Clear(); break;
                 }
             }
         }
@@ -167,6 +193,9 @@ internal sealed class SpiceDisplayChannel : SpiceChannel
         byte b = (byte)(color & 0xff);
         byte g = (byte)((color >> 8) & 0xff);
         byte rr = (byte)((color >> 16) & 0xff);
+        // TEMP: log large fills — a grey fill over the stream box would explain "video shows grey".
+        if (w > 200 && h > 200)
+            Logger.LogInformation("SPICE DRAW_FILL color=0x{C:X6} rect=({L},{T}) {W}x{H}", color & 0xFFFFFF, left, top, w, h);
 
         byte[] rect = new byte[w * h * 4];
         for (int i = 0; i < rect.Length; i += 4)
@@ -203,6 +232,85 @@ internal sealed class SpiceDisplayChannel : SpiceChannel
         // Emit exactly the destination box we touched.
         byte[] outRect = ExtractBox(left, top, w, h);
         OnRectangle?.Invoke(left, top, w, h, outRect);
+    }
+
+    // ── video streams (STREAM_CREATE / STREAM_DATA / STREAM_DESTROY) ────────────────────────────────
+
+    // SpiceMsgDisplayStreamCreate: surface_id u32, id u32, flags u8, codec_type u8, stamp u64,
+    // stream_width u32, stream_height u32, src_width u32, src_height u32, dest SpiceRect{top,left,bottom,right
+    // i32}, clip{...}. We record the stream's codec and destination box; frames arrive via STREAM_DATA.
+    private void HandleStreamCreate(byte[] data)
+    {
+        var r = new SpiceReader(data);
+        int surfaceId = (int)r.U32();
+        int id = (int)r.U32();
+        r.U8();                       // flags
+        int codec = r.U8();
+        r.U64();                      // stamp
+        r.U32(); r.U32();             // stream_width, stream_height
+        r.U32(); r.U32();             // src_width, src_height
+        int top = r.I32(), left = r.I32(), bottom = r.I32(), right = r.I32();  // dest SpiceRect
+        int w = right - left, h = bottom - top;
+        if (surfaceId != _primaryId || w <= 0 || h <= 0) return;
+        _streams[id] = new StreamInfo(codec, left, top, w, h);
+        if (codec != SpiceConst.VIDEO_CODEC_TYPE_MJPEG)
+            Logger.LogWarning("SPICE: stream {Id} codec {Codec} unsupported (only MJPEG decoded)", id, codec);
+        else
+            Logger.LogInformation("SPICE: stream {Id} created MJPEG {W}x{H} @({L},{T})", id, w, h, left, top);
+    }
+
+    // SpiceMsgDisplayStreamData: base{id u32, multi_media_time u32}, data_size u32, data[]. The SIZED variant
+    // inserts {width u32, height u32, dest SpiceRect} before data_size, overriding the dest box for this frame.
+    private void HandleStreamData(byte[] data, bool sized)
+    {
+        var r = new SpiceReader(data);
+        int id = (int)r.U32();
+        r.U32();                       // multi_media_time
+        if (!_streams.TryGetValue(id, out var s)) return;
+        int left = s.Left, top = s.Top, dw = s.Width, dh = s.Height;
+        if (sized)
+        {
+            r.U32(); r.U32();          // width, height (of the encoded frame; we take size from JPEG)
+            int t = r.I32(), l = r.I32(), b = r.I32(), rr = r.I32();
+            left = l; top = t; dw = rr - l; dh = b - t;
+        }
+        int dataSize = (int)r.U32();
+        if (dataSize <= 0 || r.Remaining < dataSize) return;
+        if (s.Codec != SpiceConst.VIDEO_CODEC_TYPE_MJPEG) return;  // only MJPEG decoded today
+
+        var jpeg = r.Span(dataSize);
+        // Persistent per-stream decoder: SPICE MJPEG streams are abbreviated (Huffman tables sent only in the
+        // first frame, omitted thereafter), so each stream keeps its own decoder that retains those tables
+        // across frames. A fresh SpiceJpeg per frame (or ImageSharp) decodes a table-less frame to grey.
+        if (!_streamDecoders.TryGetValue(id, out var dec)) { dec = new SpiceJpeg(); _streamDecoders[id] = dec; }
+        var decoded = dec.Decode(jpeg, null);
+        if (decoded is not { } img) return;
+
+        // QEMU encodes video-stream JPEG frames bottom-up (from a GL/framebuffer source), so each decoded
+        // frame is vertically flipped relative to the surface. Flip it back. (DRAW ops are already top-down —
+        // when the video pauses the region is refreshed by a normal DRAW_COPY, which must NOT be flipped;
+        // that draw-vs-stream alternation is why an unflipped stream looked "upside down, occasionally right".)
+        FlipVertical(img.bgra, img.w, img.h);
+
+        // Composite the decoded frame at the stream's destination box and emit it as a rectangle, exactly like
+        // a draw — this is what feeds the video into the encoder without needing client input. Clamp the box to
+        // the framebuffer so a stream that overhangs the surface can't blit/extract out of bounds.
+        if (_fb.Length == 0 || left < 0 || top < 0 || left >= _width || top >= _height) return;
+        int w = Math.Min(Math.Min(dw, img.w), _width - left);
+        int h = Math.Min(Math.Min(dh, img.h), _height - top);
+        if (w <= 0 || h <= 0) return;
+        Blit(img.bgra, img.w, img.h, left, top, w, h);
+        byte[] outRect = ExtractBox(left, top, w, h);
+        OnRectangle?.Invoke(left, top, w, h, outRect);
+    }
+
+    // SpiceMsgDisplayStreamDestroy: id u32.
+    private void HandleStreamDestroy(byte[] data)
+    {
+        var r = new SpiceReader(data);
+        int id = (int)r.U32();
+        _streams.Remove(id);
+        _streamDecoders.Remove(id);
     }
 
     /// <summary>
@@ -364,6 +472,21 @@ internal sealed class SpiceDisplayChannel : SpiceChannel
         (b[at] << 24) | (b[at + 1] << 16) | (b[at + 2] << 8) | b[at + 3];
 
     // ── framebuffer compositing ─────────────────────────────────────────────────────────────────────
+
+    /// <summary>Flips a top-down BGRA image in place along the horizontal axis (row order reversed).</summary>
+    private static void FlipVertical(byte[] bgra, int w, int h)
+    {
+        int rowBytes = w * 4;
+        var tmp = new byte[rowBytes];
+        for (int y = 0; y < h / 2; y++)
+        {
+            int top = y * rowBytes;
+            int bot = (h - 1 - y) * rowBytes;
+            Array.Copy(bgra, top, tmp, 0, rowBytes);
+            Array.Copy(bgra, bot, bgra, top, rowBytes);
+            Array.Copy(tmp, 0, bgra, bot, rowBytes);
+        }
+    }
 
     /// <summary>Blits the top-left w×h region of a source BGRA image into the primary FB at (dx,dy).</summary>
     private void Blit(byte[] src, int srcW, int srcH, int dx, int dy, int w, int h)

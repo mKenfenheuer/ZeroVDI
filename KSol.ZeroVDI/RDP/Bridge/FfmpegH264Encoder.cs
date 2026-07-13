@@ -17,7 +17,7 @@ namespace KSol.ZeroVDI.RDP.Bridge;
 /// </summary>
 internal sealed class FfmpegH264Encoder : IH264Encoder
 {
-    private readonly int _width, _height, _fps, _crf;
+    private readonly int _width, _height, _fps, _crf, _maxKbps;
     private readonly string _ffmpegPath;
     private readonly ILogger _logger;
     private Process? _proc;
@@ -29,10 +29,12 @@ internal sealed class FfmpegH264Encoder : IH264Encoder
 
     /// <param name="crf">x264 constant-rate-factor (quality/size knob): ~18 = visually lossless, ~28 =
     /// smaller/softer. The adaptive controller raises it on slow links. Clamped to a sane 16..40.</param>
-    public FfmpegH264Encoder(int width, int height, int fps, string ffmpegPath, ILogger logger, int crf = 23)
+    /// <param name="maxKbps">Bitrate ceiling (kbit/s) for capped-CRF via VBV, or 0 for unbounded CRF.</param>
+    public FfmpegH264Encoder(int width, int height, int fps, string ffmpegPath, ILogger logger, int crf = 23, int maxKbps = 0)
     {
         _width = width & ~1; _height = height & ~1; _fps = Math.Clamp(fps, 5, 60);
         _crf = Math.Clamp(crf, 16, 40);
+        _maxKbps = Math.Max(0, maxKbps);
         _ffmpegPath = ffmpegPath; _logger = logger;
         _frameBytes = _width * _height * 4;
     }
@@ -40,6 +42,7 @@ internal sealed class FfmpegH264Encoder : IH264Encoder
     public int Width => _width;
     public int Height => _height;
     public int Crf => _crf;
+    public int MaxKbps => _maxKbps;
 
     public void Start()
     {
@@ -51,6 +54,12 @@ internal sealed class FfmpegH264Encoder : IH264Encoder
             RedirectStandardError = true,
             UseShellExecute = false,
         };
+        // Capped CRF: keep CRF as the quality target but clamp instantaneous bitrate with VBV so a busy
+        // desktop can't spike the 5264 stream. vbv-maxrate = ceiling (kbit/s), vbv-bufsize = ~0.5s of it
+        // (small window → bounded bursts, low latency). maxKbps==0 ⇒ pure CRF (no cap).
+        string x264Params = $"cabac=1:level=4.2:slices=1:threads=1:keyint=120:scenecut=0:bframes=0:ref=1:aud=1:crf={_crf}";
+        if (_maxKbps > 0) x264Params += $":vbv-maxrate={_maxKbps}:vbv-bufsize={Math.Max(1, _maxKbps / 2)}";
+
         // Raw BGRA in → baseline-ish H.264 Annex-B out, low-latency.
         foreach (var a in new[]
         {
@@ -77,8 +86,13 @@ internal sealed class FfmpegH264Encoder : IH264Encoder
             // only after mouse move" bug). Single-threaded encode emits each frame immediately and is easily
             // fast enough (>500fps for this size here). Replaces the old sliced-threads=0 (which was itself
             // frame-threading and part of the same stall).
-            "-x264-params", $"cabac=1:level=4.2:slices=1:threads=1:keyint=120:scenecut=0:bframes=0:ref=1:aud=1:crf={_crf}",
+            "-x264-params", x264Params,
             "-bsf:v", "dump_extra",             // ensure SPS/PPS precede each IDR in the Annex-B stream
+            // flush_packets=1: flush ffmpeg's output I/O context after EVERY packet, so each encoded frame's
+            // AU (and the AUD that starts the NEXT one) reaches our stdout reader the instant it is produced,
+            // instead of sitting in ffmpeg's output buffer until enough bytes accumulate. This is what makes
+            // the AUD-terminated cut below fire at ~one-frame latency rather than relying on the idle timer.
+            "-flush_packets", "1",
             "-f", "h264", "pipe:1",
         }) psi.ArgumentList.Add(a);
 
@@ -106,13 +120,9 @@ internal sealed class FfmpegH264Encoder : IH264Encoder
     }
 
     // Reads Annex-B from ffmpeg stdout and splits it into access units, emitting one per frame. libx264 at
-    // zerolatency + bframes=0 produces exactly one AU per input frame; we delimit AUs by the NAL sequence
-    // (an access-unit boundary is the next SPS(7)/IDR(5)/non-IDR(1) slice at a start code). Simpler and
-    // robust: accumulate and flush on each Access Unit Delimiter or when a new frame's first VCL NAL after
-    // a picture is seen. We use a pragmatic split: emit whenever we see a start code preceded by a complete
-    // prior AU — here we treat each read chunk that ends on a start-code boundary as frame-aligned, and
-    // additionally cut at SPS (new IDR GOP). To keep latency at one frame, we flush on every start code
-    // that begins a coded-slice NAL following at least one prior slice.
+    // zerolatency + bframes=0 produces exactly one AU per input frame, each led by an AUD (aud=1); we delimit
+    // on that AUD (see FlushCompleteFrames). With -flush_packets the next frame's AUD arrives promptly, so an
+    // AU ships at ~one-frame latency; the idle-flush timer only mops up the trailing frame of a quiet period.
     // Guards `_acc` and `_lastDataAt`, shared between the blocking reader and the idle-flush timer.
     private readonly object _accLock = new();
     private readonly List<byte> _acc = new(1 << 20);
@@ -148,18 +158,21 @@ internal sealed class FfmpegH264Encoder : IH264Encoder
         lock (_accLock) { if (_acc.Count > 0 && HasVcl(_acc.ToArray())) { OnFrame?.Invoke(_acc.ToArray()); _acc.Clear(); } }
     }
 
-    // Ships a pending complete AU when stdout has been quiet for >~50ms. Runs until ffmpeg exits.
+    // Ships the trailing AU of a quiet period — the one frame with no following AUD to terminate it. With
+    // -flush_packets the AUD-terminated cut in FlushCompleteFrames handles every frame that has a successor,
+    // so this only ever fires for the LAST frame before the desktop goes idle. Because flush_packets makes
+    // that frame's bytes arrive promptly, we can use a tight quiet-gap (~15ms) to minimise its tail latency.
     private async Task IdleFlushLoopAsync(Process p)
     {
         try
         {
             while (!p.HasExited)
             {
-                await Task.Delay(30);
+                await Task.Delay(8);
                 lock (_accLock)
                 {
                     if (_acc.Count == 0) continue;
-                    if (Environment.TickCount64 - _lastDataAt < 50) continue; // still receiving this frame
+                    if (Environment.TickCount64 - _lastDataAt < 15) continue; // still receiving this frame
                     var au = _acc.ToArray();
                     if (!HasVcl(au)) continue;   // partial / parameter-sets only — wait for the VCL slice
                     if (_logNal) _logger.LogInformation("Bridge/H264: emit AU (idle) {N}B, NALs=[{Nals}]", au.Length, NalTypes(au));
@@ -171,57 +184,49 @@ internal sealed class FfmpegH264Encoder : IH264Encoder
         catch (Exception ex) { _logger.LogDebug(ex, "Bridge/H264: idle-flush ended"); }
     }
 
-    // Splits accumulated Annex-B into complete access units. Rule ([ITU-T H.264] 7.4.1.2.4): an access
-    // unit boundary is a VCL slice NAL (type 1/5) that FOLLOWS a previous VCL slice — the leading
-    // SPS(7)/PPS(8)/SEI(6)/AUD(9) NALs belong to the AU of the VCL slice that comes after them. So we emit
-    // everything up to (not including) the 2nd-and-later VCL slice's start code, keeping SPS+PPS+IDR-slice
-    // together as one AU. Anything after the last boundary stays buffered until its full AU arrives.
+    // Splits accumulated Annex-B into complete access units, delimited by the Access Unit Delimiter (NAL
+    // type 9, emitted per-frame by aud=1). Every AU begins with an AUD, so the boundary between AU N and
+    // AU N+1 is precisely N+1's AUD — a single unambiguous marker that appears exactly once per frame. We
+    // emit everything from the first AUD up to (not including) the NEXT AUD, which keeps AUD+SPS+PPS+SEI+
+    // slice together as one AU. Cutting on the next AUD (rather than the old "2nd VCL slice" rule) means a
+    // complete AU ships the instant the following frame's AUD lands — and with -flush_packets that lands at
+    // ~one-frame latency, so the idle-flush timer becomes a rare fallback (last frame of a quiet period)
+    // instead of the primary path. Anything after the last AUD stays buffered until its full AU arrives.
     private void FlushCompleteFrames(List<byte> data)
     {
         while (true)
         {
-            // Find start-code offsets in the buffer.
-            var starts = new List<(int off, int hdr)>();
+            // Offsets of every start code, tagged with the NAL type of the unit it introduces.
+            var starts = new List<(int off, int type)>();
             for (int i = 0; i + 3 < data.Count; i++)
             {
-                bool sc3 = data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1;
-                bool sc4 = i + 4 < data.Count && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1;
-                if (sc3) starts.Add((i, i + 3));
-                else if (sc4) starts.Add((i, i + 4));
+                int hdr;
+                if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) hdr = i + 3;
+                else if (i + 4 < data.Count && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1) hdr = i + 4;
+                else continue;
+                if (hdr < data.Count) starts.Add((i, data[hdr] & 0x1f));
             }
+            if (starts.Count == 0) return;
 
-            // The AU we emit must START at a start code. Find the first, and the boundary = the 2nd VCL
-            // slice after it (start of the next access unit).
-            if (starts.Count == 0 || starts[0].off > 0)
-            {
-                // Drop any leading garbage before the first start code (keeps us aligned).
-                if (starts.Count == 0) return;
-                data.RemoveRange(0, starts[0].off);
-                continue;
-            }
-            int vclSeen = 0;
-            int cut = -1;
-            foreach (var (off, hdr) in starts)
-            {
-                if (hdr >= data.Count) break;
-                int type = data[hdr] & 0x1f;
-                bool isVcl = type == 1 || type == 5;
-                if (isVcl)
-                {
-                    vclSeen++;
-                    if (vclSeen == 2) { cut = off; break; }
-                }
-            }
-            if (cut <= 0) return;                       // no complete AU yet
+            // Align the buffer head to the first AUD (drop anything before it — leading garbage, or a
+            // stream that hasn't hit its first AUD yet).
+            int firstAud = starts.FindIndex(s => s.type == 9);
+            if (firstAud < 0) return;                        // no AU start yet — wait for more data
+            if (starts[firstAud].off > 0) { data.RemoveRange(0, starts[firstAud].off); continue; }
+
+            // The current AU ends at the NEXT AUD after the first one.
+            int nextAud = starts.FindIndex(firstAud + 1, s => s.type == 9);
+            if (nextAud < 0) return;                          // current AU not yet fully buffered
+            int cut = starts[nextAud].off;
 
             var frame = data.GetRange(0, cut).ToArray();
-            // Only emit AUs that actually contain a VCL slice; skip parameter-set-only or stub fragments.
+            // Only emit AUs that actually contain a VCL slice; skip AUD/parameter-set-only fragments.
             if (HasVcl(frame))
             {
                 if (_logNal) _logger.LogInformation("Bridge/H264: emit AU {N}B, NALs=[{Nals}]", frame.Length, NalTypes(frame));
                 OnFrame?.Invoke(frame);
             }
-            data.RemoveRange(0, cut);                    // loop again in case several AUs are buffered
+            data.RemoveRange(0, cut);                          // loop again in case several AUs are buffered
         }
     }
 
@@ -289,6 +294,6 @@ internal sealed class FfmpegH264EncoderFactory : IH264EncoderFactory
         _ffmpegPath = config["Recording:FfmpegPath"] ?? "ffmpeg";
     }
 
-    public IH264Encoder Create(int width, int height, int fps, int crf, ILogger logger)
-        => new FfmpegH264Encoder(width, height, fps, _ffmpegPath, logger, crf);
+    public IH264Encoder Create(int width, int height, int fps, int crf, int maxKbps, ILogger logger)
+        => new FfmpegH264Encoder(width, height, fps, _ffmpegPath, logger, crf, maxKbps);
 }

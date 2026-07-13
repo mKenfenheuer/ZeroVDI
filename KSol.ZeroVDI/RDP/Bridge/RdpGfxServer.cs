@@ -213,6 +213,14 @@ internal sealed class RdpGfxServer
         get { lock (_lock) { if (!Active) return false; if (_acksSuspended) return true; return _frameId - _lastAckedFrameId < _maxUnacked; } }
     }
 
+    /// <summary>Feed-time gate for the async H.264 path: room in the unacked window accounting for frames
+    /// already fed into ffmpeg but not yet submitted (<paramref name="inflight"/>). Without this the frame
+    /// clock would overrun the window while frames sit in the encoder pipeline.</summary>
+    public bool CanSubmitH264(int inflight)
+    {
+        lock (_lock) { if (!Active) return false; if (_acksSuspended) return true; return (_frameId - _lastAckedFrameId) + (uint)inflight < _maxUnacked; }
+    }
+
     /// <summary>Number of frames sent but not yet acknowledged by the client — the congestion signal the
     /// adaptive-quality controller reads. 0 = client keeping up; near <c>MaxUnacked</c> = falling behind.
     /// Returns 0 while acks are suspended (client asked us to stop counting).</summary>
