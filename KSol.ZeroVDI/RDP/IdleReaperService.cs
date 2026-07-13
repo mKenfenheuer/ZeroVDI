@@ -11,7 +11,13 @@ namespace KSol.ZeroVDI.RDP;
 public class IdleReaperService : BackgroundService
 {
     private static readonly TimeSpan ScanInterval = TimeSpan.FromMinutes(5);
+    // Hold off the first scan so its Proxmox calls don't compete with application startup.
+    private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(30);
     private static readonly int ManualIdleTimeoutHours = 24;
+
+    // When the service started. Until at least an idle timeout has elapsed since this point we do not
+    // know how long a VM has really been idle (we may have just come up), so we never reap before then.
+    private readonly DateTime _startedUtc = DateTime.UtcNow;
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ProxmoxClient _proxmox;
@@ -38,6 +44,9 @@ public class IdleReaperService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Defer the first scan so its Proxmox calls don't compete with startup.
+        try { await Task.Delay(StartupDelay, stoppingToken); } catch (OperationCanceledException) { return; }
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -80,9 +89,10 @@ public class IdleReaperService : BackgroundService
             if (!byId.TryGetValue(res.ProxmoxBackendId!.Value, out var backend) || !backend.IsConfigured)
                 continue;
 
+            if (!backend.IdleReapEnabled) continue;
             if (_sessions.HasActiveSessions(res.Id)) continue;
-            var cutoff = DateTime.UtcNow.AddHours(-Math.Max(1, backend.IdleTimeoutHours));
-            if (res.LastActivityUtc == null || res.LastActivityUtc > cutoff) continue;
+            var idle = TimeSpan.FromHours(Math.Max(1, backend.IdleTimeoutHours));
+            if (!IsReapable(res.LastActivityUtc, idle)) continue;
 
             var notes = await _proxmox.GetNotesAsync(backend, res.ProxmoxNode!, res.ProxmoxVmId!.Value, ct);
             if (ProxmoxNotes.ReadExcluded(notes))
@@ -119,12 +129,12 @@ public class IdleReaperService : BackgroundService
                         && !string.IsNullOrEmpty(r.IpAddress))
             .ToListAsync(ct);
 
-        var cutoff = DateTime.UtcNow.AddHours(-ManualIdleTimeoutHours);
+        var idle = TimeSpan.FromHours(ManualIdleTimeoutHours);
 
         foreach (var res in candidates)
         {
             if (_sessions.HasActiveSessions(res.Id)) continue;
-            if (res.LastActivityUtc == null || res.LastActivityUtc > cutoff) continue;
+            if (!IsReapable(res.LastActivityUtc, idle)) continue;
 
             _logger.LogInformation("Idle reaper: shutting down manual resource {Name} ({Os}, {Method})",
                 res.Name, res.OsType, res.ShutdownMethod);
@@ -137,5 +147,25 @@ public class IdleReaperService : BackgroundService
                 await db.SaveChangesAsync(ct);
             }
         }
+    }
+
+    /// <summary>
+    /// Whether a resource has been idle long enough to reap. Two safeguards protect against reaping a VM
+    /// whose true idle time we cannot know:
+    /// <list type="bullet">
+    /// <item>We always defer at least <paramref name="idle"/> after service start, since a VM that was
+    /// active just before a restart would otherwise look idle the instant we come up.</item>
+    /// <item>A null <see cref="RDPResource.LastActivityUtc"/> (activity never observed this run) is treated
+    /// as "active at startup" rather than "idle forever", so it too gets the full grace period.</item>
+    /// </list>
+    /// </summary>
+    private bool IsReapable(DateTime? lastActivityUtc, TimeSpan idle)
+    {
+        var now = DateTime.UtcNow;
+        // Never reap before a full idle window has elapsed since we started.
+        if (now - _startedUtc < idle) return false;
+        // Unknown last activity: assume the VM was in use when we started, then require the idle window.
+        var since = lastActivityUtc ?? _startedUtc;
+        return now - since >= idle;
     }
 }

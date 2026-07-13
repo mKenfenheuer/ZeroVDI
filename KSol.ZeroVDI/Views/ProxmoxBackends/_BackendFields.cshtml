@@ -47,6 +47,10 @@
 
 <div>
     <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">VDI lifecycle policy</h2>
+    <label class="flex items-center gap-2 text-sm cursor-pointer mb-4">
+        <input asp-for="IdleReapEnabled" class="form-check" />
+        <span>@Html.DisplayNameFor(m => m.IdleReapEnabled)</span>
+    </label>
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div>
             <label asp-for="DefaultRdpPort" class="form-label"></label>

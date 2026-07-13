@@ -19,6 +19,9 @@ namespace KSol.ZeroVDI.RDP;
 public class ProxmoxSyncService : BackgroundService
 {
     private static readonly TimeSpan SyncInterval = TimeSpan.FromMinutes(10);
+    // Hold off the first inventory sweep so its (serial, network-heavy) Proxmox API calls don't
+    // compete with application startup and delay Kestrel from binding.
+    private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(30);
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ProxmoxClient _proxmox;
@@ -39,6 +42,9 @@ public class ProxmoxSyncService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Defer the first sync so its network-heavy Proxmox calls don't compete with startup.
+        try { await Task.Delay(StartupDelay, stoppingToken); } catch (OperationCanceledException) { return; }
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try { await SyncAllAsync(stoppingToken); }

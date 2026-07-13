@@ -48,7 +48,7 @@ else
                         <span class="badge bg-warning/10 text-warning">Incomplete</span>
                     }
                 </td>
-                <td class="text-muted-foreground text-xs">@b.IdleTimeoutHours h → @b.PauseAction</td>
+                <td class="text-muted-foreground text-xs">@(b.IdleReapEnabled ? $"{b.IdleTimeoutHours} h → {b.PauseAction}" : "Auto-suspend off")</td>
                 <td>
                     <div class="flex items-center justify-end gap-2">
                         <form asp-action="Discover" asp-route-id="@b.Id" method="post" class="inline">

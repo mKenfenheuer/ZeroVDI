@@ -7,6 +7,28 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.21] — 2026-07-13 — Idle reaper: startup grace period and an off switch
+
+The idle reaper could pause a VM immediately after the gateway started, before it had any way of knowing
+how long that VM had actually been idle. On a fresh start `LastActivityUtc` is null, and the old check
+treated "never observed active this run" as "idle forever" and reaped at once. Backends also had no way
+to opt out of auto-suspend entirely.
+
+### Fixed
+- **Never reap within one idle window of startup.** The reaper records its start time and defers any pause
+  until at least a full idle timeout has elapsed since then, so a restart no longer suspends VMs that were
+  in use moments earlier.
+- **Unknown last activity is treated as active-at-startup, not idle-forever.** A null `LastActivityUtc`
+  now gets the full idle grace period instead of being reaped on the first scan.
+
+### Added
+- **Per-backend "Auto-suspend idle VMs" toggle** (`ProxmoxBackend.IdleReapEnabled`, default on). Turn it
+  off to keep a backend's VMs running indefinitely regardless of the idle timeout. Shown on the backend
+  edit form and summarised in the backends list.
+
+### Migration
+- `AddBackendIdleReapEnabled` adds the `IdleReapEnabled` column, defaulting existing backends to enabled.
+
 ## [0.6.20] — 2026-07-13 — Removed the VNC/SPICE bridge; RDP-only
 
 The experimental VNC and SPICE→RDP bridges did not work well enough to keep, and their machinery (a

@@ -23,6 +23,8 @@ namespace KSol.ZeroVDI.RDP;
 public class ResourceStatusService : BackgroundService
 {
     private static readonly TimeSpan ScanInterval = TimeSpan.FromSeconds(15);
+    // Hold off the first sweep so the network probes don't compete with application startup.
+    private static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(30);
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ProxmoxClient _proxmox;
@@ -43,6 +45,12 @@ public class ResourceStatusService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Defer the first sweep so startup never competes with it. The scan pings + TCP-probes every
+        // resource; unreachable hosts each cost ~2s of ICMP timeout, and firing that whole sweep during
+        // boot starves the (initially tiny) thread pool and delays Kestrel from binding by tens of
+        // seconds. Waiting ~30s lets the app come up first, then the fleet state fills in.
+        try { await Task.Delay(StartupDelay, stoppingToken); } catch (OperationCanceledException) { return; }
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try { await ScanOnceAsync(stoppingToken); }
@@ -63,15 +71,25 @@ public class ResourceStatusService : BackgroundService
 
         var resources = await db.RDPResources.ToListAsync(ct);
 
-        foreach (var res in resources)
+        // Probe all resources concurrently. Each probe is network-bound (up to ~2s ping + ~2s TCP
+        // connect + a Proxmox HTTP call) and touches no DbContext, so running them serially made a
+        // whole-fleet scan take resources×~4s — long enough during the very first scan to starve the
+        // thread pool and delay Kestrel from binding at startup. Resolving in parallel keeps a scan at
+        // roughly single-probe latency regardless of fleet size; the DB writes are applied afterward on
+        // the single (non-thread-safe) DbContext.
+        var resolved = await Task.WhenAll(resources.Select(async res => (res, state: await ResolveStateAsync(res, ct))));
+
+        var changed = false;
+        foreach (var (res, newState) in resolved)
         {
-            var newState = await ResolveStateAsync(res, ct);
             if (res.PowerState != newState)
             {
                 res.PowerState = newState;
-                await db.SaveChangesAsync(ct);
+                changed = true;
             }
         }
+        if (changed)
+            await db.SaveChangesAsync(ct);
     }
 
     private async Task<ResourcePowerState> ResolveStateAsync(RDPResource res, CancellationToken ct)

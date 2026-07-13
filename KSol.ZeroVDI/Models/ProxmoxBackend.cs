@@ -60,6 +60,13 @@ public class ProxmoxBackend
     [Display(Name = "Default RDP port")]
     public int DefaultRdpPort { get; set; } = 3389;
 
+    /// <summary>
+    /// Whether the idle reaper may pause idle VMs on this backend at all. When off, VMs are never
+    /// suspended/stopped for inactivity regardless of <see cref="IdleTimeoutHours"/>.
+    /// </summary>
+    [Display(Name = "Auto-suspend idle VMs")]
+    public bool IdleReapEnabled { get; set; } = true;
+
     /// <summary>Hours a resource may sit with no active session before it is paused.</summary>
     [Display(Name = "Idle timeout (hours)")]
     public int IdleTimeoutHours { get; set; } = 24;
