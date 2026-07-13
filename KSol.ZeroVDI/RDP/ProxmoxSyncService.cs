@@ -140,25 +140,16 @@ public class ProxmoxSyncService : BackgroundService
                 };
                 if (!string.IsNullOrWhiteSpace(id)) res.Id = id!;
 
-                // Auto-pick a sensible default protocol from the VM's display adapter + guest OS — ONLY at
-                // first discovery (all later syncs preserve whatever the admin/previous run set). A SPICE-
-                // capable display (qxl / virtio-gpu / virtio-gl) → SPICE. Otherwise Windows guests → RDP,
-                // everything else → VNC (the common "any other OS over the bridge" case).
+                // Seed the OS type from the guest OS — ONLY at first discovery (all later syncs preserve
+                // whatever the admin/previous run set).
                 var (vga, ostype) = await _proxmox.GetDisplayInfoAsync(backend, vm.Node, vm.VmId, ct);
-                if (ProxmoxClient.IsSpiceVga(vga))
-                    res.Protocol = RdpProtocol.Spice;
-                else if (ProxmoxClient.IsWindowsOsType(ostype))
-                    res.Protocol = RdpProtocol.Rdp;
-                else
-                    res.Protocol = RdpProtocol.Vnc;
                 if (ProxmoxClient.IsWindowsOsType(ostype)) res.OsType = OsType.Windows;
-                // Port follows the chosen protocol's backend default.
-                res.Port = backend.DefaultPortFor(res.Protocol);
+                res.Port = backend.DefaultRdpPort;
 
                 db.RDPResources.Add(res);
                 await db.SaveChangesAsync(ct); // materialize the row
-                _logger.LogInformation("Proxmox sync[{Backend}]: discovered VM {VmId} on {Node} -> {Id} (vga={Vga} os={Os} protocol={Proto})",
-                    backend.Name, vm.VmId, vm.Node, res.Id, vga ?? "std", ostype ?? "?", res.Protocol);
+                _logger.LogInformation("Proxmox sync[{Backend}]: discovered VM {VmId} on {Node} -> {Id} (vga={Vga} os={Os})",
+                    backend.Name, vm.VmId, vm.Node, res.Id, vga ?? "std", ostype ?? "?");
             }
 
             // Ensure the VM notes carry this resource's id (durable binding that survives migration
@@ -178,8 +169,8 @@ public class ProxmoxSyncService : BackgroundService
             res.ConfigJson = notes;
 
             // Name/Description are admin-editable — only seed them on FIRST discovery (when empty), never
-            // clobber an admin's edits on re-sync. Protocol and Port are likewise preserved (only defaulted
-            // on the create path above), so a discovered VM the admin flips to VNC/SPICE keeps that setting.
+            // clobber an admin's edits on re-sync. Port is likewise preserved (only defaulted on the create
+            // path above), so a discovered VM the admin re-ports keeps that setting.
             if (string.IsNullOrWhiteSpace(res.Name))
                 res.Name = string.IsNullOrWhiteSpace(vm.Name) ? $"vm-{vm.VmId}" : vm.Name;
             if (string.IsNullOrWhiteSpace(res.Description))

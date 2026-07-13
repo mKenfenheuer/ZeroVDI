@@ -70,7 +70,7 @@ namespace KSol.ZeroVDI.Controllers
         // are created by the sync service, not here. Id is server-generated (GUID).
         [HttpPost("create")]
         [ValidateAntiForgeryToken]
-        public async Task<IActionResult> Create([Bind("Name,Description,IpAddress,Port,Protocol,KeyboardLayout,OsType,WakeMethod,WolMacAddress,IpmiHost,IpmiUser,ShutdownMethod,SshUser,ShutdownCommand,WindowsUser,DefaultConnectionDefaults")] RDPResource rDPResource, string? ipmiPassword, string? sshKey, string? windowsPassword)
+        public async Task<IActionResult> Create([Bind("Name,Description,IpAddress,Port,OsType,WakeMethod,WolMacAddress,IpmiHost,IpmiUser,ShutdownMethod,SshUser,ShutdownCommand,WindowsUser,DefaultConnectionDefaults")] RDPResource rDPResource, string? ipmiPassword, string? sshKey, string? windowsPassword)
         {
             if (ModelState.IsValid)
             {
@@ -167,7 +167,7 @@ namespace KSol.ZeroVDI.Controllers
         // applied; for Manual resources the address, port and RDP options are editable too.
         [HttpPost("edit/{id}")]
         [ValidateAntiForgeryToken]
-        public async Task<IActionResult> Edit(string id, [Bind("Id,Name,Description,IpAddress,Port,Protocol,KeyboardLayout,OsType,WakeMethod,WolMacAddress,IpmiHost,IpmiUser,ShutdownMethod,SshUser,ShutdownCommand,WindowsUser,ForcedConnectorId")] RDPResource input, string? ipmiPassword, string? sshKey, string? windowsPassword)
+        public async Task<IActionResult> Edit(string id, [Bind("Id,Name,Description,IpAddress,Port,OsType,WakeMethod,WolMacAddress,IpmiHost,IpmiUser,ShutdownMethod,SshUser,ShutdownCommand,WindowsUser,ForcedConnectorId")] RDPResource input, string? ipmiPassword, string? sshKey, string? windowsPassword)
         {
             if (id != input.Id)
             {
@@ -184,21 +184,6 @@ namespace KSol.ZeroVDI.Controllers
             {
                 existing.Name = input.Name;
                 existing.Description = input.Description;
-
-                // Protocol + keyboard layout are logical settings that apply to every source (a discovered
-                // Proxmox VM can be RDP/VNC/SPICE too). For Proxmox resources the host/port are otherwise
-                // machine-provisioned (readonly in the form), so when the protocol changes, retarget the
-                // port to that protocol's backend default (RDP 3389 / VNC 5900 / SPICE 5900) instead of
-                // leaving a stale port from the previous protocol.
-                var protocolChanged = existing.Protocol != input.Protocol;
-                existing.Protocol = input.Protocol;
-                existing.KeyboardLayout = input.KeyboardLayout;
-                if (existing.Source != ResourceSource.Manual && protocolChanged
-                    && existing.ProxmoxBackendId != null)
-                {
-                    var b = await _backends.GetAsync(existing.ProxmoxBackendId.Value);
-                    if (b != null) existing.Port = b.DefaultPortFor(input.Protocol);
-                }
 
                 if (existing.Source == ResourceSource.Manual)
                 {

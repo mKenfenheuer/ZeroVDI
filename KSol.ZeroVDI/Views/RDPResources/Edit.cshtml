@@ -7,9 +7,6 @@
     ViewData["Subtitle"] = "Edit resource";
     var isProxmox = r.Source == ResourceSource.Proxmox;
     var isManual = r.Source == ResourceSource.Manual;
-    // SPICE connections authenticate via the Proxmox spiceproxy ticket (fetched with an API token),
-    // so stored username/password credentials are useless — hide the SSO credential UI for them.
-    var isSpice = r.Protocol == RdpProtocol.Spice;
 
     var tabs = new (string Id, string Label, string Icon)[]
     {
@@ -76,21 +73,6 @@
                 <div>
                     <label asp-for="Resource.Port" class="form-label">Port</label>
                     <input asp-for="Resource.Port" name="Port" type="number" class="form-input @(isProxmox ? "opacity-60" : "")" readonly="@isProxmox" />
-                </div>
-                <div>
-                    <label asp-for="Resource.Protocol" class="form-label">Protocol</label>
-                    <select name="Protocol" class="form-select">
-                        <option value="0" selected="@(r.Protocol == RdpProtocol.Rdp)">RDP (native)</option>
-                        <option value="1" selected="@(r.Protocol == RdpProtocol.Vnc)">VNC (bridged)</option>
-                        <option value="2" selected="@(r.Protocol == RdpProtocol.Spice)">SPICE (bridged)</option>
-                    </select>
-                </div>
-                <div>
-                    <label asp-for="Resource.KeyboardLayout" class="form-label">Keyboard layout (VNC)</label>
-                    <select name="KeyboardLayout" class="form-select">
-                        <option value="0" selected="@(r.KeyboardLayout == KeyboardLayout.Us)">US (English)</option>
-                        <option value="1" selected="@(r.KeyboardLayout == KeyboardLayout.German)">German (QWERTZ)</option>
-                    </select>
                 </div>
                 @if (Model.AvailableConnectors.Count > 0)
                 {
@@ -396,8 +378,6 @@
                                     </form>
                                 </div>
                                 <!-- Stored credentials -->
-                                @if (!isSpice)
-                                {
                                 <div class="pt-3 border-t border-border">
                                     <h4 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Stored credentials (SSO)</h4>
                                     @if (a.HasStoredCredentials)
@@ -420,7 +400,6 @@
                                         </div>
                                     </form>
                                 </div>
-                                }
                                 <!-- Revoke -->
                                 <div class="pt-3 border-t border-border">
                                     <form asp-action="Revoke" asp-route-id="@r.Id" asp-route-authId="@a.Id" method="post"

@@ -14,7 +14,6 @@
     // SPICE (bridged) connections auth via the Proxmox spiceproxy ticket (fetched server-side with an
     // API token) — the VM username/password/domain are meaningless, so hide those inputs. The login
     // overlay still shows (so the Session options panel stays reachable); the user just clicks Connect.
-    var isSpice = ViewData["IsSpice"] is true;
     // Fall back to a fresh ConnectionDefaults so the model's defaults (all session + visual options on)
     // drive the popup when this (user, resource) has nothing stored yet.
     var defaults = ViewData["Defaults"] as ConnectionDefaults ?? new ConnectionDefaults();
@@ -376,30 +375,18 @@
                 <h5 class="text-base font-semibold truncate">Connect to @resourceName</h5>
             </div>
             <form id="login-form" autocomplete="off" class="space-y-3">
-                @if (isSpice)
-                {
-                    @* SPICE authenticates via the spiceproxy ticket; no VM credentials. Keep the inputs in
-                       the DOM (hidden) with placeholder values so the shared submit handler's field reads
-                       and its "Username is required" guard still pass when the user clicks Connect. *@
-                    <input type="hidden" id="vm-user" value="spice" />
-                    <input type="hidden" id="vm-pass" value="spice" />
-                    <input type="hidden" id="vm-domain" value="" />
-                }
-                else
-                {
-                    <div>
-                        <label for="vm-user" class="form-label">Username</label>
-                        <input class="form-input" id="vm-user" value="@storedUser" autocomplete="username" />
-                    </div>
-                    <div>
-                        <label for="vm-pass" class="form-label">Password</label>
-                        <input class="form-input" id="vm-pass" type="password" value="@storedPassword" autocomplete="current-password" />
-                    </div>
-                    <div>
-                        <label for="vm-domain" class="form-label">Domain <span class="text-muted-foreground font-normal">(optional)</span></label>
-                        <input class="form-input" id="vm-domain" value="@storedDomain" />
-                    </div>
-                }
+                <div>
+                    <label for="vm-user" class="form-label">Username</label>
+                    <input class="form-input" id="vm-user" value="@storedUser" autocomplete="username" />
+                </div>
+                <div>
+                    <label for="vm-pass" class="form-label">Password</label>
+                    <input class="form-input" id="vm-pass" type="password" value="@storedPassword" autocomplete="current-password" />
+                </div>
+                <div>
+                    <label for="vm-domain" class="form-label">Domain <span class="text-muted-foreground font-normal">(optional)</span></label>
+                    <input class="form-input" id="vm-domain" value="@storedDomain" />
+                </div>
 
                 <details class="rounded-lg border border-border">
                     <summary class="cursor-pointer select-none px-3 py-2 text-sm font-medium text-foreground">Session options</summary>
@@ -420,13 +407,10 @@
                     </div>
                 </details>
 
-                @if (!isSpice)
-                {
-                    <label class="flex items-center gap-2 text-sm cursor-pointer">
-                        <input class="form-check" type="checkbox" id="opt-store-creds" />
-                        <span>Store credentials for next time</span>
-                    </label>
-                }
+                <label class="flex items-center gap-2 text-sm cursor-pointer">
+                    <input class="form-check" type="checkbox" id="opt-store-creds" />
+                    <span>Store credentials for next time</span>
+                </label>
                 <label class="flex items-center gap-2 text-sm cursor-pointer">
                     <input class="form-check" type="checkbox" id="opt-remember-settings" />
                     <span>Remember these settings</span>

@@ -17,28 +17,6 @@ public enum ResourceSource
     VdiClone = 2,
 }
 
-/// <summary>
-/// Wire protocol the gateway speaks to the host. Selects the <c>IRdpResolver</c> that produces the
-/// decrypted RDP stream the browser console + recorder consume — native RDP, or a bridge (e.g. VNC).
-/// </summary>
-public enum RdpProtocol
-{
-    /// <summary>Native RDP over NLA/CredSSP (the default).</summary>
-    Rdp = 0,
-    /// <summary>VNC/RFB host, bridged to an RDP stream by the gateway.</summary>
-    Vnc = 1,
-    /// <summary>SPICE host, bridged to an RDP stream by the gateway.</summary>
-    Spice = 2,
-}
-
-/// <summary>Keyboard layout used to interpret key events for protocols that need it (e.g. the VNC bridge,
-/// which receives layout-independent scancodes and must resolve them to characters).</summary>
-public enum KeyboardLayout
-{
-    Us = 0,
-    German = 1,
-}
-
 /// <summary>Operating system type of the resource's backing machine.</summary>
 public enum OsType
 {
@@ -105,20 +83,6 @@ public class RDPResource
 
     /// <summary>The RDP (TCP) port on the target. Defaults to 3389.</summary>
     public int Port { get; set; } = 3389;
-
-    /// <summary>
-    /// Wire protocol the gateway speaks to the host. <see cref="RdpProtocol.Rdp"/> (default) connects
-    /// natively; <see cref="RdpProtocol.Vnc"/> bridges an RFB/VNC host into an RDP stream. Selects the
-    /// resolver in <c>RdpWebSocketController</c>.
-    /// </summary>
-    public RdpProtocol Protocol { get; set; } = RdpProtocol.Rdp;
-
-    /// <summary>
-    /// Keyboard layout the host expects. Used by protocol bridges that receive layout-independent key
-    /// scancodes (the VNC bridge) to resolve them to the correct characters. Ignored by native RDP (the
-    /// client and host negotiate the layout themselves).
-    /// </summary>
-    public KeyboardLayout KeyboardLayout { get; set; } = KeyboardLayout.Us;
 
     /// <summary>
     /// When set, force this resource's connection through the named connector instead of letting the

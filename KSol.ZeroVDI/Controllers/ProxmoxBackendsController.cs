@@ -46,7 +46,7 @@ public class ProxmoxBackendsController : Controller
     [HttpPost("create")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Create(
-        [Bind("Name,Host,ApiTokenId,ApiTokenSecret,VerifyTls,ConnectorId,DefaultRdpPort,DefaultVncPort,DefaultSpicePort,IdleTimeoutHours,PauseAction,StartTimeoutSeconds")] ProxmoxBackend backend)
+        [Bind("Name,Host,ApiTokenId,ApiTokenSecret,VerifyTls,ConnectorId,DefaultRdpPort,IdleTimeoutHours,PauseAction,StartTimeoutSeconds")] ProxmoxBackend backend)
     {
         if (!ModelState.IsValid) { await PopulateConnectorsAsync(); return View(backend); }
         _context.Add(backend);
@@ -68,7 +68,7 @@ public class ProxmoxBackendsController : Controller
     [HttpPost("edit/{id:int}")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Edit(int id,
-        [Bind("Id,Name,Host,ApiTokenId,ApiTokenSecret,VerifyTls,ConnectorId,DefaultRdpPort,DefaultVncPort,DefaultSpicePort,IdleTimeoutHours,PauseAction,StartTimeoutSeconds")] ProxmoxBackend input)
+        [Bind("Id,Name,Host,ApiTokenId,ApiTokenSecret,VerifyTls,ConnectorId,DefaultRdpPort,IdleTimeoutHours,PauseAction,StartTimeoutSeconds")] ProxmoxBackend input)
     {
         if (id != input.Id) return NotFound();
 
@@ -87,8 +87,6 @@ public class ProxmoxBackendsController : Controller
         backend.VerifyTls = input.VerifyTls;
         backend.ConnectorId = string.IsNullOrEmpty(input.ConnectorId) ? null : input.ConnectorId;
         backend.DefaultRdpPort = input.DefaultRdpPort;
-        backend.DefaultVncPort = input.DefaultVncPort;
-        backend.DefaultSpicePort = input.DefaultSpicePort;
         backend.IdleTimeoutHours = input.IdleTimeoutHours;
         backend.PauseAction = input.PauseAction;
         backend.StartTimeoutSeconds = input.StartTimeoutSeconds;

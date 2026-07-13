@@ -7,10 +7,8 @@ namespace KSol.ZeroVDI.RDP;
 ///
 ///   Host → protocol → <see cref="IRdpResolver"/> → RDP stream → Session / Recording → web client
 ///
-/// The default implementation (<see cref="NlaRdpResolver"/>) speaks native RDP: TCP + X.224
-/// <c>PROTOCOL_HYBRID</c> + TLS + CredSSP(NLA), delegating to <see cref="RdpHostConnection"/>. Additional
-/// protocols (e.g. a VNC→RDP bridge) implement this interface by synthesizing an RDP stream the
-/// unmodified browser client + recorder accept — nothing downstream of the resolver changes.
+/// The implementation (<see cref="NlaRdpResolver"/>) speaks native RDP: TCP + X.224
+/// <c>PROTOCOL_HYBRID</c> + TLS + CredSSP(NLA), delegating to <see cref="RdpHostConnection"/>.
 /// </summary>
 public interface IRdpResolver
 {
@@ -35,5 +33,4 @@ public sealed record RdpResolveRequest(
     KerberosAuth? Kerberos,
     uint RequestedProtocols,
     byte[]? RoutingToken,
-    ILogger Logger,
-    Models.KeyboardLayout KeyboardLayout = Models.KeyboardLayout.Us);
+    ILogger Logger);

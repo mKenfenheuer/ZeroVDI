@@ -31,7 +31,7 @@ public class RdpWebSocketController : Controller
     private readonly IAuditLogger _audit;
     private readonly ResourceAccessService _access;
     private readonly ConnectorPathSelector _paths;
-    private readonly IRdpResolverFactory _resolvers;
+    private readonly IRdpResolver _resolverImpl;
     private readonly ILogger<RdpWebSocketController> _logger;
 
     public RdpWebSocketController(
@@ -48,7 +48,7 @@ public class RdpWebSocketController : Controller
         IAuditLogger audit,
         ResourceAccessService access,
         ConnectorPathSelector paths,
-        IRdpResolverFactory resolvers,
+        IRdpResolver resolverImpl,
         ILogger<RdpWebSocketController> logger)
     {
         _context = context;
@@ -64,7 +64,7 @@ public class RdpWebSocketController : Controller
         _audit = audit;
         _access = access;
         _paths = paths;
-        _resolvers = resolvers;
+        _resolverImpl = resolverImpl;
         _logger = logger;
     }
 
@@ -95,14 +95,7 @@ public class RdpWebSocketController : Controller
             HttpContext.Response.StatusCode = StatusCodes.Status404NotFound;
             return;
         }
-        // Default port depends on the host protocol (RDP 3389, VNC 5900, SPICE 5900).
-        var defaultPort = resource.Protocol switch
-        {
-            RdpProtocol.Vnc => 5900,
-            RdpProtocol.Spice => 5900,
-            _ => 3389,
-        };
-        var requestedPort = (ushort)(resource.Port > 0 ? resource.Port : defaultPort);
+        var requestedPort = (ushort)(resource.Port > 0 ? resource.Port : 3389);
 
         // Resolve the resource to a live host/port — starts/resumes a Proxmox VM and waits for it. When
         // `id` is a VDI pool entry point this also provisions/reuses the user's clone and returns its
@@ -227,38 +220,6 @@ public class RdpWebSocketController : Controller
         // no connector wins or none is configured, so directly-reachable hosts are unaffected.
         var hostTransport = await _paths.ResolveTransportAsync(host, port, resource.ForcedConnectorId, HttpContext.RequestAborted);
 
-        // Proxmox SPICE: a SPICE resource backed by a Proxmox VM cannot be reached directly — the VM's
-        // SPICE server sits behind the node's spiceproxy. Fetch a single-use SPICE ticket (via the
-        // backend's API token) right before connecting and route every SPICE channel through the
-        // spiceproxy CONNECT+TLS tunnel; the ticket becomes the SPICE auth password. Non-Proxmox SPICE
-        // resources connect directly (ticket password comes from stored creds), unchanged.
-        if (resource.Protocol == RdpProtocol.Spice && resource.ProxmoxBackendId != null
-            && resource.ProxmoxNode != null && resource.ProxmoxVmId != null)
-        {
-            var backend = await _backends.GetAsync(resource.ProxmoxBackendId.Value);
-            var node = resource.ProxmoxNode;
-            var vmid = resource.ProxmoxVmId.Value;
-            // Verify we can obtain a ticket up front (fail fast to the browser), then hand the transport a
-            // FACTORY that fetches a FRESH single-use ticket per channel — Proxmox's spiceproxy ticket is
-            // one-shot/short-lived, so main/display/inputs each need their own, dialed just before use.
-            var probe = backend == null ? null
-                : await _proxmox.GetSpiceProxyAsync(backend, node, vmid, HttpContext.RequestAborted);
-            if (backend == null || probe == null)
-            {
-                var msg = System.Text.Encoding.UTF8.GetBytes(
-                    "{\"status\":\"error\",\"message\":\"could not obtain a SPICE ticket for this VM\"}");
-                await socket.SendAsync(msg, System.Net.WebSockets.WebSocketMessageType.Text, true, HttpContext.RequestAborted);
-                await socket.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "no spice ticket", HttpContext.RequestAborted);
-                return;
-            }
-            var b = backend;
-            // The raw proxy dial still uses the path-selected transport (so connector-reached clusters work).
-            hostTransport = new RDP.Spice.SpiceProxyTransport(hostTransport,
-                fct => _proxmox.GetSpiceProxyAsync(b, node, vmid, fct), b.VerifyTls, _logger);
-            // The per-channel ticket password is taken from the transport at connect time, not here.
-            presupplied = new RdpRelaySession.VmCredentials(string.Empty, string.Empty, null);
-        }
-
         var session = new RdpRelaySession(socket, host, port, kerberos, _logger, presupplied, recorder,
             pending?.Token, redirectCreds,
             redir =>
@@ -269,7 +230,7 @@ public class RdpWebSocketController : Controller
                         recId, baseDir, leg + 1));
             },
             hostTransport,
-            _resolvers.For(resource.Protocol));
+            _resolverImpl);
 
         await _resolver.OnConnectedAsync(userId, id);
         var sessionStartUtc = DateTime.UtcNow;
@@ -287,7 +248,6 @@ public class RdpWebSocketController : Controller
         // frame) and the tracked entry exposes the relay so /ws/rdp-quality/{sessionId} can read its
         // gateway→host RTT and relayed-byte counter.
         session.TrackedSessionId = tracked.SessionId;
-        session.KeyboardLayout = resource.KeyboardLayout;
         tracked.Relay = session;
         using var runCts = CancellationTokenSource.CreateLinkedTokenSource(
             HttpContext.RequestAborted, tracked.Cancellation.Token);

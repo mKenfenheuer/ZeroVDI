@@ -42,21 +42,6 @@
                 <input asp-for="Port" class="form-input" type="number" />
                 <span asp-validation-for="Port" class="form-error"></span>
             </div>
-            <div>
-                <label asp-for="Protocol" class="form-label">Protocol</label>
-                <select name="Protocol" class="form-select">
-                    <option value="0">RDP (native)</option>
-                    <option value="1">VNC (bridged)</option>
-                    <option value="2">SPICE (bridged)</option>
-                </select>
-            </div>
-            <div>
-                <label asp-for="KeyboardLayout" class="form-label">Keyboard layout (VNC)</label>
-                <select name="KeyboardLayout" class="form-select">
-                    <option value="0">US (English)</option>
-                    <option value="1">German (QWERTZ)</option>
-                </select>
-            </div>
         </div>
     </div>
 

@@ -5,184 +5,49 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ## [Unreleased]
 
-### Changed
-- **VNC sessions never upscale the target.** When the browser requests a larger session than the VNC host's
-  native desktop (e.g. macOS ARD serves a fixed 1280×720 and can't be resized over RFB), the bridge now
-  clamps the RDP session **down** to the source size instead of stretching a smaller framebuffer up. This
-  removes the per-rectangle CPU scale-blit tax and the blur of upscaling; the source is presented 1:1
-  (sharp) and the browser client letterboxes the smaller canvas in its own window. Downscaling a
-  larger-than-requested source is still performed.
+---
 
-### Added
-- **ZRLE encoding for VNC hosts.** The VNC bridge now also negotiates **ZRLE** (zlib-compressed 64×64 tiles
-  with solid / packed-palette / RLE subencodings), advertised after Tight and ahead of Raw. macOS's built-in
-  Screen Sharing / Apple Remote Desktop server supports ZRLE well and its own Tight implementation is weak
-  (it frequently falls back to near-Raw rectangles); ZRLE gives Apple's server a genuinely compact path for
-  flat UI and palettised regions, cutting the host→gateway bandwidth that dominated macOS VNC sluggishness.
-  The bridge now logs both the **advertised** encoding list and the **first rectangle received in each
-  encoding**, so it's verifiable which codec the server actually selected (advertising ZRLE ≠ using it). The
-  VNC leg's frames-in-flight window is also wired to `ZEROVDI_MAX_FRAMES_IN_FLIGHT` (default 1 = strict
-  lockstep; raise it to pipeline the host RTT + browser ack on a healthy link).
-- **End-to-end frame-ack flow control on bridged sessions.** The VNC/SPICE→RDP bridge now runs the whole
-  pipeline as a closed loop: a frame generated at the target flows target → server → client, and only once
-  the client acknowledges it does the server release the next frame/delta from the target — no unbounded
-  buffering ahead of a slow client. Both output paths are covered: the GFX/H.264 path gates client sends on
-  the RDPEGFX `FRAME_ACKNOWLEDGE` window, and the (previously un-acked) bitmap path now waits for each frame
-  to drain to the client before pulling the next host delta. The in-flight window is configurable via
-  `ZEROVDI_MAX_FRAMES_IN_FLIGHT` and defaults to **1** (strict lockstep — one frame outstanding end-to-end);
-  raise it to pipeline more frames and hide RTT on a healthy link.
-- **In-process libx264 H.264 encoder.** The GFX/AVC420 real-time encoder can now run **libx264 directly
-  in-process** (via native P/Invoke) instead of spawning a per-session `ffmpeg` subprocess: a full-frame BGRA
-  buffer is colour-converted to I420 and encoded in the gateway's own address space, with no process
-  boundary or stdin/stdout copy, and each access unit is emitted synchronously (no reader thread, no
-  idle-flush timer). It produces the same Main@L4.2 Annex-B stream the browser decoder requires. The codec
-  backend stays a one-line DI swap (`IH264EncoderFactory`); the ffmpeg-subprocess encoder remains available
-  as the fallback. libx264 is resolved automatically on both Linux and macOS (Homebrew paths included), so
-  no `LD_LIBRARY_PATH`/`DYLD_LIBRARY_PATH` setup is needed.
-- **Tight encoding for VNC hosts.** The VNC bridge now negotiates **Tight** (zlib + JPEG, with the
-  copy/palette/gradient filters) in preference to Raw, plus **CopyRect** (moved regions aren't resent) and
-  the **DesktopSize** pseudo-encoding (mid-session host resizes now follow). Tight cuts VNC bandwidth by an
-  order of magnitude versus the previous Raw-only path — the difference between usable and unusable over a
-  slow link. Raw remains the universal fallback.
-- **Adaptive quality on slow links (VNC + SPICE).** The bridge now measures client backpressure (the
-  GFX unacked-frame window for H.264/progressive, or the browser-side PDU queue for the bitmap path) and,
-  when the link falls behind, automatically trades quality for bandwidth on **both** sides: it raises the
-  H.264 CRF toward the client **and** asks the VNC host itself for cheaper frames (lower Tight JPEG quality,
-  higher zlib compression). It ramps quality back up as the link recovers, with hysteresis so it doesn't
-  oscillate. No configuration needed.
-- **RemoteFX Progressive selectable as a saved default.** The "GFX — RemoteFX Progressive" display mode is
-  now offered in the admin/connection-defaults editor too, not just the live console popup, so it can be
-  saved as a resource/user default. The console and admin display-mode dropdowns now match exactly.
-- **Dynamic resolution + 1:1 display for the bridge.** The browser's requested resolution now drives the
-  host: on connect (and whenever the browser resizes its window) the RDP web client sends a MONITOR_LAYOUT
-  on the DisplayControl channel (MS-RDPEDISP), which the gateway now answers — relaying the size to the
-  SPICE guest via the **VD agent** (MONITORS_CONFIG). The guest re-creates its display at that size, and
-  the gateway rebuilds its GFX surface (RESET_GRAPHICS) + H.264 encoder to match, so the desktop is shown
-  **1:1** with no letterbox scaling and live in-session resizes work. VMs without a SPICE guest agent fall
-  back to the previous letterbox-scaling behavior.
-- **Faster SPICE display.** QUIC/JPEG/LZ image decode + compositing now runs on a dedicated ordered worker
-  instead of inline on the SPICE channel read loop, so heavy decode no longer stalls network reads and the
-  display no longer progressively lags behind the guest under sustained updates.
+## [0.6.20] — 2026-07-13 — Removed the VNC/SPICE bridge; RDP-only
 
-### Changed
-- **Exchangeable H.264 encoder backend.** The real-time H.264 codec used by the GFX/AVC420 path is now
-  behind an `IH264Encoder` / `IH264EncoderFactory` seam and resolved from DI. The default is unchanged
-  (ffmpeg/libx264, now `FfmpegH264Encoder`), but an alternative backend (e.g. a hardware encoder) can be
-  dropped in by swapping a single service registration — no changes to the shared bridge encoder.
+The experimental VNC and SPICE→RDP bridges did not work well enough to keep, and their machinery (a
+full server-side RDP encoder, H.264/RemoteFX-Progressive output paths, the RFB/SPICE client stacks, and
+the Proxmox spiceproxy tunnel) carried a large, fragile surface area. This release **removes** all of it.
+The gateway now speaks **only native RDP** to hosts. There is no data migration to perform beyond the
+schema change below; any resources previously marked VNC or SPICE will simply connect over RDP on their
+configured port.
+
+### Removed
+- **VNC and SPICE host bridges.** The entire bridge stack is gone: `RfbClient`/`SpiceClient` and the
+  `IProtocolSource` seam, the shared `RdpEncoderSession` + RDPEGFX/DVC server, the H.264 (libx264/ffmpeg)
+  and RemoteFX-Progressive encoders, the Tight/ZRLE VNC decoders, and the Proxmox `spiceproxy` ticket +
+  tunnel path. The console, recorder and the native-RDP resolver (`NlaRdpResolver`) are unaffected.
+- **Resource `Protocol` and `Keyboard layout` settings.** Resources no longer carry a wire-protocol or
+  keyboard-layout choice — every resource is native RDP, which negotiates its own layout with the client.
+  The fields are dropped from the resource create/edit forms.
+- **Backend `Default VNC port` / `Default SPICE port` settings.** Only **Default RDP port** remains.
+  Discovery no longer auto-detects a protocol from the VM's display adapter; discovered VMs default to the
+  backend's RDP port.
+
+### Database
+- Migration `RemoveVncSpiceProtocol` drops `RDPResources.Protocol`, `RDPResources.KeyboardLayout`,
+  `ProxmoxBackends.DefaultVncPort` and `ProxmoxBackends.DefaultSpicePort`. Applied automatically on
+  startup.
 
 ### Fixed
-- **First frame no longer takes ~20 s on VNC/SPICE (H.264/GFX).** When the browser negotiated the H.264
-  GFX path, the encoder switched to H.264 but only encoded a frame when the framebuffer was next marked
-  dirty — which waited for the *next* host rectangle. On an otherwise-idle desktop the first real screen
-  change could be many seconds away, so the console stayed black until then. The encoder now primes the
-  first frame the instant GFX activates, so the current desktop is encoded and sent immediately (the
-  RemoteFX Progressive path already did this). Affected both bridges since it was in the shared encoder.
-- **VNC/SPICE desktop no longer lags behind input.** The bitmap display path only repainted when a source
-  rectangle happened to arrive, and it flushed that update *synchronously on the host receive loop* — which
-  for VNC also stalled the next framebuffer-update request. The result: the desktop appeared frozen until
-  you moved the mouse, and you had to wiggle the cursor to nudge it forward. Frame delivery is now driven by
-  an independent frame clock that coalesces changed regions and flushes on its own cadence, fully decoupled
-  from input and from the host read loop, so the desktop updates smoothly on its own.
 - **Linux/xrdp hosts (e.g. Ubuntu) now connect.** The gateway asked every host for NLA (X.224 `HYBRID`).
   Windows answers an unsupported request with a clean negotiation failure, but xrdp (the common Ubuntu RDP
   server) simply **resets the TCP connection** the moment it sees an NLA request — so the connect died at
   X.224 with `Connection reset by peer`, never reaching credentials. The gateway now retries with plain
   `SSL` (TLS-only, in-band login) when the NLA negotiation fails, exactly as mstsc/FreeRDP do, and tells the
   browser which protocol was selected so it stamps the matching `serverSelectedProtocol` into CS_CORE.
-- **SPICE sessions no longer drop after an idle moment.** The Proxmox spiceproxy reaps CONNECT tunnels that
-  see no traffic, which killed quiet SPICE channels — most often the **inputs** channel, which sends nothing
-  until the user moves the mouse, so its tunnel idled out and the first pointer/key event failed with a
-  broken pipe (read loops meanwhile timed out with `Operation timed out`). Each SPICE channel now runs a
-  lightweight keepalive (an unsolicited `MSGC_PONG` every 10s) that keeps every tunnel warm, so sessions
-  survive idle periods.
 - **HiDPI console setting is now honored.** The "HiDPI (native resolution)" option had no effect on the
   first connect: the web client mis-read the `<canvas>` element's static placeholder dimensions as a
   laid-out session canvas and derived a device-pixel ratio of 1, so the requested desktop resolution never
   scaled up on Retina/HiDPI displays. It now probes the real device-pixel ratio when no prior session
   canvas exists, so HiDPI requests the full native resolution as intended.
-- **Proxmox discovery no longer clobbers per-resource protocol/port/name.** When re-syncing an
-  already-known discovered VM, discovery now **preserves** the admin-set Protocol, Port, Name and
-  Description instead of resetting them (Protocol in particular no longer reverts to RDP). Protocol and
-  port are only seeded on first discovery; the port follows the protocol's backend default.
 - **Discovered VMs keep their stamped identity.** If a VM's notes already carry a `ksol-rdpgw-id` but no
   matching row exists in our DB, discovery now **adopts that id** for the resource row instead of minting
   a fresh GUID and re-stamping the VM — so issued `.rdp` files, authorizations and recordings stay bound.
-- **Per-protocol default ports for discovered VMs.** Backends gain **Default VNC port** and **Default
-  SPICE port** settings (both 5900 by default) alongside Default RDP port. Discovered VNC/SPICE resources
-  (and protocol changes in the resource editor) now use the correct default port instead of always the
-  RDP port. Protocol/keyboard-layout are now editable for Proxmox resources, not just manual ones.
-
-### Added
-- **Auto-detected default protocol on discovery.** When a Proxmox VM is discovered for the **first**
-  time, the gateway now picks its protocol from the VM's display adapter and guest OS: a SPICE-capable
-  display (**qxl**, **virtio-gpu**, **virtio-gl/virgl**) → **SPICE**; otherwise **Windows** guests → **RDP**
-  and any other OS → **VNC**. This only seeds the value at creation — every later sync preserves whatever
-  the admin (or that first detection) set, so manual overrides stick.
-- **SPICE host bridge.** Resources can now set **Protocol = SPICE (bridged)** to connect a SPICE host
-  (e.g. a QEMU/KVM guest). Like the VNC bridge, the gateway speaks SPICE to the host and synthesizes the
-  RDP stream the **unchanged** browser console + recorder consume — no new browser client. A new
-  `SpiceClient : IProtocolSource` performs the SPICE link handshake and **RSA-OAEP ticket authentication**
-  on each channel (main/display/inputs, one TCP connection each), then feeds the shared RDP encoder:
-  display **DRAW_COPY** (raw 32bpp BITMAP, **LZ-RGB**, image cache) and solid **DRAW_FILL** ops are
-  composited into a primary-surface framebuffer and emitted as rectangles; browser mouse/keyboard are
-  forwarded on the SPICE inputs channel (keyboard passes through directly since SPICE and RDP share the
-  AT set-1 scancode set). Reuses the same host transport as RDP/VNC, so connector-tunnelled SPICE hosts
-  work for free. Display images are decoded from **QUIC** (SPICE's primary lossless codec — the whole
-  desktop on a QXL guest), raw **BITMAP**, **LZ-RGB**, **JPEG** and **JPEG_ALPHA**, plus the image cache.
-  MJPEG/VP8 video streams are not yet decoded (follow-up). Default port 5900 when unset.
-- **Proxmox SPICE VMs.** A SPICE resource backed by a Proxmox VM (backend + node + VMID set) is now
-  reached through the node's **spiceproxy** automatically: the gateway fetches a single-use SPICE ticket
-  from `spiceproxy` (using the backend's existing **API token** — no separate PVE login needed) and
-  tunnels every SPICE channel through the spiceproxy HTTP `CONNECT` + TLS, with the ticket as the SPICE
-  auth password. Powering on such a VM stops at "running" (no guest-IP/RDP-port probe, since SPICE is
-  reached via the proxy, not the guest IP). Non-Proxmox SPICE resources still connect directly.
-- **VNC bridge RemoteFX Progressive output (M6).** Browsers that negotiate the GFX dynamic channel but
-  advertise **no AVC decoder** (so H.264 is unavailable) now get **RemoteFX Progressive** over the same
-  MS-RDPEGFX surface instead of dropping to legacy bitmaps. A pure-CPU progressive encoder (ported from
-  the macRDP reference: forward 3-level DWT, per-band quantization, LL3 differential, RLGR1 entropy
-  coding, and the `progressive-simple` wire framing the rdpweb `progressive.js` decoder consumes) encodes
-  64×64 tiles, sending only tiles whose pixels changed (per-tile hashing) and re-sending idle tiles at
-  successively finer quality until lossless (coarse-first / refine-when-idle). Frames are split across
-  self-contained WIRE_TO_SURFACE_2 streams under the client's per-PDU decode budget. Codec selection is
-  unchanged: AVC444 → AVC420 → **Progressive** → bitmap, honoring what the client advertises.
-- **VNC bridge H.264/GFX output (M5).** When the browser advertises the GFX dynamic channel with an AVC
-  capset, the VNC bridge now negotiates MS-RDPEGFX and streams the desktop as **H.264 (AVC420/AVC444)**
-  over a server-side surface instead of legacy bitmaps — far better quality and bandwidth. The gateway
-  stands up the drdynvc dynamic-channel server, the RDPEGFX graphics server (caps confirm, surface
-  create/map, START/WIRE_TO_SURFACE_1/END frames, ZGFX raw segments), and encodes frames in real time
-  via a per-session **ffmpeg/libx264** subprocess (the image already ships ffmpeg). Codec is chosen from
-  what the client actually advertised; clients without AVC use RemoteFX Progressive (see M6), and clients
-  without any GFX channel stay on the bitmap path. The DVC + GFX + AVC420 wire code is ported from the
-  macRDP reference server (its VideoToolbox encoder replaced by ffmpeg for Linux).
-
-### Added
-- **VNC bridge keyboard input (M4).** Browser key events (PC/AT set-1 scancodes) are mapped to X11
-  keysyms and forwarded as RFB KeyEvents — full US layout including letters, digits, punctuation,
-  modifiers (Shift/Ctrl/Alt/Meta), navigation, editing, function and keypad keys. Case and shifted
-  symbols are produced by the host from the forwarded Shift state, as RFB expects. The VNC bridge is now
-  fully interactive (screen + mouse + keyboard) over the bitmap path.
-- **VNC bridge is now live and mouse-interactive (M3).** The desktop updates continuously (RFB
-  incremental-update loop) instead of showing a single static frame, and mouse input works: the browser's
-  fastpath pointer events are decoded, mapped from the letterboxed session space back into the host's
-  native coordinates, and forwarded as RFB PointerEvents (left/middle/right buttons + wheel).
-
-### Changed
-- **VNC bridge now presents the browser-requested desktop size and letterbox-scales the host into it.**
-  Previously the RDP session was sized 1:1 to the VNC framebuffer (e.g. a 1920×1080 host filled a
-  1920×1080 session regardless of the console window). The shared encoder now reads the size the browser
-  requests in its MCS Connect-Initial and center-fits the host desktop into it, aspect-preserved, with
-  black letterbox bars — so the console fills its window and downscales large hosts.
-- **Introduced a protocol-source abstraction so the RDP encoder is shared across host protocols.** The
-  RDP server handshake, codecs, scaling and framing now live in a shared `RdpEncoderSession` driven by an
-  `IProtocolSource` (desktop pixels + input); VNC is one such source (`RfbClient`). Adding a new host
-  protocol no longer touches any RDP code — it implements `IProtocolSource`. (Audio/clipboard join the
-  interface when implemented.)
-
-### Added
-- **VNC bridge supports macOS Screen Sharing (Apple Remote Desktop) authentication** — security type 30
-  (Diffie-Hellman + AES-128), in addition to standard VNC Authentication and None. Uses the resource's
-  stored username + password as the macOS login. (macOS hosts advertise `RFB 003.889` and only Apple
-  security types, which previously failed with "no supported security type".)
 
 ---
 

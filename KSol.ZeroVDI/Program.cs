@@ -184,16 +184,8 @@ public class Program
         builder.Services.AddSingleton<RDP.ProxmoxBackendProvider>();
         builder.Services.AddSingleton<RDP.ProxmoxClient>();
         builder.Services.AddSingleton<RDP.SessionTracker>();
-        // Pluggable host-protocol resolvers: native RDP (NLA) and the VNC→RDP bridge, chosen per
-        // resource by RdpProtocol via the factory.
-        builder.Services.AddSingleton<RDP.NlaRdpResolver>();
-        // Exchangeable real-time H.264 codec backend for the GFX/AVC420 path. Active backend is in-process
-        // libx264 (direct P/Invoke, no ffmpeg subprocess); swap this single registration to
-        // FfmpegH264EncoderFactory to fall back to the ffmpeg-subprocess backend.
-        builder.Services.AddSingleton<RDP.Bridge.IH264EncoderFactory, RDP.Bridge.Libx264H264EncoderFactory>();
-        builder.Services.AddSingleton<RDP.Bridge.VncRdpResolver>();
-        builder.Services.AddSingleton<RDP.Spice.SpiceRdpResolver>();
-        builder.Services.AddSingleton<RDP.IRdpResolverFactory, RDP.RdpResolverFactory>();
+        // Native-RDP host resolver: TCP + X.224 + TLS + CredSSP(NLA), behind the IRdpResolver seam.
+        builder.Services.AddSingleton<RDP.IRdpResolver, RDP.NlaRdpResolver>();
         builder.Services.AddSingleton<RDP.VdiProvisioningService>();
         builder.Services.AddSingleton<RDP.VdiResourceResolver>();
         // Tracks the per-(user, resource) connect-readiness sequence so the browser preflight can poll

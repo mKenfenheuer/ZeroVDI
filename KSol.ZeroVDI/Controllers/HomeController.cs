@@ -133,12 +133,6 @@ public class HomeController : Controller
         ViewData["ResourceId"] = id;
         ViewData["ResourceName"] = resource.Name ?? id;
 
-        // SPICE (bridged) connections authenticate via the Proxmox spiceproxy ticket, which the gateway
-        // fetches server-side with an API token — there are no user-facing VM credentials. The console
-        // still shows the login overlay (so the Session options panel — codec, audio, HiDPI, … — stays
-        // reachable), but the username/password/domain inputs are hidden; the user just clicks Connect.
-        ViewData["IsSpice"] = resource.Protocol == RdpProtocol.Spice;
-
         // Recording disclosure: if the rules engine would record this session AND the matched rule asks
         // to notify, the console shows a "this session is recorded" banner. Mirrors the decision made in
         // RdpWebSocketController.Connect (same user/resource/roles), so the notice matches what's captured.

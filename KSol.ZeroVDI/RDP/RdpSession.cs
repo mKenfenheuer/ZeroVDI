@@ -22,7 +22,7 @@ public sealed class RdpSession
     private readonly List<byte> _rxC2S = new();
     private readonly List<byte> _rxS2C = new();
 
-    // ---- shared connection state (mirrors RdpProtocol fields) ----
+    // ---- shared connection state (X.224 negotiated protocol: 2 = HYBRID/NLA) ----
     private uint _selectedProtocol = 2;
     private int _ioChannelId = 1003;        // global I/O (SC_NET first id)
     private int _userId;
