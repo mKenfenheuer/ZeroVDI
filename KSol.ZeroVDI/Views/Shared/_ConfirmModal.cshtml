@@ -1,17 +1,25 @@
 @*
-    Shared confirmation modal. Any form with a data-confirm="message" attribute is intercepted: instead
-    of submitting immediately it opens this styled dialog, and only submits once the user confirms —
-    replacing native confirm() with markup that matches the design language. Drop a <partial> of this
-    once per page in the Scripts section. Progressive enhancement: with JS off the form just submits.
+    Shared modal for confirmations and alerts — the app's replacement for native confirm()/alert().
+
+    Confirm (declarative): any form/link with a data-confirm="message" is intercepted and only
+    submits once the user confirms. Optional data-confirm-title and data-confirm-kind ("danger" |
+    "info", default "danger") tune the heading and accent. Progressive enhancement: with JS off the
+    form just submits.
+
+    Alert / confirm (programmatic): call window.zvdiAlert(message, opts?) or
+    window.zvdiConfirm(message, opts?) — both return a Promise. Use these instead of alert()/confirm()
+    anywhere in the app. opts: { title, kind: "danger"|"info", okLabel, cancelLabel }.
+
+    Drop a <partial name="_ConfirmModal" /> once per page (in the Scripts section).
 *@
 <div id="confirm-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 p-4">
     <div class="card-surface w-full max-w-md p-6">
         <div class="flex items-start gap-3">
-            <div class="w-10 h-10 rounded-full bg-destructive/10 text-destructive flex items-center justify-center flex-shrink-0">
+            <div id="confirm-modal-icon" class="w-10 h-10 rounded-full bg-destructive/10 text-destructive flex items-center justify-center flex-shrink-0">
                 <i class="ri-error-warning-line text-xl"></i>
             </div>
             <div class="min-w-0">
-                <h3 class="font-semibold">Are you sure?</h3>
+                <h3 id="confirm-modal-title" class="font-semibold">Are you sure?</h3>
                 <p id="confirm-modal-message" class="text-sm text-muted-foreground mt-1"></p>
             </div>
         </div>
@@ -26,37 +34,91 @@
     var modal = document.getElementById('confirm-modal');
     if (!modal || modal.dataset.wired) return;
     modal.dataset.wired = '1';
+    var titleEl = document.getElementById('confirm-modal-title');
     var msg = document.getElementById('confirm-modal-message');
+    var iconWrap = document.getElementById('confirm-modal-icon');
+    var iconEl = iconWrap.querySelector('i');
     var okBtn = document.getElementById('confirm-modal-ok');
     var cancelBtn = document.getElementById('confirm-modal-cancel');
-    var pending = null;
+    var pendingConfirm = null;  // called on OK
+    var pendingCancel = null;   // called on Cancel/dismiss
 
-    function open(message, onConfirm) {
-        msg.textContent = message;
-        pending = onConfirm;
+    var KINDS = {
+        danger: { wrap: 'bg-destructive/10 text-destructive', icon: 'ri-error-warning-line', ok: 'btn-destructive' },
+        info:   { wrap: 'bg-info/10 text-info',               icon: 'ri-information-line',    ok: 'btn-primary' }
+    };
+
+    function applyKind(kind) {
+        var k = KINDS[kind] || KINDS.danger;
+        iconWrap.className = 'w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ' + k.wrap;
+        iconEl.className = k.icon + ' text-xl';
+        okBtn.className = k.ok;
+    }
+
+    // opts: { title, message, kind, okLabel, cancelLabel, showCancel, onConfirm, onCancel }
+    function open(opts) {
+        titleEl.textContent = opts.title || (opts.kind === 'info' ? 'Notice' : 'Are you sure?');
+        msg.textContent = opts.message || '';
+        applyKind(opts.kind);
+        okBtn.textContent = opts.okLabel || (opts.showCancel === false ? 'OK' : 'Confirm');
+        cancelBtn.textContent = opts.cancelLabel || 'Cancel';
+        cancelBtn.style.display = opts.showCancel === false ? 'none' : '';
+        pendingConfirm = opts.onConfirm || null;
+        pendingCancel = opts.onCancel || null;
         modal.classList.remove('hidden');
         modal.classList.add('flex');
         okBtn.focus();
     }
-    function close() {
+    function close(cancelled) {
         modal.classList.add('hidden');
         modal.classList.remove('flex');
-        pending = null;
+        var onCancel = pendingCancel;
+        pendingConfirm = null;
+        pendingCancel = null;
+        if (cancelled && onCancel) onCancel();
     }
-    okBtn.addEventListener('click', function () { var fn = pending; close(); if (fn) fn(); });
-    cancelBtn.addEventListener('click', close);
-    modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
-    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !modal.classList.contains('hidden')) close(); });
+    okBtn.addEventListener('click', function () { var fn = pendingConfirm; close(false); if (fn) fn(); });
+    cancelBtn.addEventListener('click', function () { close(true); });
+    modal.addEventListener('click', function (e) { if (e.target === modal) close(true); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !modal.classList.contains('hidden')) close(true); });
 
-    // Intercept any form (or link) carrying data-confirm.
+    // Declarative: intercept any form (or link) carrying data-confirm.
     document.addEventListener('submit', function (e) {
         var form = e.target.closest('form[data-confirm]');
         if (!form || form.dataset.confirmed) return;
         e.preventDefault();
-        open(form.getAttribute('data-confirm'), function () {
-            form.dataset.confirmed = '1';
-            if (form.requestSubmit) form.requestSubmit(); else form.submit();
+        open({
+            title: form.getAttribute('data-confirm-title') || undefined,
+            message: form.getAttribute('data-confirm'),
+            kind: form.getAttribute('data-confirm-kind') || 'danger',
+            onConfirm: function () {
+                form.dataset.confirmed = '1';
+                if (form.requestSubmit) form.requestSubmit(); else form.submit();
+            }
         });
     }, true);
+
+    // Programmatic API — use these instead of native alert()/confirm().
+    window.zvdiAlert = function (message, opts) {
+        opts = opts || {};
+        return new Promise(function (resolve) {
+            open({
+                title: opts.title, message: message, kind: opts.kind || 'info',
+                okLabel: opts.okLabel || 'OK', showCancel: false,
+                onConfirm: function () { resolve(true); }
+            });
+        });
+    };
+    window.zvdiConfirm = function (message, opts) {
+        opts = opts || {};
+        return new Promise(function (resolve) {
+            open({
+                title: opts.title, message: message, kind: opts.kind || 'danger',
+                okLabel: opts.okLabel, cancelLabel: opts.cancelLabel,
+                onConfirm: function () { resolve(true); },
+                onCancel: function () { resolve(false); }
+            });
+        });
+    };
 })();
 </script>

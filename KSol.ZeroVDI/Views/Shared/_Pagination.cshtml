@@ -1,0 +1,30 @@
+@*
+    Shared pagination footer. Preserves active filters by merging Model.RouteValues into each link.
+    Renders nothing when there is only a single page.
+
+    Usage:
+        <partial name="_Pagination" model="new PaginationModel {
+            Page = Model.Page, TotalPages = Model.TotalPages, TotalCount = Model.TotalCount,
+            RouteValues = new Dictionary<string,string?> { ["q"] = Model.Query },
+        }" />
+*@
+@model KSol.ZeroVDI.Models.PaginationModel
+
+@if (Model.TotalPages > 1)
+{
+    var prev = new Dictionary<string, string?>(Model.RouteValues) { ["page"] = (Model.Page - 1).ToString() };
+    var next = new Dictionary<string, string?>(Model.RouteValues) { ["page"] = (Model.Page + 1).ToString() };
+    <div class="flex items-center justify-between mt-4 text-sm text-muted-foreground">
+        <span>Page @Model.Page of @Math.Max(1, Model.TotalPages)</span>
+        <div class="flex gap-2">
+            @if (Model.Page > 1)
+            {
+                <a class="btn-outline btn-sm" asp-action="Index" asp-all-route-data="prev"><i class="ri-arrow-left-s-line"></i> Previous</a>
+            }
+            @if (Model.Page < Model.TotalPages)
+            {
+                <a class="btn-outline btn-sm" asp-action="Index" asp-all-route-data="next">Next <i class="ri-arrow-right-s-line"></i></a>
+            }
+        </div>
+    </div>
+}

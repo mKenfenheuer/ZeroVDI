@@ -27,13 +27,21 @@ public class UserGroupsController : Controller
     }
 
     [HttpGet("")]
-    public async Task<IActionResult> Index()
+    public async Task<IActionResult> Index(string? q)
     {
-        var groups = await _context.UserGroups
+        var query = _context.UserGroups
             .Include(g => g.Memberships)
             .Include(g => g.ResourceAuthorizations)
-            .OrderBy(g => g.Name)
-            .ToListAsync();
+            .AsQueryable();
+        if (!string.IsNullOrWhiteSpace(q))
+        {
+            var term = q.Trim();
+            query = query.Where(g =>
+                EF.Functions.Like(g.Name, $"%{term}%")
+                || (g.Description != null && EF.Functions.Like(g.Description, $"%{term}%")));
+        }
+        ViewData["Query"] = q;
+        var groups = await query.OrderBy(g => g.Name).ToListAsync();
         return View(groups);
     }
 

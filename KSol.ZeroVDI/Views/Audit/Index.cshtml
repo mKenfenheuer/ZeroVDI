@@ -47,6 +47,7 @@
 }
 else
 {
+    <div class="table-scroll">
     <table class="table-surface">
         <thead>
             <tr>
@@ -85,6 +86,7 @@ else
         }
         </tbody>
     </table>
+    </div>
 
     <div class="flex items-center justify-between mt-4 text-sm text-muted-foreground">
         <span>@Model.TotalCount event@(Model.TotalCount == 1 ? "" : "s") · page @Model.Page of @Math.Max(1, Model.TotalPages)</span>

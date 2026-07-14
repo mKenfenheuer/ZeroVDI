@@ -16,14 +16,16 @@ public class AdminController : Controller
     private readonly UserManager<ApplicationUser> _userManager;
     private readonly ProxmoxClient _proxmox;
     private readonly ProxmoxBackendProvider _backends;
+    private readonly SessionTracker _sessions;
 
     public AdminController(ApplicationDbContext context, UserManager<ApplicationUser> userManager,
-        ProxmoxClient proxmox, ProxmoxBackendProvider backends)
+        ProxmoxClient proxmox, ProxmoxBackendProvider backends, SessionTracker sessions)
     {
         _context = context;
         _userManager = userManager;
         _proxmox = proxmox;
         _backends = backends;
+        _sessions = sessions;
     }
 
     [HttpGet("")]
@@ -48,6 +50,7 @@ public class AdminController : Controller
         {
             ResourceCount = await _context.RDPResources.CountAsync(),
             RunningCount = await _context.RDPResources.CountAsync(r => r.PowerState == ResourcePowerState.Running),
+            ActiveSessionCount = _sessions.All().Count,
             BackendCount = await _context.ProxmoxBackends.CountAsync(),
             UserCount = await _userManager.Users.CountAsync(),
             AuthorizationCount = accessEdgeCount,
@@ -92,12 +95,17 @@ public class AdminController : Controller
 
         return Json(result);
     }
+
+    /// <summary>Live counters for the dashboard tiles that change second-to-second (polled by JS).</summary>
+    [HttpGet("api/stats/live")]
+    public IActionResult LiveStats() => Json(new { activeSessions = _sessions.All().Count });
 }
 
 public class AdminDashboardViewModel
 {
     public int ResourceCount { get; set; }
     public int RunningCount { get; set; }
+    public int ActiveSessionCount { get; set; }
     public int BackendCount { get; set; }
     public int UserCount { get; set; }
     public int AuthorizationCount { get; set; }

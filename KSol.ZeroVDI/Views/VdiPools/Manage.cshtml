@@ -225,30 +225,32 @@
         }
         else
         {
-            <table class="table-surface">
-                <thead>
-                    <tr><th>VMID</th><th>Owner</th><th>State</th><th>Created</th><th class="text-right"></th></tr>
-                </thead>
-                <tbody>
-                @foreach (var i in Model.Instances.OrderBy(x => x.CreatedUtc))
-                {
-                    <tr>
-                        <td class="font-medium">@i.ProxmoxVmId</td>
-                        <td class="text-muted-foreground">@(i.OwnerUser?.UserName ?? (i.OwnerUserId == null ? "— free —" : i.OwnerUserId))</td>
-                        <td><span class="badge bg-muted text-muted-foreground">@i.State</span></td>
-                        <td class="text-muted-foreground">@i.CreatedUtc.ToLocalTime().ToString("g")</td>
-                        <td class="text-right">
-                            <form asp-action="Deprovision" asp-route-id="@Model.Id" method="post" class="inline"
-                                  onsubmit="return confirm('Destroy desktop #@i.ProxmoxVmId? The VM and its disks are deleted.');">
-                                @Html.AntiForgeryToken()
-                                <input type="hidden" name="instanceId" value="@i.Id" />
-                                <button type="submit" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Deprovision</button>
-                            </form>
-                        </td>
-                    </tr>
-                }
-                </tbody>
-            </table>
+            <div class="table-scroll">
+                <table class="table-surface">
+                    <thead>
+                        <tr><th>VMID</th><th>Owner</th><th>State</th><th>Created</th><th class="text-right"></th></tr>
+                    </thead>
+                    <tbody>
+                    @foreach (var i in Model.Instances.OrderBy(x => x.CreatedUtc))
+                    {
+                        <tr>
+                            <td class="font-medium">@i.ProxmoxVmId</td>
+                            <td class="text-muted-foreground">@(i.OwnerUser?.UserName ?? (i.OwnerUserId == null ? "— free —" : i.OwnerUserId))</td>
+                            <td><span class="badge bg-muted text-muted-foreground">@i.State</span></td>
+                            <td class="text-muted-foreground">@i.CreatedUtc.ToLocalTime().ToString("g")</td>
+                            <td class="text-right">
+                                <form asp-action="Deprovision" asp-route-id="@Model.Id" method="post" class="inline"
+                                      data-confirm="Destroy desktop #@i.ProxmoxVmId? The VM and its disks are deleted.">
+                                    @Html.AntiForgeryToken()
+                                    <input type="hidden" name="instanceId" value="@i.Id" />
+                                    <button type="submit" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Deprovision</button>
+                                </form>
+                            </td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            </div>
         }
     </section>
 </div>

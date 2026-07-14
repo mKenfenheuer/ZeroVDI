@@ -1,4 +1,5 @@
-@model IEnumerable<KSol.ZeroVDI.Models.ApplicationUser>
+@model KSol.ZeroVDI.Controllers.UsersIndexViewModel
+@using KSol.ZeroVDI.Models
 
 @{
     ViewData["Title"] = "Users";
@@ -9,62 +10,82 @@
     <a asp-action="Create" class="btn-primary w-fit"><i class="ri-user-add-line"></i> Add user</a>
 }
 
-@if (!Model.Any())
+@{
+    var toolbar = new ListToolbarModel
+    {
+        Query = Model.Query,
+        Placeholder = "Search by username or email…",
+        TotalCount = Model.Users.Count,
+        Noun = "user",
+    };
+}
+<partial name="_ListToolbar" model="toolbar" />
+
+@if (!Model.Users.Any())
 {
     <div class="flex flex-col items-center justify-center text-center py-16 px-4 card-surface border-dashed">
         <div class="w-14 h-14 rounded-full bg-muted flex items-center justify-center mb-4">
             <i class="ri-team-line text-2xl text-muted-foreground"></i>
         </div>
-        <h3 class="text-lg font-semibold">No users found</h3>
-        <a asp-action="Create" class="btn-primary mt-4"><i class="ri-user-add-line"></i> Add user</a>
+        <h3 class="text-lg font-semibold">@(string.IsNullOrWhiteSpace(Model.Query) ? "No users found" : "No matching users")</h3>
+        @if (string.IsNullOrWhiteSpace(Model.Query))
+        {
+            <a asp-action="Create" class="btn-primary mt-4"><i class="ri-user-add-line"></i> Add user</a>
+        }
+        else
+        {
+            <a asp-action="Index" class="btn-outline mt-4">Clear search</a>
+        }
     </div>
 }
 else
 {
-    <table class="table-surface">
-        <thead>
-            <tr>
-                <th>Username</th>
-                <th>Email</th>
-                <th>Status</th>
-                <th>MFA</th>
-                <th class="text-right">Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-        @foreach (var item in Model)
-        {
-            <tr>
-                <td class="font-medium">@item.UserName</td>
-                <td class="text-muted-foreground">@item.Email</td>
-                <td>
-                    @if (item.EmailConfirmed)
-                    {
-                        <span class="badge bg-success/10 text-success">Confirmed</span>
-                    }
-                    else
-                    {
-                        <span class="badge bg-warning/10 text-warning">Not confirmed</span>
-                    }
-                </td>
-                <td>
-                    @if (item.TwoFactorEnabled)
-                    {
-                        <span class="badge bg-success/10 text-success"><i class="ri-shield-check-line"></i> Enabled</span>
-                    }
-                    else
-                    {
-                        <span class="badge bg-muted text-muted-foreground">Off</span>
-                    }
-                </td>
-                <td>
-                    <div class="flex items-center justify-end gap-2">
-                        <a asp-action="Manage" asp-route-id="@item.Id" class="btn-secondary btn-sm">Manage</a>
-                        <a asp-action="Delete" asp-route-id="@item.Id" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Delete</a>
-                    </div>
-                </td>
-            </tr>
-        }
-        </tbody>
-    </table>
+    <div class="table-scroll">
+        <table class="table-surface">
+            <thead>
+                <tr>
+                    <th>Username</th>
+                    <th>Email</th>
+                    <th>Status</th>
+                    <th>MFA</th>
+                    <th class="text-right">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+            @foreach (var item in Model.Users)
+            {
+                <tr>
+                    <td class="font-medium">@item.UserName</td>
+                    <td class="text-muted-foreground">@item.Email</td>
+                    <td>
+                        @if (item.EmailConfirmed)
+                        {
+                            <span class="badge bg-success/10 text-success">Confirmed</span>
+                        }
+                        else
+                        {
+                            <span class="badge bg-warning/10 text-warning">Not confirmed</span>
+                        }
+                    </td>
+                    <td>
+                        @if (item.TwoFactorEnabled)
+                        {
+                            <span class="badge bg-success/10 text-success"><i class="ri-shield-check-line"></i> Enabled</span>
+                        }
+                        else
+                        {
+                            <span class="badge bg-muted text-muted-foreground">Off</span>
+                        }
+                    </td>
+                    <td>
+                        <div class="flex items-center justify-end gap-2">
+                            <a asp-action="Manage" asp-route-id="@item.Id" class="btn-secondary btn-sm">Manage</a>
+                            <a asp-action="Delete" asp-route-id="@item.Id" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Delete</a>
+                        </div>
+                    </td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
 }

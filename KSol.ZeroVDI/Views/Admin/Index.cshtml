@@ -4,18 +4,19 @@
     ViewData["Title"] = "Dashboard";
     ViewData["Subtitle"] = "Overview of your gateway.";
 
-    var stats = new (string Label, int Value, string Icon, string Tint, string Controller)[]
+    var stats = new (string Label, int Value, string Icon, string Tint, string Controller, string? LiveId)[]
     {
-        ("Resources", Model.ResourceCount, "ri-computer-line", "text-chart-1", "RDPResources"),
-        ("Running now", Model.RunningCount, "ri-play-circle-line", "text-success", "RDPResources"),
-        ("Backends", Model.BackendCount, "ri-server-line", "text-chart-2", "ProxmoxBackends"),
-        ("Users", Model.UserCount, "ri-team-line", "text-chart-3", "Users"),
-        ("Access grants", Model.AuthorizationCount, "ri-shield-user-line", "text-chart-4", "RDPResourceUserAuthorizations"),
-        ("Recordings", Model.RecordingCount, "ri-film-line", "text-chart-5", "Recordings"),
+        ("Resources", Model.ResourceCount, "ri-computer-line", "text-chart-1", "RDPResources", null),
+        ("Active sessions", Model.ActiveSessionCount, "ri-pulse-line", "text-success", "Sessions", "stat-active-sessions"),
+        ("Running now", Model.RunningCount, "ri-play-circle-line", "text-chart-2", "RDPResources", null),
+        ("Backends", Model.BackendCount, "ri-server-line", "text-chart-2", "ProxmoxBackends", null),
+        ("Users", Model.UserCount, "ri-team-line", "text-chart-3", "Users", null),
+        ("Access grants", Model.AuthorizationCount, "ri-shield-user-line", "text-chart-4", "RDPResourceUserAuthorizations", null),
+        ("Recordings", Model.RecordingCount, "ri-film-line", "text-chart-5", "Recordings", null),
     };
 }
 
-<div class="grid grid-cols-2 lg:grid-cols-3 gap-4">
+<div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
     @foreach (var s in stats)
     {
         <a asp-controller="@s.Controller" asp-action="Index"
@@ -24,7 +25,7 @@
                 <span class="text-sm text-muted-foreground">@s.Label</span>
                 <i class="@s.Icon text-xl @s.Tint"></i>
             </div>
-            <div class="mt-2 text-3xl font-semibold tracking-tight">@s.Value</div>
+            <div class="mt-2 text-3xl font-semibold tracking-tight" @(s.LiveId != null ? $"id={s.LiveId}" : "")>@s.Value</div>
         </a>
     }
 </div>
@@ -86,35 +87,68 @@
 @section Scripts {
 <script>
 (function () {
-    fetch('/admin/api/backends/status')
-        .then(function (r) { return r.json(); })
-        .then(function (backends) {
-            var el = document.getElementById('backend-status');
-            if (!backends || !backends.length) {
-                el.innerHTML = '<p class="text-sm text-muted-foreground">No backends configured.</p>';
-                return;
-            }
-            var html = '<div class="space-y-3">';
-            backends.forEach(function (b) {
-                var badge = b.isOnline
-                    ? '<span class="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-success/10 text-success"><i class="ri-checkbox-circle-fill"></i> Online</span>'
-                    : '<span class="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-destructive/10 text-destructive"><i class="ri-close-circle-fill"></i> Offline</span>';
-                var detail = b.isOnline
-                    ? '<span class="text-xs text-muted-foreground">' + b.totalVms + ' VMs, ' + b.runningVms + ' running</span>'
-                    : '<span class="text-xs text-destructive">' + (b.error || 'Unreachable') + '</span>';
-                html += '<div class="flex items-center justify-between py-2 border-b border-border last:border-0">'
-                    + '<div class="flex items-center gap-3 min-w-0">'
-                    + '<div class="w-9 h-9 rounded-lg bg-muted flex items-center justify-center flex-shrink-0"><i class="ri-server-line text-muted-foreground"></i></div>'
-                    + '<div class="min-w-0"><div class="font-medium text-sm truncate">' + b.name + '</div>'
-                    + '<div class="text-xs text-muted-foreground truncate">' + (b.hostUrl || '—') + '</div></div></div>'
-                    + '<div class="flex flex-col items-end gap-1">' + badge + detail + '</div></div>';
-            });
-            html += '</div>';
-            el.innerHTML = html;
-        })
-        .catch(function () {
-            document.getElementById('backend-status').innerHTML = '<p class="text-sm text-destructive">Failed to load backend status.</p>';
+    var el = document.getElementById('backend-status');
+
+    function esc(v) {
+        return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
         });
+    }
+
+    function render(backends) {
+        if (!backends || !backends.length) {
+            el.innerHTML = '<p class="text-sm text-muted-foreground">No backends configured.</p>';
+            return;
+        }
+        var html = '<div class="space-y-3">';
+        backends.forEach(function (b) {
+            var badge = b.isOnline
+                ? '<span class="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-success/10 text-success"><i class="ri-checkbox-circle-fill"></i> Online</span>'
+                : '<span class="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-destructive/10 text-destructive"><i class="ri-close-circle-fill"></i> Offline</span>';
+            var detail = b.isOnline
+                ? '<span class="text-xs text-muted-foreground">' + esc(b.totalVms) + ' VMs, ' + esc(b.runningVms) + ' running</span>'
+                : '<span class="text-xs text-destructive">' + esc(b.error || 'Unreachable') + '</span>';
+            html += '<div class="flex items-center justify-between py-2 border-b border-border last:border-0">'
+                + '<div class="flex items-center gap-3 min-w-0">'
+                + '<div class="w-9 h-9 rounded-lg bg-muted flex items-center justify-center flex-shrink-0"><i class="ri-server-line text-muted-foreground"></i></div>'
+                + '<div class="min-w-0"><div class="font-medium text-sm truncate">' + esc(b.name) + '</div>'
+                + '<div class="text-xs text-muted-foreground truncate">' + esc(b.hostUrl || '—') + '</div></div></div>'
+                + '<div class="flex flex-col items-end gap-1">' + badge + detail + '</div></div>';
+        });
+        html += '</div>';
+        el.innerHTML = html;
+    }
+
+    function load() {
+        // Don't fetch when the tab is hidden; poll again when it becomes visible.
+        if (document.hidden) return;
+        fetch('/admin/api/backends/status', { headers: { 'Accept': 'application/json' } })
+            .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+            .then(render)
+            .catch(function () {
+                el.innerHTML = '<p class="text-sm text-destructive"><i class="ri-error-warning-line"></i> Failed to load backend status — retrying…</p>';
+            });
+    }
+
+    load();
+    setInterval(load, 30000);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) load(); });
+
+    // Live counters (active sessions) — cheap in-memory endpoint, polled more often than backend probes.
+    function loadLiveStats() {
+        if (document.hidden) return;
+        fetch('/admin/api/stats/live', { headers: { 'Accept': 'application/json' } })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) {
+                if (!d) return;
+                var el = document.getElementById('stat-active-sessions');
+                if (el && typeof d.activeSessions === 'number') el.textContent = d.activeSessions;
+            })
+            .catch(function () { /* transient; next tick retries */ });
+    }
+    loadLiveStats();
+    setInterval(loadLiveStats, 10000);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) loadLiveStats(); });
 })();
 </script>
 }

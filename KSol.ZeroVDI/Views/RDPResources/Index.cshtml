@@ -1,75 +1,123 @@
-@model IEnumerable<KSol.ZeroVDI.Models.RDPResource>
+@model KSol.ZeroVDI.Controllers.RDPResourcesIndexViewModel
 @using KSol.ZeroVDI.Models
 
 @{
     ViewData["Title"] = "Resources";
     ViewData["Subtitle"] = "Remote desktops users can connect to.";
+    var hasQuery = !string.IsNullOrWhiteSpace(Model.Query);
+    var hasFilter = hasQuery || Model.Source != null;
 }
 
 @section PageActions {
     <a asp-action="Create" class="btn-primary w-fit"><i class="ri-add-line"></i> New resource</a>
 }
 
-@if (!Model.Any())
+<form method="get" class="flex flex-wrap items-end gap-3 mb-5">
+    <div class="flex-1 min-w-[220px]">
+        <label class="block text-xs font-medium text-muted-foreground mb-1">Search name, description or address</label>
+        <div class="relative">
+            <i class="ri-search-line absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none"></i>
+            <input type="text" name="q" value="@Model.Query" placeholder="e.g. finance-vm" class="form-input pl-9" autocomplete="off" />
+        </div>
+    </div>
+    <div>
+        <label class="block text-xs font-medium text-muted-foreground mb-1">Source</label>
+        <select name="source" class="form-select" onchange="this.form.submit()">
+            <option value="">All sources</option>
+            @foreach (ResourceSource s in Enum.GetValues<ResourceSource>())
+            {
+                @* VdiClone resources live under their VDI pool, not this list. *@
+                if (s == ResourceSource.VdiClone) { continue; }
+                <option value="@s" selected="@(Model.Source == s)">@s</option>
+            }
+        </select>
+    </div>
+    <button type="submit" class="btn-secondary btn-sm"><i class="ri-search-line"></i> Search</button>
+    @if (hasFilter)
+    {
+        <a asp-action="Index" class="btn-outline btn-sm">Reset</a>
+    }
+    <span class="ml-auto text-sm text-muted-foreground self-center">@Model.TotalCount resource@(Model.TotalCount == 1 ? "" : "s")</span>
+</form>
+
+@if (!Model.Resources.Any())
 {
     <div class="flex flex-col items-center justify-center text-center py-16 px-4 card-surface border-dashed">
         <div class="w-14 h-14 rounded-full bg-muted flex items-center justify-center mb-4">
             <i class="ri-computer-line text-2xl text-muted-foreground"></i>
         </div>
-        <h3 class="text-lg font-semibold">No resources yet</h3>
-        <p class="text-sm text-muted-foreground mt-1">Create a manual resource or connect a Proxmox backend to discover VMs.</p>
-        <a asp-action="Create" class="btn-primary mt-4"><i class="ri-add-line"></i> New resource</a>
+        <h3 class="text-lg font-semibold">@(hasFilter ? "No matching resources" : "No resources yet")</h3>
+        @if (hasFilter)
+        {
+            <a asp-action="Index" class="btn-outline mt-4">Clear filters</a>
+        }
+        else
+        {
+            <p class="text-sm text-muted-foreground mt-1">Create a manual resource or connect a Proxmox backend to discover VMs.</p>
+            <a asp-action="Create" class="btn-primary mt-4"><i class="ri-add-line"></i> New resource</a>
+        }
     </div>
 }
 else
 {
-    <table class="table-surface">
-        <thead>
-            <tr>
-                <th>Name</th>
-                <th>Source</th>
-                <th>State</th>
-                <th>Address</th>
-                <th class="text-right">Actions</th>
-            </tr>
-        </thead>
-        <tbody>
-        @foreach (var item in Model)
-        {
-            <tr>
-                <td>
-                    <div class="font-medium">@item.Name</div>
-                    @if (!string.IsNullOrEmpty(item.Description))
-                    {
-                        <div class="text-muted-foreground text-xs mt-0.5">@item.Description</div>
-                    }
-                </td>
-                <td>
-                    <span class="@(item.Source == ResourceSource.Proxmox ? "badge-primary" : "badge-muted")">@item.Source</span>
-                </td>
-                <td><partial name="_PowerStateBadge" model="item.PowerState" /></td>
-                <td class="text-muted-foreground">
-                    @(string.IsNullOrEmpty(item.IpAddress) ? "—" : $"{item.IpAddress}:{item.Port}")
-                </td>
-                <td>
-                    <div class="flex items-center justify-end gap-2">
-                        <a asp-action="Edit" asp-route-id="@item.Id" class="btn-secondary btn-sm">Edit</a>
-                        @if (item.Source == ResourceSource.Proxmox)
+    <div class="table-scroll">
+        <table class="table-surface">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Source</th>
+                    <th>State</th>
+                    <th>Address</th>
+                    <th class="text-right">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+            @foreach (var item in Model.Resources)
+            {
+                <tr>
+                    <td>
+                        <div class="font-medium">@item.Name</div>
+                        @if (!string.IsNullOrEmpty(item.Description))
                         {
-                            <form asp-action="Exclude" asp-route-id="@item.Id" method="post" class="inline"
-                                  onsubmit="return confirm('Exclude this VM from indexing? It will be marked in the VM notes and removed from the gateway.');">
-                                @Html.AntiForgeryToken()
-                                <button type="submit" class="btn-outline btn-sm text-warning border-warning/40 hover:bg-warning/10">Exclude</button>
-                            </form>
+                            <div class="text-muted-foreground text-xs mt-0.5">@item.Description</div>
                         }
-                        else
-                        {
-                            <a asp-action="Delete" asp-route-id="@item.Id" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Delete</a>
-                        }
-                    </div>
-                </td>
-            </tr>
-        }
-        </tbody>
-    </table>
+                    </td>
+                    <td>
+                        <span class="@(item.Source == ResourceSource.Proxmox ? "badge-primary" : "badge-muted")">@item.Source</span>
+                    </td>
+                    <td><partial name="_PowerStateBadge" model="item.PowerState" /></td>
+                    <td class="text-muted-foreground">
+                        @(string.IsNullOrEmpty(item.IpAddress) ? "—" : $"{item.IpAddress}:{item.Port}")
+                    </td>
+                    <td>
+                        <div class="flex items-center justify-end gap-2">
+                            <a asp-action="Edit" asp-route-id="@item.Id" class="btn-secondary btn-sm">Edit</a>
+                            @if (item.Source == ResourceSource.Proxmox)
+                            {
+                                <form asp-action="Exclude" asp-route-id="@item.Id" method="post" class="inline"
+                                      data-confirm="Exclude this VM from indexing? It will be marked in the VM notes and removed from the gateway.">
+                                    @Html.AntiForgeryToken()
+                                    <button type="submit" class="btn-outline btn-sm text-warning border-warning/40 hover:bg-warning/10">Exclude</button>
+                                </form>
+                            }
+                            else
+                            {
+                                <a asp-action="Delete" asp-route-id="@item.Id" class="btn-outline btn-sm text-destructive border-destructive/40 hover:bg-destructive/10">Delete</a>
+                            }
+                        </div>
+                    </td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
+
+    var pager = new PaginationModel
+    {
+        Page = Model.Page,
+        TotalPages = Model.TotalPages,
+        TotalCount = Model.TotalCount,
+        RouteValues = new Dictionary<string, string?> { ["q"] = Model.Query, ["source"] = Model.Source?.ToString() },
+    };
+    <partial name="_Pagination" model="pager" />
 }

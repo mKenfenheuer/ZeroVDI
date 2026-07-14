@@ -47,9 +47,41 @@ namespace KSol.ZeroVDI.Controllers
 
         // GET: /admin/resources
         [HttpGet("")]
-        public async Task<IActionResult> Index()
+        public async Task<IActionResult> Index(string? q, ResourceSource? source, int page = 1)
         {
-            return View(await _context.RDPResources.ToListAsync());
+            const int pageSize = 25;
+            if (page < 1) page = 1;
+
+            // VdiClone resources are provisioned desktops owned by a VDI pool — they are managed on the
+            // pool's Manage page, not here, so they never appear in the admin Resources list.
+            var query = _context.RDPResources.Where(r => r.Source != ResourceSource.VdiClone);
+            if (source.HasValue)
+                query = query.Where(r => r.Source == source.Value);
+            if (!string.IsNullOrWhiteSpace(q))
+            {
+                var term = q.Trim();
+                query = query.Where(r =>
+                    (r.Name != null && EF.Functions.Like(r.Name, $"%{term}%"))
+                    || (r.Description != null && EF.Functions.Like(r.Description, $"%{term}%"))
+                    || (r.IpAddress != null && EF.Functions.Like(r.IpAddress, $"%{term}%")));
+            }
+
+            var total = await query.CountAsync();
+            var resources = await query
+                .OrderBy(r => r.Name)
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
+                .ToListAsync();
+
+            return View(new RDPResourcesIndexViewModel
+            {
+                Resources = resources,
+                Query = q,
+                Source = source,
+                Page = page,
+                PageSize = pageSize,
+                TotalCount = total,
+            });
         }
 
         // GET: /admin/resources/details/5
@@ -571,5 +603,16 @@ namespace KSol.ZeroVDI.Controllers
         public List<UserGroup> AvailableGroups { get; set; } = new();
         /// <summary>Connectors that can be pinned as this resource's forced connection path.</summary>
         public List<Connector> AvailableConnectors { get; set; } = new();
+    }
+
+    public class RDPResourcesIndexViewModel
+    {
+        public List<RDPResource> Resources { get; set; } = new();
+        public string? Query { get; set; }
+        public ResourceSource? Source { get; set; }
+        public int Page { get; set; }
+        public int PageSize { get; set; }
+        public int TotalCount { get; set; }
+        public int TotalPages => (int)Math.Ceiling(TotalCount / (double)Math.Max(1, PageSize));
     }
 }

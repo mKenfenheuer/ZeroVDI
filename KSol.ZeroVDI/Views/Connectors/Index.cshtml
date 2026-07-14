@@ -65,6 +65,7 @@
 }
 else
 {
+    <div class="table-scroll">
     <table class="table-surface">
         <thead>
             <tr>
@@ -107,7 +108,7 @@ else
                 <td>
                     <div class="flex items-center justify-end gap-2">
                         <form asp-action="Regenerate" asp-route-id="@c.Id" method="post" class="inline"
-                              onsubmit="return confirm('Issue a new registration token? The agent will have to re-register and its current token stops working.');">
+                              data-confirm="Issue a new registration token? The agent will have to re-register and its current token stops working.">
                             @Html.AntiForgeryToken()
                             <button type="submit" class="btn-outline btn-sm">New token</button>
                         </form>
@@ -119,4 +120,5 @@ else
         }
         </tbody>
     </table>
+    </div>
 }

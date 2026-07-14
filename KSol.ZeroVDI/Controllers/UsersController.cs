@@ -34,10 +34,19 @@ namespace KSol.ZeroVDI.Controllers
 
         // GET: /admin/users
         [HttpGet("")]
-        public async Task<IActionResult> Index()
+        public async Task<IActionResult> Index(string? q)
         {
-            var users = await _userManager.Users.ToListAsync();
-            return View(users);
+            var query = _userManager.Users.AsQueryable();
+            if (!string.IsNullOrWhiteSpace(q))
+            {
+                var term = q.Trim();
+                query = query.Where(u =>
+                    (u.UserName != null && EF.Functions.Like(u.UserName, $"%{term}%"))
+                    || (u.Email != null && EF.Functions.Like(u.Email, $"%{term}%")));
+            }
+
+            var users = await query.OrderBy(u => u.UserName).ToListAsync();
+            return View(new UsersIndexViewModel { Users = users, Query = q });
         }
 
         // GET: /admin/users/details/5
@@ -458,5 +467,11 @@ namespace KSol.ZeroVDI.Controllers
         public List<RDPResource> GrantableResources { get; set; } = new();
         public IReadOnlyList<PoolAccessEntry> Pools { get; set; } = new List<PoolAccessEntry>();
         public List<VdiPool> AssignablePools { get; set; } = new();
+    }
+
+    public class UsersIndexViewModel
+    {
+        public List<ApplicationUser> Users { get; set; } = new();
+        public string? Query { get; set; }
     }
 }

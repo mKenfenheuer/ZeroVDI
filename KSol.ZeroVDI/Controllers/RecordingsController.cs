@@ -33,16 +33,40 @@ public class RecordingsController : Controller
     }
 
     [HttpGet("")]
-    public async Task<IActionResult> Index()
+    public async Task<IActionResult> Index(string? q, int page = 1)
     {
+        const int pageSize = 25;
+        if (page < 1) page = 1;
+
         // Admin/Auditor see every recording — recordings are an audit surface, not a per-user feature.
-        var recordings = await _context.Recordings
+        var query = _context.Recordings
             .Include(r => r.User)
             .Include(r => r.RDPResource)
+            .AsQueryable();
+
+        if (!string.IsNullOrWhiteSpace(q))
+        {
+            var term = q.Trim();
+            query = query.Where(r =>
+                (r.User != null && r.User.UserName != null && EF.Functions.Like(r.User.UserName, $"%{term}%"))
+                || (r.RDPResource != null && r.RDPResource.Name != null && EF.Functions.Like(r.RDPResource.Name, $"%{term}%")));
+        }
+
+        var total = await query.CountAsync();
+        var recordings = await query
             .OrderByDescending(r => r.StartedUtc)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
             .ToListAsync();
 
-        return View(recordings);
+        return View(new RecordingsIndexViewModel
+        {
+            Recordings = recordings,
+            Query = q,
+            Page = page,
+            PageSize = pageSize,
+            TotalCount = total,
+        });
     }
 
     [HttpGet("play/{id}")]
@@ -143,4 +167,14 @@ public class RecordingsController : Controller
             .Include(r => r.RDPResource)
             .FirstOrDefaultAsync(r => r.Id == id);
     }
+}
+
+public class RecordingsIndexViewModel
+{
+    public List<Recording> Recordings { get; set; } = new();
+    public string? Query { get; set; }
+    public int Page { get; set; }
+    public int PageSize { get; set; }
+    public int TotalCount { get; set; }
+    public int TotalPages => (int)Math.Ceiling(TotalCount / (double)Math.Max(1, PageSize));
 }

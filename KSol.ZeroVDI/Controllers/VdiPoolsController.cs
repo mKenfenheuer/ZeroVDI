@@ -22,26 +22,37 @@ public class VdiPoolsController : Controller
     private readonly ProxmoxClient _proxmox;
     private readonly ProxmoxBackendProvider _backends;
     private readonly CredentialProtector _credentials;
+    private readonly VdiProvisioningService _provisioning;
 
     public VdiPoolsController(ApplicationDbContext context, IAuditLogger audit,
-        ProxmoxClient proxmox, ProxmoxBackendProvider backends, CredentialProtector credentials)
+        ProxmoxClient proxmox, ProxmoxBackendProvider backends, CredentialProtector credentials,
+        VdiProvisioningService provisioning)
     {
         _context = context;
         _audit = audit;
         _proxmox = proxmox;
         _backends = backends;
         _credentials = credentials;
+        _provisioning = provisioning;
     }
 
     [HttpGet("")]
-    public async Task<IActionResult> Index()
+    public async Task<IActionResult> Index(string? q)
     {
-        var pools = await _context.VdiPools
+        var query = _context.VdiPools
             .Include(p => p.Assignments)
             .Include(p => p.Instances)
             .Include(p => p.ProxmoxBackend)
-            .OrderBy(p => p.Name)
-            .ToListAsync();
+            .AsQueryable();
+        if (!string.IsNullOrWhiteSpace(q))
+        {
+            var term = q.Trim();
+            query = query.Where(p =>
+                EF.Functions.Like(p.Name, $"%{term}%")
+                || (p.ProxmoxBackend != null && EF.Functions.Like(p.ProxmoxBackend.Name, $"%{term}%")));
+        }
+        ViewData["Query"] = q;
+        var pools = await query.OrderBy(p => p.Name).ToListAsync();
         return View(pools);
     }
 
@@ -171,16 +182,51 @@ public class VdiPoolsController : Controller
     {
         var pool = await _context.VdiPools.Include(p => p.Instances).FirstOrDefaultAsync(p => p.Id == id);
         if (pool == null) return NotFound();
-        if (pool.Instances.Any())
+
+        // Deleting a pool cascades to its provisioned desktops: each instance's Proxmox VM is destroyed
+        // ONLY after verifying it is really that clone (VMIDs get recycled / nodes drift), and its clone
+        // RDPResource + authorizations are removed so no orphaned VdiClone row is left behind (which
+        // previously caused an FK error when the pool row went away).
+        var backend = await _backends.GetAsync(pool.ProxmoxBackendId);
+        var desktopCount = pool.Instances.Count;
+        var resourceIds = pool.Instances.Where(i => i.RDPResourceId != null).Select(i => i.RDPResourceId!).ToList();
+
+        int mismatched = 0;
+        if (backend != null)
         {
-            TempData["Error"] = "Deprovision all desktops in this pool before deleting it.";
-            return RedirectToAction(nameof(Manage), new { id });
+            foreach (var instance in pool.Instances)
+            {
+                var outcome = await _provisioning.SafeDestroyInstanceVmAsync(backend, instance);
+                if (outcome == VdiProvisioningService.DestroyOutcome.Error)
+                {
+                    // Backend unreachable mid-teardown — abort so we never delete the pool while its VMs
+                    // may still exist. Nothing has been removed from the DB at this point.
+                    TempData["Error"] = "Could not reach the backend to verify the pool's VMs. Nothing was changed — try again.";
+                    return RedirectToAction(nameof(Manage), new { id });
+                }
+                if (outcome == VdiProvisioningService.DestroyOutcome.IdentityMismatch) mismatched++;
+            }
         }
+
+        if (resourceIds.Count > 0)
+        {
+            var resources = await _context.RDPResources.Where(r => resourceIds.Contains(r.Id)).ToListAsync();
+            _context.RDPResources.RemoveRange(resources);
+            var auths = await _context.RDPResourceUserAuthorizations
+                .Where(a => a.RDPResourceId != null && resourceIds.Contains(a.RDPResourceId)).ToListAsync();
+            _context.RDPResourceUserAuthorizations.RemoveRange(auths);
+        }
+
+        _context.VdiInstances.RemoveRange(pool.Instances);
         _context.VdiPools.Remove(pool); // assignments cascade
         await _context.SaveChangesAsync();
         await _audit.LogAsync(AuditCategory.Authorization, "VdiPoolDeleted",
-            targetType: nameof(VdiPool), targetId: id, targetName: pool.Name);
-        TempData["Status"] = $"Pool “{pool.Name}” deleted.";
+            targetType: nameof(VdiPool), targetId: id, targetName: pool.Name,
+            detail: new { DesktopsRemoved = desktopCount, VmsSkippedIdentityMismatch = mismatched });
+        if (mismatched > 0)
+            TempData["Error"] = $"Pool “{pool.Name}” deleted, but {mismatched} VM(s) did not match their desktop identity and were left untouched — verify no orphaned VMs remain.";
+        else
+            TempData["Status"] = $"Pool “{pool.Name}” and its desktops deleted.";
         return RedirectToAction(nameof(Index));
     }
 
@@ -248,14 +294,32 @@ public class VdiPoolsController : Controller
         var instance = await _context.VdiInstances.FirstOrDefaultAsync(i => i.Id == instanceId && i.PoolId == id);
         if (instance == null) return RedirectToAction(nameof(Manage), new { id });
 
+        var priorState = instance.State;
         instance.State = VdiInstanceState.Deprovisioning;
         await _context.SaveChangesAsync();
 
         var backend = await _backends.GetAsync(pool.ProxmoxBackendId);
-        if (backend != null && instance.ProxmoxNode != null)
+        if (backend != null)
         {
-            // Stop the VM if it is running, then destroy it. Best-effort — a missing VM is the goal state.
-            await _proxmox.DestroyVmAsync(backend, instance.ProxmoxNode, instance.ProxmoxVmId);
+            // Verify the VM is really this clone before destroying anything — VMIDs get recycled and the
+            // recorded node can be stale after migration, so a blind destroy-by-VMID can wipe an unrelated VM.
+            var outcome = await _provisioning.SafeDestroyInstanceVmAsync(backend, instance);
+            if (outcome == VdiProvisioningService.DestroyOutcome.Error)
+            {
+                // Backend unreachable / probe failed — we don't know the VM's fate. Abort and keep all rows.
+                instance.State = priorState;
+                await _context.SaveChangesAsync();
+                TempData["Error"] = "Could not reach the backend to verify the VM. Nothing was changed — try again.";
+                return RedirectToAction(nameof(Manage), new { id });
+            }
+            if (outcome == VdiProvisioningService.DestroyOutcome.IdentityMismatch)
+            {
+                // A different VM now sits at this VMID (or the notes binding is gone). We refuse to destroy
+                // it. The DB rows are still removed below so the stale instance is cleared, but we warn the
+                // admin to check for an orphaned VM rather than assume it was deleted.
+                TempData["Error"] = $"VMID {instance.ProxmoxVmId} did not match this desktop's identity, so no VM " +
+                    "was destroyed (it may have been deleted or its ID reused). The record was removed — verify no orphaned VM remains.";
+            }
         }
 
         if (instance.RDPResourceId != null)
@@ -272,7 +336,7 @@ public class VdiPoolsController : Controller
         await _audit.LogAsync(AuditCategory.Authorization, "VdiInstanceDeprovisioned",
             targetType: nameof(VdiPool), targetId: id, targetName: pool.Name,
             detail: new { instance.ProxmoxVmId, instance.OwnerUserId });
-        TempData["Status"] = "Desktop deprovisioned.";
+        if (TempData["Error"] == null) TempData["Status"] = "Desktop deprovisioned.";
         return RedirectToAction(nameof(Manage), new { id });
     }
 }

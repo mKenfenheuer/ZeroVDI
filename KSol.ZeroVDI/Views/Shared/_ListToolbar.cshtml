@@ -1,0 +1,45 @@
+@*
+    Shared list toolbar: a GET search form with an optional filter slot and a result count.
+    Mirrors the filter bar first built on the Audit page and generalises it for every list.
+
+    Usage from a list view:
+        <partial name="_ListToolbar" model="new ListToolbarModel {
+            Query = Model.Query,
+            Placeholder = "Search users…",
+            TotalCount = Model.TotalCount,
+            Noun = "user",
+        }" />
+
+    To add extra filters (e.g. a category <select>), render this inline instead of via <partial>
+    and pass the extra controls through the FiltersHtml — or just copy the <form> and extend it.
+*@
+@model KSol.ZeroVDI.Models.ListToolbarModel
+
+<form method="get" class="flex flex-wrap items-end gap-3 mb-5">
+    <div class="flex-1 min-w-[220px]">
+        @if (!string.IsNullOrEmpty(Model.Label))
+        {
+            <label class="block text-xs font-medium text-muted-foreground mb-1">@Model.Label</label>
+        }
+        <div class="relative">
+            <i class="ri-search-line absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none"></i>
+            <input type="text" name="q" value="@Model.Query" placeholder="@Model.Placeholder"
+                   class="form-input pl-9" autocomplete="off" />
+        </div>
+    </div>
+    @if (Model.FiltersHtml != null)
+    {
+        @Model.FiltersHtml
+    }
+    <button type="submit" class="btn-secondary btn-sm"><i class="ri-search-line"></i> Search</button>
+    @if (!string.IsNullOrWhiteSpace(Model.Query) || Model.HasActiveFilters)
+    {
+        <a asp-action="Index" class="btn-outline btn-sm">Reset</a>
+    }
+    @if (Model.TotalCount is int total)
+    {
+        <span class="ml-auto text-sm text-muted-foreground self-center">
+            @total @(Model.Noun)@(total == 1 ? "" : "s")
+        </span>
+    }
+</form>

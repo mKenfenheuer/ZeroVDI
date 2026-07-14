@@ -26,9 +26,18 @@ public class ProxmoxBackendsController : Controller
 
     // GET: /admin/backends
     [HttpGet("")]
-    public async Task<IActionResult> Index()
+    public async Task<IActionResult> Index(string? q)
     {
-        return View(await _context.ProxmoxBackends.ToListAsync());
+        var query = _context.ProxmoxBackends.AsQueryable();
+        if (!string.IsNullOrWhiteSpace(q))
+        {
+            var term = q.Trim();
+            query = query.Where(b =>
+                EF.Functions.Like(b.Name, $"%{term}%")
+                || (b.Host != null && EF.Functions.Like(b.Host, $"%{term}%")));
+        }
+        ViewData["Query"] = q;
+        return View(await query.OrderBy(b => b.Name).ToListAsync());
     }
 
     private async Task PopulateConnectorsAsync()

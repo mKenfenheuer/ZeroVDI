@@ -444,6 +444,7 @@
             }
             else
             {
+                <div class="table-scroll">
                 <table class="table-surface">
                     <thead>
                         <tr><th>Started (UTC)</th><th>User</th><th>Duration</th><th>Status</th></tr>
@@ -460,6 +461,7 @@
                     }
                     </tbody>
                 </table>
+                </div>
             }
         </div>
     </section>
@@ -467,7 +469,6 @@
 
 @section Scripts {
     <partial name="_ValidationScripts" />
-    <partial name="_ConfirmModal" />
     <script src="~/js/access-picker.js" asp-append-version="true"></script>
     <script>
         (function () {

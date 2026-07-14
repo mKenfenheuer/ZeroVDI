@@ -197,6 +197,92 @@ public class VdiProvisioningService
         return new ProvisionResult(resource.Id, null);
     }
 
+    /// <summary>The outcome of a guarded VM destroy.</summary>
+    public enum DestroyOutcome
+    {
+        /// <summary>The VM was verified as this instance's clone and destroyed.</summary>
+        Destroyed,
+        /// <summary>No VM with this instance's binding id was found (already gone) — nothing to do.</summary>
+        NotFound,
+        /// <summary>A VM exists at the recorded VMID but its notes bind it to a different (or no)
+        /// resource — it is NOT our clone (VMID recycled/reassigned). Deliberately left untouched.</summary>
+        IdentityMismatch,
+        /// <summary>The backend was unreachable or the check/destroy failed; state is unknown.</summary>
+        Error,
+    }
+
+    /// <summary>
+    /// Destroys the Proxmox VM backing <paramref name="instance"/> — but ONLY after verifying the VM is
+    /// really this clone. VMIDs are recycled after deletion and the recorded node can be stale after a
+    /// migration, so destroying purely by (node, VMID) can obliterate an unrelated VM. We therefore read
+    /// the candidate VM's notes and require its <c>ksol-rdpgw-id</c> to equal this instance's
+    /// <see cref="VdiInstance.RDPResourceId"/>. Any mismatch, or no matching VM anywhere in the cluster,
+    /// results in <see cref="DestroyOutcome.IdentityMismatch"/>/<see cref="DestroyOutcome.NotFound"/> and
+    /// <b>no destroy</b>.
+    /// </summary>
+    public async Task<DestroyOutcome> SafeDestroyInstanceVmAsync(
+        ProxmoxBackend backend, VdiInstance instance, CancellationToken ct = default)
+    {
+        // No binding id means we can't prove which VM is ours — never destroy blindly.
+        if (string.IsNullOrWhiteSpace(instance.RDPResourceId))
+        {
+            _logger.LogWarning("VDI: instance {Instance} (vmid {VmId}) has no RDPResourceId; refusing to destroy any VM.",
+                instance.Id, instance.ProxmoxVmId);
+            return DestroyOutcome.IdentityMismatch;
+        }
+        var expectedId = instance.RDPResourceId;
+
+        try
+        {
+            // Prefer the recorded node, but confirm the VM actually there is ours before touching it.
+            if (!string.IsNullOrWhiteSpace(instance.ProxmoxNode))
+            {
+                var notes = await _proxmox.GetNotesAsync(backend, instance.ProxmoxNode!, instance.ProxmoxVmId, ct);
+                var boundId = ProxmoxNotes.ReadId(notes);
+                if (boundId == expectedId)
+                {
+                    await _proxmox.DestroyVmAsync(backend, instance.ProxmoxNode!, instance.ProxmoxVmId, ct);
+                    _logger.LogInformation("VDI: destroyed verified clone vmid {VmId} on {Node} (resource {Res}).",
+                        instance.ProxmoxVmId, instance.ProxmoxNode, expectedId);
+                    return DestroyOutcome.Destroyed;
+                }
+                if (boundId != null || notes != null)
+                {
+                    // A VM exists at this VMID/node but is bound to something else (or nothing) — not ours.
+                    _logger.LogWarning("VDI: vmid {VmId} on {Node} is bound to '{Bound}', not '{Expected}'. " +
+                        "VMID was likely recycled; NOT destroying.",
+                        instance.ProxmoxVmId, instance.ProxmoxNode, boundId ?? "(none)", expectedId);
+                    // Fall through to a cluster-wide search in case our VM migrated and this VMID got reused.
+                }
+            }
+
+            // The VM wasn't confirmed on its recorded node (deleted, migrated, or VMID reused). Search the
+            // whole cluster for the VM whose notes carry our binding id, and destroy that one if found.
+            var vms = await _proxmox.ListVmsAsync(backend, ct);
+            foreach (var vm in vms)
+            {
+                var notes = await _proxmox.GetNotesAsync(backend, vm.Node, vm.VmId, ct);
+                if (ProxmoxNotes.ReadId(notes) == expectedId)
+                {
+                    await _proxmox.DestroyVmAsync(backend, vm.Node, vm.VmId, ct);
+                    _logger.LogInformation("VDI: destroyed verified clone vmid {VmId} located on {Node} after node/VMID drift (resource {Res}).",
+                        vm.VmId, vm.Node, expectedId);
+                    return DestroyOutcome.Destroyed;
+                }
+            }
+
+            _logger.LogInformation("VDI: no VM bound to resource {Res} found (recorded vmid {VmId}); nothing to destroy.",
+                expectedId, instance.ProxmoxVmId);
+            return DestroyOutcome.NotFound;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "VDI: error while safely destroying VM for instance {Instance} (vmid {VmId}); left untouched.",
+                instance.Id, instance.ProxmoxVmId);
+            return DestroyOutcome.Error;
+        }
+    }
+
     /// <summary>
     /// Applies the pool's per-clone identity customization. A no-op for <see cref="VdiIdentityMode.None"/>.
     /// Best-effort: logged, never fatal to provisioning.

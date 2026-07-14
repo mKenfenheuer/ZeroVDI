@@ -141,6 +141,12 @@
     .form-error { @apply text-xs text-destructive mt-1 block; }
     .form-hint { @apply text-xs text-muted-foreground mt-1; }
 
+    /* Horizontal-scroll wrapper for wide tables on small screens.
+       Wrap any .table-surface in <div class="table-scroll"> so multi-column
+       tables scroll inside their own box instead of overflowing the page body. */
+    .table-scroll { @apply w-full overflow-x-auto rounded-2xl; }
+    .table-scroll > .table-surface { @apply rounded-none border-0 shadow-none min-w-[640px]; }
+
     /* Tables — plain CSS descendant rules referencing tokens */
     .table-surface { @apply w-full text-sm bg-card text-card-foreground border border-border rounded-2xl shadow-sm overflow-hidden border-separate border-spacing-0; }
     .table-surface thead tr { background-color: color-mix(in oklab, var(--muted) 50%, transparent); }
