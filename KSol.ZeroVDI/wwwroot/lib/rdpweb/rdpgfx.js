@@ -1399,9 +1399,18 @@ RdpGfx.prototype._onSurfaceToCache = function (r) {
     if (this._diag()) {
         slot.snapBlack = this._scanBlack(surf, { left: left, top: top, right: right, bottom: bottom }).black;
         if (slot.snapBlack) {
+            // Distinguish an ORDERING bug from a MISSING-content bug: report whether an async decode was
+            // still in flight at snapshot time (decodeSeq > settledSeq) or any op is queued behind the
+            // barrier. If in-flight/queued, the barrier failed to hold this SURFACE_TO_CACHE and we cached
+            // black too early (ordering). If NOT (fully settled, empty queue), the host cached a region
+            // whose content we never painted at all (missing/dropped content upstream).
+            const inflight = this._decodeSeq - this._decodeSettledSeq;
             this._log("rdpgfx: [DIAG] SURFACE_TO_CACHE slot=" + cacheSlot + " snapshotted BLACK from surface=" +
-                surfaceId + " rect=[" + left + "," + top + "," + right + "," + bottom + "] — content for this " +
-                "region never reached the surface before it was cached; CACHE_TO_SURFACE will replay black");
+                surfaceId + " rect=[" + left + "," + top + "," + right + "," + bottom + "]" +
+                " inflightDecodes=" + inflight + " queuedOps=" + this._orderedQueue.length +
+                (inflight > 0 || this._orderedQueue.length
+                    ? " — ORDERING: barrier let SURFACE_TO_CACHE snapshot before content painted"
+                    : " — MISSING: no decode pending, host cached a region we never painted (dropped content)"));
         }
     }
 };
@@ -1441,7 +1450,15 @@ RdpGfx.prototype._onCacheToSurface = function (r) {
     // line naming the slot, its snapshot origin, and — critically — whether the slot was black AT SNAPSHOT
     // TIME (slot.snapBlack, set in _onSurfaceToCache). snapBlack=true ⇒ upstream never painted the content;
     // snapBlack=false but replayed black ⇒ look at the blit. Level 2 still logs per-rect for fine tracing.
-    if (this._diag()) {
+    // Benign base-layer tiling: the host fills the whole desktop with a black background by snapshotting a
+    // black corner tile (slot from [0,0]/[…,0]/…) and CACHE_TO_SURFACE-ing it across the screen (many dest
+    // points). That's CORRECT — real content paints OVER it later. Logging it floods/truncates the console
+    // and hides the actual bug (content regions that stay black). So skip the black report for a large,
+    // many-dest tiling from a screen-corner source; keep reporting every other black replay (e.g. a taskbar
+    // icon region that should have content but replays black — the real desync).
+    const isBaseLayerTiling = updated.length >= 4 &&
+        (slot.srcLeft | 0) <= 0 && ((slot.srcTop | 0) <= 0 || slot.srcTop + slot.h >= (this.outputHeight || 1e9));
+    if (this._diag() && !isBaseLayerTiling) {
         let blackCount = 0;
         const blackDests = [];
         for (const rc of updated) {
