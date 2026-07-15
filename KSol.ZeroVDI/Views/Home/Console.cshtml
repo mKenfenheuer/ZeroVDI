@@ -193,6 +193,23 @@
             background: rgba(0,0,0,.85);
         }
         #reconnect-overlay.show { display: flex; }
+
+        /* Reconnecting banner: shown on a NETWORK/PROTOCOL drop (WebSocket died, ungraceful close) — as
+           opposed to the graceful reconnect-overlay above. Deliberately a small, non-opaque centered card
+           so the last rendered desktop frame stays visible behind it while we count down + auto-retry. */
+        #reconnecting-overlay {
+            position: fixed; inset: 0; z-index: 33; display: none;
+            align-items: center; justify-content: center;
+            background: rgba(0,0,0,.35); pointer-events: none;
+        }
+        #reconnecting-overlay.show { display: flex; }
+        #reconnecting-card { pointer-events: auto; }
+        #reconnecting-spinner {
+            width: 2.5rem; height: 2.5rem; border-radius: 50%;
+            border: 3px solid rgba(255,255,255,.18); border-top-color: var(--primary, #3b82f6);
+            animation: reconnect-spin .9s linear infinite;
+        }
+        @@keyframes reconnect-spin { to { transform: rotate(360deg); } }
         .btn-session-control {
             appearance: none;
             background: transparent;
@@ -364,6 +381,22 @@
         </div>
     </div>
 
+    @* Reconnecting banner — shown on a network/protocol drop (not a graceful host disconnect). The last
+       desktop frame stays visible behind this card. A countdown runs to a "connection is dead" deadline;
+       we auto-retry every 15s until then. The user can force a retry now or give up. *@
+    <div id="reconnecting-overlay">
+        <div id="reconnecting-card" class="card-surface p-6 w-80 max-w-[90vw] text-center">
+            <div id="reconnecting-spinner" class="mx-auto mb-3"></div>
+            <h5 class="text-base font-semibold mb-1">Trying to reconnect…</h5>
+            <div class="text-sm text-muted-foreground min-h-[1.2em] mb-1">Connection lost. Attempting to restore your session.</div>
+            <div id="reconnecting-countdown" class="text-sm text-muted-foreground mb-4">Giving up in <span id="reconnecting-secs">--</span>s</div>
+            <div class="flex gap-2">
+                <button class="btn-primary flex-1 justify-center" type="button" id="btn-retry-now"><i class="ri-refresh-line"></i> Retry now</button>
+                <button class="btn-secondary flex-1 justify-center" type="button" id="btn-give-up"><i class="ri-close-line"></i> Cancel</button>
+            </div>
+        </div>
+    </div>
+
     @* Hidden on load: the preflight overlay runs first and reveals this (manual sessions) or triggers
        auto-connect (SSO) once the resource is ready. *@
     <div id="login-overlay" class="hidden">
@@ -477,6 +510,10 @@
             var reconnectOverlay = document.getElementById("reconnect-overlay");
             var reconnectMsg = document.getElementById("reconnect-msg");
             var btnReconnect = document.getElementById("btn-reconnect");
+            var reconnectingOverlay = document.getElementById("reconnecting-overlay");
+            var reconnectingSecs = document.getElementById("reconnecting-secs");
+            var btnRetryNow = document.getElementById("btn-retry-now");
+            var btnGiveUp = document.getElementById("btn-give-up");
             var btnConnect = document.getElementById("btn-connect");
             var btnDisconnect = document.getElementById("btn-disconnect");
             var btnFullscreen = document.getElementById("btn-fullscreen");
@@ -528,6 +565,7 @@
             // reconnect. For an SSO/auto-connect session the login form stays hidden — we show the small
             // centered Reconnect popup instead. For a manual session we re-show the login form.
             function resetConsole(message) {
+                stopReconnecting(); // clear any active reconnect loop before returning to the reset UI
                 var ctx = canvas.getContext("2d");
                 if (ctx) { ctx.fillStyle = "#000"; ctx.fillRect(0, 0, canvas.width, canvas.height); }
                 btnDisconnect.disabled = true;
@@ -546,6 +584,90 @@
                     loginOverlay.style.display = "flex";
                 }
             }
+
+            // ---- auto-reconnect on network/protocol drop ----------------------------------------------
+            // A drop (WebSocket died, ungraceful close) surfaces as the client's "reconnecting" status —
+            // distinct from a graceful host disconnect ("closed"). We keep the last desktop frame on the
+            // canvas, show a countdown to a hard deadline, and re-attempt connect() every RETRY_EVERY ms
+            // until either the session comes back ("ready" cancels us) or the deadline passes (declare the
+            // connection dead → fall back to the normal reset/login flow).
+            var RECONNECT_DEADLINE_MS = 120000; // give up after 2 min of no successful reconnect
+            var RETRY_EVERY_MS = 15000;
+            var lastCreds = null;               // creds from the most recent connect(), replayed on retry
+            var reconnectDeadline = 0;          // performance.now() timestamp when we declare it dead
+            var reconnectTickTimer = null;      // 1s countdown UI tick
+            var reconnectRetryTimer = null;     // 15s interval firing each connect() retry attempt
+            var reconnectActive = false;
+
+            function clearReconnectTimers() {
+                if (reconnectTickTimer) { clearInterval(reconnectTickTimer); reconnectTickTimer = null; }
+                if (reconnectRetryTimer) { clearInterval(reconnectRetryTimer); reconnectRetryTimer = null; }
+            }
+
+            // Fully exit the reconnect state (session restored, gave up, or user cancelled).
+            function stopReconnecting() {
+                reconnectActive = false;
+                clearReconnectTimers();
+                reconnectingOverlay.classList.remove("show");
+            }
+
+            // Fire one reconnect attempt: re-size the canvas to the current viewport (it may have changed)
+            // and re-drive connect() with the same credentials. A failed attempt re-enters "reconnecting"
+            // (client emits it again on the socket close), which is harmless — the loop keeps its deadline.
+            function attemptReconnect() {
+                if (!reconnectActive || !lastCreds) return;
+                // Re-size ONLY when the viewport actually changed. Assigning canvas.width/height (which
+                // applyDesktopSize does unconditionally) resets the canvas bitmap to blank — that would
+                // wipe the last frame we're deliberately keeping on screen during the reconnect. So we
+                // compare first and leave the canvas (and its preserved frame) untouched when unchanged.
+                try {
+                    var hidpiCb = document.getElementById("opt-hidpi");
+                    var hiDpi = !!(hidpiCb && hidpiCb.checked);
+                    var size = client.chooseDesktopSize(screenWrap, hiDpi);
+                    if (size && (size.width !== canvas.width || size.height !== canvas.height)) {
+                        client.applyDesktopSize(screenWrap, size);
+                    }
+                } catch (e) { /* keep the previous size if sizing throws */ }
+                client.connect(lastCreds);
+            }
+
+            function updateReconnectCountdown() {
+                var remaining = Math.max(0, reconnectDeadline - performance.now());
+                reconnectingSecs.textContent = Math.ceil(remaining / 1000);
+                if (remaining <= 0) {
+                    // Deadline reached: the connection is dead for real. Drop out of the reconnect state
+                    // and fall back to the normal disconnected UI (login form or SSO reconnect popup).
+                    stopReconnecting();
+                    resetConsole("Reconnection timed out — the connection was lost.");
+                }
+            }
+
+            // Enter (or refresh) the reconnect state after a drop. Keeps the last frame; starts the
+            // countdown + retry loop the first time; a repeated "reconnecting" (failed attempt) just keeps
+            // the existing loop running without resetting the deadline.
+            function startReconnecting() {
+                if (!lastCreds) { resetConsole("Connection lost."); return; } // nothing to retry with
+                reconnectingOverlay.classList.add("show");
+                if (reconnectActive) return; // already looping — a failed attempt re-fired "reconnecting"
+                reconnectActive = true;
+                reconnectDeadline = performance.now() + RECONNECT_DEADLINE_MS;
+                updateReconnectCountdown();
+                reconnectTickTimer = setInterval(updateReconnectCountdown, 1000);
+                // First retry after RETRY_EVERY_MS (the drop just happened; give the network a moment),
+                // then keep retrying on the same cadence. Each attempt's own failure won't stack timers.
+                reconnectRetryTimer = setInterval(function () {
+                    if (reconnectActive) attemptReconnect();
+                }, RETRY_EVERY_MS);
+            }
+
+            btnRetryNow.addEventListener("click", function () {
+                if (reconnectActive) attemptReconnect(); // immediate attempt; loop + deadline keep running
+            });
+            btnGiveUp.addEventListener("click", function () {
+                stopReconnecting();
+                client.disconnect();
+                resetConsole("Reconnection cancelled.");
+            });
 
             var qualityEl = document.getElementById("floatbar-quality");
             var qualityLabel = document.getElementById("floatbar-quality-label");
@@ -575,12 +697,21 @@
                     case "ready":
                         loginOverlay.style.display = "none";
                         reconnectOverlay.classList.remove("show");
+                        stopReconnecting(); // a reconnect attempt succeeded: leave the countdown state
                         btnDisconnect.disabled = false;
                         showBar();          // reveal the floating bar on connect, then auto-hide
                         scheduleAutoHide();
                         showRecording();    // red frame + recording banner (no-op when not notifying)
                         break;
+                    case "reconnecting":
+                        // Network/protocol drop (not a graceful host disconnect). Keep the last frame on
+                        // the canvas and run the countdown + auto-retry loop until it recovers or times out.
+                        startReconnecting();
+                        break;
                     case "error":
+                        // A hard error (bad creds, host unreachable) — end any reconnect loop and fall
+                        // back to the login/reconnect UI; retrying wouldn't heal this.
+                        stopReconnecting();
                         // For SSO/auto-connect, resetConsole() shows the Reconnect popup (with the error
                         // as its message); for a manual session it re-shows the login form.
                         if (window.RDP_AUTOCONNECT) {
@@ -702,7 +833,11 @@
                 // HiDPI), bake it into the handshake by sizing the canvas before connecting.
                 var size = client.chooseDesktopSize(screenWrap, hiDpi);
                 client.applyDesktopSize(screenWrap, size);
-                client.connect({ user: user, password: pass, domain: domain, performanceFlags: perf });
+                // Remember the creds so a network/protocol drop can silently replay connect() (see the
+                // auto-reconnect controller). For an SSO/auto-connect session these come from the hidden
+                // form pre-filled by the gateway; the gateway holds the real NLA creds either way.
+                lastCreds = { user: user, password: pass, domain: domain, performanceFlags: perf };
+                client.connect(lastCreds);
             });
 
             btnDisconnect.addEventListener("click", function () { client.disconnect(); });

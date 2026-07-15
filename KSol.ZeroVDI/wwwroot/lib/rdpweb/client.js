@@ -64,6 +64,11 @@ function Client(websocketURL, canvasID) {
     this.pointerCache = {};
     this.proto = null;
     this.statusCb = null;       // optional (status, message) => void for the UI
+    // Distinguishes an intentional teardown (user clicked Disconnect, or the host ended the session
+    // gracefully via a logoff/restart PDU) from a network/protocol drop (WebSocket died, or a
+    // non-graceful protocol close). On a drop we emit "reconnecting" instead of "closed" so the UI can
+    // keep the last frame on screen and auto-retry; on an intentional close we emit "closed" as before.
+    this._intentionalClose = false;
 
     // Connection-quality tracking runs entirely in quality-worker.js (own thread + own WebSocket to
     // /ws/rdp-quality/{sessionId}) so a busy main thread can't skew the RTT reading. The gateway's pongs
@@ -369,6 +374,11 @@ Client.prototype._onControlFrame = function (text) {
             break;
         }
         case "error":
+            // The gateway reported a hard failure (auth rejected, host unreachable, relay setup failed).
+            // This is a genuine error, not a mid-session drop — flag intentional so the follow-on socket
+            // close → deinitialize emits "closed" (already handled by the "error" status), not
+            // "reconnecting" (which would start a pointless retry loop against a failure that won't heal).
+            this._intentionalClose = true;
             this._status("error", msg.message || "connection failed");
             try { this.socket.close(); } catch (e) { /* ignore */ }
             break;
@@ -1138,9 +1148,20 @@ Client.prototype.deinitialize = function () {
     // Release the webcam too (stops the camera light/in-use indicator).
     this._stopCameraCapture();
 
-    // Surface why the session ended (host logoff/disconnect reason) if the protocol gave us one; the
-    // UI shows it on the login form. Cleared after so a later manual reconnect/close starts clean.
-    this._status("closed", this._closeReason || null);
+    // Two ways a session ends:
+    //  - Intentional (user Disconnect, or the host ended it gracefully via a logoff/restart/admin PDU):
+    //    the session is truly over → emit "closed" and let the UI reset to the login/reconnect overlay.
+    //  - Network/protocol drop (WebSocket died mid-session, or a non-graceful protocol close): the
+    //    desktop is probably still alive → emit "reconnecting" so the UI keeps the last frame and starts
+    //    its own countdown + auto-retry loop. It re-drives connect() on this same Client to reconnect.
+    if (this._intentionalClose) {
+        // Surface why the session ended (host logoff/disconnect reason) if the protocol gave us one; the
+        // UI shows it on the login form. Cleared after so a later manual reconnect/close starts clean.
+        this._status("closed", this._closeReason || null);
+    } else {
+        this._status("reconnecting", this._closeReason || null);
+    }
+    this._intentionalClose = false;
     this._closeReason = null;
     this._protocolClosed = false;
 };
@@ -1559,6 +1580,10 @@ Client.prototype.handleWheel = function (e) {
 Client.prototype._onProtocolClose = function (graceful, message) {
     if (this._protocolClosed) return; // fire once (multiple disconnect PDUs can arrive)
     this._protocolClosed = true;
+    // A graceful end (host logoff, restart, admin disconnect) means the session is really over — flag it
+    // so deinitialize() emits "closed", not "reconnecting". A non-graceful protocol error is treated as a
+    // drop (leave the flag clear) so the UI keeps the frame and retries.
+    if (graceful) this._intentionalClose = true;
     // Remember why the session ended so deinitialize() can surface it on the "closed" status (the
     // socket close → deinitialize would otherwise reset the console and wipe any message we set here).
     this._closeReason = message || null;
@@ -1569,6 +1594,7 @@ Client.prototype._onProtocolClose = function (graceful, message) {
 
 Client.prototype.disconnect = function () {
     if (!this.socket) return;
+    this._intentionalClose = true; // user-initiated: emit "closed", never "reconnecting"
     this.deinitialize();
     try { this.socket.close(1000); } catch (e) { /* ignore */ }
 };

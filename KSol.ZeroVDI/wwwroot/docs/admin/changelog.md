@@ -7,6 +7,55 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.24] — 2026-07-15 — Console auto-reconnect on network/protocol drops (keeps the last frame)
+
+When a live console session **dropped because of a network or protocol failure** — the WebSocket died, or the
+connection tore down without the RDP host actually ending the session (no logoff / restart / admin disconnect) —
+the console immediately blanked the screen and dumped the user back to the login / reconnect overlay. A brief
+Wi-Fi blip or gateway restart cost the whole session.
+
+The console now distinguishes a **graceful host disconnect** (session really over) from a **drop** (the desktop is
+still there) and, on a drop, tries to reconnect automatically instead of tearing down.
+
+### Added
+- **"Trying to reconnect…" state** on network/protocol drops. The last rendered desktop frame **stays on the
+  canvas** (no more instant black screen) behind a small centered card.
+- **Countdown to a hard deadline (2 min).** The card shows the seconds remaining until the connection is
+  considered dead for real; when it hits zero the console falls back to the normal disconnected UI.
+- **Automatic retry every 15 s** for the duration of the countdown, replaying the session's credentials/options
+  and re-sizing to the current viewport. A **Retry now** button forces an immediate attempt; **Cancel** gives up.
+- A successful reconnect (session goes active again) silently clears the state and restores the session.
+
+### Changed
+- The web client now emits a distinct **`reconnecting`** status for ungraceful drops, reserving `closed` for a
+  genuine end of session (user Disconnect, or a host logoff / restart / admin disconnect PDU). Hard gateway
+  errors (bad credentials, host unreachable) still surface as `error` and do **not** trigger the retry loop.
+
+---
+
+## [0.6.23] — 2026-07-15 — Ubuntu/xrdp connect: cancellation no longer masquerades as "cannot reach host"
+
+Connecting to an Ubuntu (xrdp) VM could fail with a misleading **"cannot reach 10.x.x.x:3389"** even though the
+host was reachable. The real trigger was a **caller cancellation** (browser closed the WebSocket, or the connect
+outran the client's patience) landing mid-handshake — but the host-connect helper laundered every
+`OperationCanceledException` into a generic `ConnectException`. That misclassified the cancel as an NLA rejection,
+fired a pointless TLS-only retry (whose bare TCP connect then also cancelled), and surfaced "cannot reach host"
+for a live VM.
+
+### Fixed
+- **Caller cancellation now propagates as cancellation** at every host-connect stage (TCP connect, X.224
+  negotiation, TLS handshake). It no longer becomes a `ConnectException`, so the HYBRID→SSL fallback does not
+  fire on a torn-down request and the log stops reporting an unreachable host for a reachable one.
+- **The NLA→TLS-only retry is guarded** against a cancelled token, so a request that was cancelled during the
+  HYBRID attempt never triggers a second doomed attempt.
+
+### Added
+- **Per-attempt connect/negotiation timeout (10s).** An xrdp host that stalls the socket on an NLA request
+  (instead of promptly RSTing) can no longer consume the whole client-patience budget on attempt #1 — the
+  HYBRID attempt now times out and falls through to the TLS-only retry that xrdp actually accepts.
+
+---
+
 ## [0.6.22] — 2026-07-15 — GFX black content areas fixed (ClearCodec state desync) + diagnostics
 
 Large areas of the desktop rendered permanently black over GFX (ClearCodec / RemoteFX Progressive), while

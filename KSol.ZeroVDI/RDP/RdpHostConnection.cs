@@ -91,6 +91,13 @@ public sealed class RdpHostConnection
         {
             netStream = await _transport.ConnectAsync(_host, _port, ct);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // The caller (browser closed the WebSocket / admin force-disconnect) canceled us — this is not
+            // a host-reachability failure. Propagate as cancellation so the resolver doesn't misread it as
+            // an NLA rejection and retry, and so the log doesn't claim "cannot reach host" for a live host.
+            throw;
+        }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "RDP host: connect to {Host}:{Port} failed", _host, _port);
@@ -101,6 +108,11 @@ public sealed class RdpHostConnection
         try
         {
             selected = await NegotiateX224Async(netStream, requestedProtocols, routingToken, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            netStream.Dispose();
+            throw; // caller canceled — not a negotiation failure; don't trigger the TLS-only retry.
         }
         catch (Exception ex)
         {
@@ -126,6 +138,11 @@ public sealed class RdpHostConnection
                 EnabledSslProtocols = System.Security.Authentication.SslProtocols.Tls12
                     | System.Security.Authentication.SslProtocols.Tls13,
             }, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            netStream.Dispose();
+            throw; // caller canceled mid-handshake — not a TLS failure.
         }
         catch (Exception ex)
         {
