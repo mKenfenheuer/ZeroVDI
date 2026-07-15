@@ -620,14 +620,20 @@
                 // applyDesktopSize does unconditionally) resets the canvas bitmap to blank — that would
                 // wipe the last frame we're deliberately keeping on screen during the reconnect. So we
                 // compare first and leave the canvas (and its preserved frame) untouched when unchanged.
+                // Preserve the established scale/resolution UNLESS the viewport actually changed. Resizing
+                // re-derives a fresh scale (fine); keeping the frame means the framebuffer is already
+                // scaled, so the client must NOT re-apply the scale on top of it (that doubled the UI).
+                var resized = false;
                 try {
                     var hidpiCb = document.getElementById("opt-hidpi");
                     var hiDpi = !!(hidpiCb && hidpiCb.checked);
                     var size = client.chooseDesktopSize(screenWrap, hiDpi);
                     if (size && (size.width !== canvas.width || size.height !== canvas.height)) {
                         client.applyDesktopSize(screenWrap, size);
+                        resized = true;
                     }
                 } catch (e) { /* keep the previous size if sizing throws */ }
+                client.setPreserveScaleOnReconnect(!resized);
                 client.connect(lastCreds);
             }
 

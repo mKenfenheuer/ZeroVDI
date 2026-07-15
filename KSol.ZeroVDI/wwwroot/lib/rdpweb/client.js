@@ -69,6 +69,11 @@ function Client(websocketURL, canvasID) {
     // non-graceful protocol close). On a drop we emit "reconnecting" instead of "closed" so the UI can
     // keep the last frame on screen and auto-retry; on an intentional close we emit "closed" as before.
     this._intentionalClose = false;
+    // Set for a frame-preserving auto-reconnect (network/protocol drop): tells deinitialize() to KEEP the
+    // established DPI scale + framebuffer resolution instead of resetting them, so the post-active
+    // initial-scale sequence doesn't re-apply the scale on top of the already-scaled framebuffer (which
+    // rendered the reconnected desktop at double size). Cleared once the session goes active again.
+    this._preserveScaleOnReconnect = false;
 
     // Connection-quality tracking runs entirely in quality-worker.js (own thread + own WebSocket to
     // /ws/rdp-quality/{sessionId}) so a busy main thread can't skew the RTT reading. The gateway's pongs
@@ -96,6 +101,9 @@ function Client(websocketURL, canvasID) {
 }
 
 Client.prototype.setStatusCallback = function (cb) { this.statusCb = cb; };
+// Call before a frame-preserving auto-reconnect connect() so the established scale/resolution is kept
+// across the teardown (see _preserveScaleOnReconnect). Ignored for a normal manual reconnect.
+Client.prototype.setPreserveScaleOnReconnect = function (v) { this._preserveScaleOnReconnect = !!v; };
 Client.prototype._status = function (status, message) { if (this.statusCb) this.statusCb(status, message); };
 
 // ---- connection quality (end-to-end RTT + throughput, sampled in quality-worker.js) ----------------
@@ -1095,6 +1103,7 @@ Client.prototype._onActive = function () {
     }
     this.connected = true;
     this._activeSince = performance.now(); // for maybeResize's settle guard
+    this._preserveScaleOnReconnect = false; // reconnect succeeded; a later drop re-arms it via the setter
     FF("session ACTIVE (_onActive)");
     this._status("ready", null);
     this._startQualityProbe();
@@ -1124,13 +1133,22 @@ Client.prototype.deinitialize = function () {
     this.canvas.removeEventListener("contextmenu", this.handleMouseUp);
     this.canvas.removeEventListener("wheel", this.handleWheel);
 
-    // Stop any in-flight initial-scale sequence and reset its state so a reconnect on this same Client
-    // re-applies the DPI scale from scratch (otherwise _initialScaleApplied stays set and the reconnected
-    // session is left at 100%).
+    // Stop any in-flight initial-scale sequence.
     clearTimeout(this._scaleStepTimer);
-    this._initialScaleApplied = false;
     this._scaleStep = undefined;
-    this._sessionScale = 0;
+    if (this._preserveScaleOnReconnect) {
+        // Frame-preserving auto-reconnect (network/protocol drop): the canvas keeps its device-pixel
+        // resolution and the host reconnects to that SAME resolution, so the DPI scale is already in
+        // effect. KEEP _sessionScale and mark the initial-scale sequence done so the post-active step
+        // machine does NOT re-send a monitor layout — re-applying the scale on top of an already-scaled
+        // framebuffer is what made the reconnected UI render at double size.
+        this._initialScaleApplied = true;
+    } else {
+        // Normal reconnect (manual login re-runs applyDesktopSize): reset so the DPI scale is re-derived
+        // and re-applied from scratch (otherwise _initialScaleApplied stays set → session stuck at 100%).
+        this._initialScaleApplied = false;
+        this._sessionScale = 0;
+    }
 
     this.connected = false;
 

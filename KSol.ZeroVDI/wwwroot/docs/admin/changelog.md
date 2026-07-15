@@ -25,6 +25,9 @@ still there) and, on a drop, tries to reconnect automatically instead of tearing
 - **Automatic retry every 15 s** for the duration of the countdown, replaying the session's credentials/options
   and re-sizing to the current viewport. A **Retry now** button forces an immediate attempt; **Cancel** gives up.
 - A successful reconnect (session goes active again) silently clears the state and restores the session.
+- **Reconnect keeps the session's DPI scale** instead of re-applying it. A frame-preserving reconnect leaves
+  the framebuffer at its established device-pixel resolution, so the client no longer re-runs the initial-scale
+  sequence on top of an already-scaled framebuffer — which had rendered the reconnected desktop at double size.
 
 ### Changed
 - The web client now emits a distinct **`reconnecting`** status for ungraceful drops, reserving `closed` for a
