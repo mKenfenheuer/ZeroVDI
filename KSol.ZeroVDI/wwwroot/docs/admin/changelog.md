@@ -34,6 +34,13 @@ still there) and, on a drop, tries to reconnect automatically instead of tearing
   genuine end of session (user Disconnect, or a host logoff / restart / admin disconnect PDU). Hard gateway
   errors (bad credentials, host unreachable) still surface as `error` and do **not** trigger the retry loop.
 
+### Fixed
+- **A user-initiated Disconnect no longer starts a reconnect.** `disconnect()` ran teardown directly and
+  then closed the socket, whose `onclose` handler re-ran teardown a second time — by which point the
+  "intentional close" flag had been consumed, so the second pass emitted `reconnecting` and kicked off the
+  retry loop on a session the user had deliberately ended. Teardown now runs exactly once (the socket
+  handlers are detached before the explicit close).
+
 ---
 
 ## [0.6.23] — 2026-07-15 — Ubuntu/xrdp connect: cancellation no longer masquerades as "cannot reach host"

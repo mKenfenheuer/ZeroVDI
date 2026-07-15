@@ -1613,6 +1613,12 @@ Client.prototype._onProtocolClose = function (graceful, message) {
 Client.prototype.disconnect = function () {
     if (!this.socket) return;
     this._intentionalClose = true; // user-initiated: emit "closed", never "reconnecting"
+    // Detach onclose BEFORE the explicit deinitialize()/close(): deinitialize() consumes _intentionalClose
+    // (resets it to false), so letting the socket's onclose=deinitialize fire a SECOND time would re-run
+    // teardown with the flag clear and wrongly emit "reconnecting" (starting a retry loop on a session the
+    // user deliberately ended). Run teardown exactly once here.
+    var sock = this.socket;
+    sock.onclose = null; sock.onerror = null; sock.onmessage = null; sock.onopen = null;
     this.deinitialize();
-    try { this.socket.close(1000); } catch (e) { /* ignore */ }
+    try { sock.close(1000); } catch (e) { /* ignore */ }
 };
