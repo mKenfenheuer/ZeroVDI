@@ -201,6 +201,7 @@ RdpGfx.prototype._onWorkerMessage = function (msg) {
     // Settle even when the surface was destroyed while the decode was in flight (only the paint is
     // skipped) — every submitted decode must advance the barrier or the ordered queue wedges forever.
     if (surf && msg.cmd === "progressive-result") {
+        if (pending.diagBytes) msg.diagBytes = pending.diagBytes;
         this._finishProgressive(pending.surfaceId, surf, msg);
     }
     // "h264-submitted" only advances the barrier (its frame paints later, off-barrier).
@@ -223,6 +224,113 @@ RdpGfx.prototype._log = function (m) { if (this.cb.onLog) this.cb.onLog(m); };
 // of the always-on error logging those decoders already do. Read live (not cached) so toggling
 // window.RDP_LOG in devtools takes effect on the next PDU without a reconnect.
 RdpGfx.prototype._verbose = function () { return typeof window !== "undefined" && window.RDP_LOG == 2; };
+
+// Black-partial-frame diagnostics. Set window.RDP_GFX_DIAG = 1 in devtools (no reconnect needed) to
+// turn on: after every ClearCodec / Progressive paint the just-written region is scanned, and if it
+// came out fully (or almost fully) black/transparent — the classic "black partial frame" symptom —
+// we log the offending PDU's geometry AND a hex dump of the FULL codec message that produced it, so
+// the exact bytes can be replayed/inspected. Off by default (the scan reads back canvas pixels, which
+// is not free). RDP_GFX_DIAG = 2 dumps EVERY Clear/Progressive message regardless of blackness.
+RdpGfx.prototype._diag = function () {
+    return (typeof window !== "undefined" && window.RDP_GFX_DIAG) ? (window.RDP_GFX_DIAG | 0) : 0;
+};
+
+// Hex-dump up to `max` bytes of a Uint8Array as space-separated pairs, with a trailing "(+N more)"
+// when truncated. Kept compact so a full tile's worth of bytes stays greppable on one logical line.
+RdpGfx.prototype._hexDump = function (bytes, max) {
+    if (!bytes || !bytes.length) return "<empty>";
+    max = max || 512;
+    const n = Math.min(bytes.length, max);
+    let s = "";
+    for (let i = 0; i < n; i++) {
+        const h = bytes[i].toString(16);
+        s += (h.length < 2 ? "0" + h : h) + (i + 1 < n ? " " : "");
+    }
+    if (bytes.length > n) s += " …(+" + (bytes.length - n) + " more, " + bytes.length + " total)";
+    return s;
+};
+
+// Scan a painted surface region for content. Returns { total, nonBlack, opaque, black:bool } where
+// `black` is true when essentially every sampled pixel is black-or-transparent — i.e. the region
+// decoded to a black partial frame. Samples on a stride grid so a large region stays cheap. Any
+// getImageData failure (tainted/oversized canvas) is swallowed and reported as non-black so diagnostics
+// never break rendering.
+RdpGfx.prototype._scanBlack = function (surf, rect) {
+    try {
+        const x = Math.max(0, rect.left | 0), y = Math.max(0, rect.top | 0);
+        const w = Math.min(surf.width, rect.right | 0) - x;
+        const h = Math.min(surf.height, rect.bottom | 0) - y;
+        if (w <= 0 || h <= 0) return { total: 0, nonBlack: 0, opaque: 0, black: false };
+        const img = surf.ctx.getImageData(x, y, w, h).data;
+        // Cap total samples so a full-desktop progressive frame doesn't stall on a huge readback loop.
+        const px = w * h;
+        const step = px > 65536 ? Math.ceil(px / 65536) : 1;
+        let nonBlack = 0, opaque = 0, total = 0;
+        for (let i = 0; i < px; i += step) {
+            const s = i * 4;
+            total++;
+            if (img[s + 3] !== 0) opaque++;
+            if (img[s] !== 0 || img[s + 1] !== 0 || img[s + 2] !== 0) nonBlack++;
+        }
+        // "black" = <0.2% of sampled pixels have any non-zero color channel.
+        return { total, nonBlack, opaque, black: total > 0 && nonBlack * 500 < total };
+    } catch (e) {
+        return { total: 0, nonBlack: 1, opaque: 1, black: false };
+    }
+};
+
+// On-demand snapshot: scan EVERY surface for black regions right now and log the result. Callable from
+// devtools regardless of the RDP_GFX_DIAG flag (the client exposes it as window.rdpDiagScan()), so a
+// black area that turned black BEFORE diagnostics were switched on can still be pinned to a surface and
+// its mapped output origin. Reports the whole surface plus a coarse 8x8 grid of which cells are black.
+RdpGfx.prototype.diagScanAll = function () {
+    const out = [];
+    for (const id in this.surfaces) {
+        const surf = this.surfaces[id];
+        const full = this._scanBlack(surf, { left: 0, top: 0, right: surf.width, bottom: surf.height });
+        const map = this.outputMap[id];
+        const grid = [];
+        const gx = 8, gy = 8;
+        for (let cy = 0; cy < gy; cy++) {
+            let row = "";
+            for (let cx = 0; cx < gx; cx++) {
+                const rc = {
+                    left: Math.floor(surf.width * cx / gx), top: Math.floor(surf.height * cy / gy),
+                    right: Math.floor(surf.width * (cx + 1) / gx), bottom: Math.floor(surf.height * (cy + 1) / gy),
+                };
+                row += this._scanBlack(surf, rc).black ? "#" : ".";
+            }
+            grid.push(row);
+        }
+        const line = "rdpgfx: [DIAG] surface " + id + " " + surf.width + "x" + surf.height +
+            " touched=" + surf.touched + " mapped=" + (map ? ("@" + map.originX + "," + map.originY) : "no") +
+            " black=" + full.black + " (nonBlack " + full.nonBlack + "/" + full.total + " sampled)\n" + grid.join("\n");
+        this._log(line);
+        out.push({ surfaceId: id | 0, width: surf.width, height: surf.height, black: full.black, grid });
+    }
+    if (!out.length) this._log("rdpgfx: [DIAG] no surfaces");
+    return out;
+};
+
+// Common diagnostic report for a codec paint. `codec` is "ClearCodec"/"Progressive", `rect` the region
+// just written, `msgBytes` the FULL raw codec message (Uint8Array) that produced it. Logs a hex dump
+// when the region is black (RDP_GFX_DIAG>=1) or unconditionally (RDP_GFX_DIAG>=2).
+RdpGfx.prototype._diagPaint = function (codec, surfaceId, surf, rect, msgBytes) {
+    const level = this._diag();
+    if (!level) return;
+    const scan = this._scanBlack(surf, rect);
+    const geo = "surface=" + surfaceId + " rect=[" + rect.left + "," + rect.top + "," +
+        rect.right + "," + rect.bottom + "] (" + (rect.right - rect.left) + "x" + (rect.bottom - rect.top) + ")";
+    if (scan.black) {
+        this._log("rdpgfx: [DIAG] BLACK " + codec + " frame — " + geo +
+            " sampled=" + scan.total + " nonBlack=" + scan.nonBlack + " opaque=" + scan.opaque +
+            " msgLen=" + (msgBytes ? msgBytes.length : 0) + "B bytes=[" + this._hexDump(msgBytes, 1024) + "]");
+    } else if (level >= 2) {
+        this._log("rdpgfx: [DIAG] " + codec + " frame — " + geo +
+            " sampled=" + scan.total + " nonBlack=" + scan.nonBlack + " opaque=" + scan.opaque +
+            " msgLen=" + (msgBytes ? msgBytes.length : 0) + "B bytes=[" + this._hexDump(msgBytes, 256) + "]");
+    }
+};
 
 // Reset session state (reconnect). Keep no surfaces/decoders across sessions.
 RdpGfx.prototype.reset = function () {
@@ -344,8 +452,27 @@ RdpGfx.prototype.onChannelData = function (data) {
         }
         // The PDU body is everything after the 8-byte header, up to pduLength.
         const body = inflated.subarray(off + RDPGFX_HEADER_SIZE, off + pduLength);
+        // PDU-type census (RDP_GFX_DIAG): tally every cmdId we receive and, for WIRE_TO_SURFACE_1/2, the
+        // codecId. This answers "does the host actually send content PDUs (Progressive / large ClearCodec),
+        // or only cache ops?" — the whole question behind the persistent black. Summarised every 200 PDUs.
+        if (this._diag()) this._censusPdu(cmdId, body);
         this._dispatch(cmdId, body);
         off += pduLength;
+    }
+};
+
+// Tally received PDU types (and wire codecIds) and periodically log the histogram. Diagnostics only.
+RdpGfx.prototype._censusPdu = function (cmdId, body) {
+    if (!this._census) { this._census = {}; this._censusN = 0; }
+    let key = "cmd0x" + cmdId.toString(16);
+    if ((cmdId === RDPGFX_CMDID_WIRETOSURFACE_1 || cmdId === RDPGFX_CMDID_WIRETOSURFACE_2) && body.length >= 4) {
+        const codecId = body[2] | (body[3] << 8);
+        key += ":codec0x" + codecId.toString(16);
+    }
+    this._census[key] = (this._census[key] || 0) + 1;
+    if (++this._censusN % 200 === 0) {
+        const parts = Object.keys(this._census).sort().map((k) => k + "=" + this._census[k]);
+        this._log("rdpgfx: [DIAG] PDU census (" + this._censusN + " total): " + parts.join("  "));
     }
 };
 
@@ -434,28 +561,65 @@ RdpGfx.prototype._onResetGraphics = function (r) {
     if (this.cb.onReset) this.cb.onReset(width, height);
 };
 
+// Build a surface record with a fresh alpha:false canvas of the given size. Shared by CREATE_SURFACE and
+// the orphan path so both produce identical, opaque-backed surfaces.
+//   alpha:false — a GFX surface is opaque desktop content ([MS-RDPEGFX] 3.3.8.x: when mapped to output the
+// alpha channel MUST be ignored). An opaque-backed canvas initializes to opaque black, so regions no codec
+// has written yet don't blend the previous output frame through when drawImage'd to the visible canvas
+// (the "ghost of the last frame" artifact). Our decoders write A=0xff, so real content is unaffected.
+RdpGfx.prototype._makeSurfaceRecord = function (width, height, pixelFormat) {
+    const canvas = (typeof OffscreenCanvas !== "undefined")
+        ? new OffscreenCanvas(width, height)
+        : Object.assign(document.createElement("canvas"), { width: width, height: height });
+    const ctx = canvas.getContext("2d", { alpha: false });
+    return { width, height, canvas, ctx, pixelFormat, touched: false };
+};
+
+// Lazily materialise a surface for an id the host is drawing into before (or between) CREATE_SURFACE. It
+// is a REAL surface (so ClearCodec paints AND caches its glyph from a correct destination, keeping codec
+// state in sync), just flagged `orphan` so the next CREATE_SURFACE for this id ADOPTS its canvas instead
+// of wiping to black. Sized to at least the dest rect seen so far; CREATE_SURFACE resizes to the true size.
+RdpGfx.prototype._ensureOrphanSurface = function (surfaceId, minW, minH, pixelFormat) {
+    let surf = this.surfaces[surfaceId];
+    if (surf) return surf;
+    // Size to the full known output (from RESET_GRAPHICS) so later, larger dest rects don't clip against a
+    // too-small orphan; fall back to the caller's minimum bound before RESET is known. CREATE_SURFACE
+    // resizes to the true dimensions on adopt regardless.
+    const w = Math.max(this.outputWidth || 0, minW | 0, 1);
+    const h = Math.max(this.outputHeight || 0, minH | 0, 1);
+    surf = this._makeSurfaceRecord(w, h, pixelFormat);
+    surf.orphan = true;
+    this.surfaces[surfaceId] = surf;
+    return surf;
+};
+
 RdpGfx.prototype._onCreateSurface = function (r) {
     const surfaceId = r.u16le();
     const width = r.u16le();
     const height = r.u16le();
     const pixelFormat = r.u8();
+    const orphan = this.surfaces[surfaceId];
+    if (orphan && orphan.orphan) {
+        // Adopt the orphan: the host already streamed content into this id before its CREATE_SURFACE (or
+        // across a DELETE→CREATE reuse). Keep those pixels — copy the orphan canvas into a correctly-sized
+        // surface — instead of allocating a fresh black one and losing everything painted so far. This is
+        // the pixel half of the ClearCodec-state fix in _onWireToSurface1 (the codec caches were already
+        // kept in sync by decoding into the orphan). Preserve `touched` so a real painted orphan blits.
+        const rec = this._makeSurfaceRecord(width, height, pixelFormat);
+        try { rec.ctx.drawImage(orphan.canvas, 0, 0); } catch (e) { /* size mismatch is fine — clipped */ }
+        rec.touched = orphan.touched;
+        this.surfaces[surfaceId] = rec;
+        this._log("rdpgfx: CREATE_SURFACE id=" + surfaceId + " " + width + "x" + height +
+            " fmt=0x" + pixelFormat.toString(16) + " (adopted orphan, content preserved)");
+        return;
+    }
     // Reuse of a surfaceId implies the old one is gone — drop it first (FreeRDP does the same).
     this._destroySurface(surfaceId);
-    const canvas = (typeof OffscreenCanvas !== "undefined")
-        ? new OffscreenCanvas(width, height)
-        : Object.assign(document.createElement("canvas"), { width: width, height: height });
-      // alpha:false — a GFX surface is opaque desktop content ([MS-RDPEGFX] 3.3.8.x: when mapped to output
-    // the alpha channel MUST be ignored). An opaque-backed canvas initializes to opaque black instead of
-    // transparent, so surface regions no codec has written yet don't blend the previous output frame
-    // through when the surface is drawImage'd to the visible canvas — that translucent bleed-through was
-    // the "ghost of the last frame" artifact. Our decoders already write A=0xff, so real content is
-    // unaffected; this only forces the untouched/edge pixels opaque.
-    const ctx = canvas.getContext("2d", { alpha: false });
-    // `touched` flips true on the first content write (_afterSurfaceUpdate). Untouched surfaces are
-    // never blitted to the output (see _paintSurface) — painting a brand-new empty surface would wipe
-    // the last good frame during a host-side reconfigure (GNOME RD deletes+recreates its surface and
-    // re-maps it on every DISPLAYCONTROL_MONITOR_LAYOUT, then streams nothing until damage occurs).
-    this.surfaces[surfaceId] = { width, height, canvas, ctx, pixelFormat, touched: false };
+    // `touched` flips true on the first content write (_afterSurfaceUpdate). Untouched surfaces are never
+    // blitted to the output (see _paintSurface) — painting a brand-new empty surface would wipe the last
+    // good frame during a host-side reconfigure (GNOME RD deletes+recreates its surface and re-maps it on
+    // every DISPLAYCONTROL_MONITOR_LAYOUT, then streams nothing until damage occurs).
+    this.surfaces[surfaceId] = this._makeSurfaceRecord(width, height, pixelFormat);
     this._log("rdpgfx: CREATE_SURFACE id=" + surfaceId + " " + width + "x" + height +
         " fmt=0x" + pixelFormat.toString(16));
 };
@@ -588,13 +752,33 @@ RdpGfx.prototype._onWireToSurface1 = function (r) {
     const destLeft = r.u16le(), destTop = r.u16le(), destRight = r.u16le(), destBottom = r.u16le();
     const bitmapDataLength = r.u32le();
     const bitmapData = r.bytes(bitmapDataLength);
-    const surf = this.surfaces[surfaceId];
-    if (!surf) { this._log("rdpgfx: WIRE_TO_SURFACE_1 for unknown surface " + surfaceId); return; }
+    // The surface may be transiently absent (host DELETE_SURFACE → …WIRE… → RESET → CREATE_SURFACE reuses
+    // the same id) or land before its CREATE on the very first paint. ClearCodec is a STATEFUL stream:
+    // every tile carries a seqNumber and mutates the session-global glyph / VBar caches ([MS-RDPEGFX]
+    // 3.3.8.2.1). Dropping the PDU skips that state — the seqNumber jumps ("seqNumber N != expected") and
+    // the VBar entries this PDU would populate are never stored, so LATER tiles that VBAR_CACHE_HIT those
+    // slots decode BLANK (black). That is the root cause of the persistent black content. So we lazily
+    // materialise an ORPHAN surface for the id and decode+paint into it exactly as normal; when the real
+    // CREATE_SURFACE arrives it ADOPTS the orphan's canvas (see _onCreateSurface), so both the codec state
+    // AND the already-painted pixels survive. The dest rect bounds the size until CREATE gives the real one.
+    let surf = this.surfaces[surfaceId];
+    if (!surf) {
+        surf = this._ensureOrphanSurface(surfaceId, destRight, destBottom, pixelFormat);
+        this._log("rdpgfx: WIRE_TO_SURFACE_1 for absent surface " + surfaceId +
+            " — painting into orphan surface (adopted on CREATE_SURFACE)");
+    }
 
     const rect = { left: destLeft, top: destTop, right: destRight, bottom: destBottom };
     if (this._verbose() && (codecId === RDPGFX_CODECID_CLEARCODEC)) {
         this._log("rdpgfx: WIRE_TO_SURFACE_1 ClearCodec surface=" + surfaceId + " rect=[" +
             destLeft + "," + destTop + "," + destRight + "," + destBottom + "] " + bitmapDataLength + "B");
+    }
+    // RDP_GFX_DIAG>=2: dump the full inbound WIRE_TO_SURFACE_1 message (header fields + codec bitstream)
+    // for ClearCodec, so the exact wire bytes are captured even if the paint later comes out non-black.
+    if (this._diag() >= 2 && codecId === RDPGFX_CODECID_CLEARCODEC) {
+        this._log("rdpgfx: [DIAG] WIRE_TO_SURFACE_1 codecId=0x" + codecId.toString(16) + " fmt=0x" +
+            pixelFormat.toString(16) + " surface=" + surfaceId + " rect=[" + destLeft + "," + destTop + "," +
+            destRight + "," + destBottom + "] len=" + bitmapDataLength + "B bytes=[" + this._hexDump(bitmapData, 1024) + "]");
     }
     if (codecId === RDPGFX_CODECID_AVC420) {
         this._decodeAvc420(surfaceId, surf, rect, bitmapData);
@@ -626,14 +810,27 @@ RdpGfx.prototype._onWireToSurface2 = function (r) {
     // finding a plausible-looking block header a few bytes in, which is why it didn't fail loudly.
     const bitmapDataLength = r.u32le();
     const bitmapData = r.bytes(Math.min(bitmapDataLength, r.remaining()));
-    const surf = this.surfaces[surfaceId];
-    if (!surf) { this._log("rdpgfx: WIRE_TO_SURFACE_2 for unknown surface " + surfaceId); return; }
+    // Same orphan handling as WIRE_TO_SURFACE_1 (see there): Progressive is stateful too (per-tile
+    // coefficient accumulation), so decoding into an orphan keeps that state alive and preserves the
+    // pixels for CREATE_SURFACE to adopt. No dest rect here, so size the orphan to the known output size.
+    let surf = this.surfaces[surfaceId];
+    if (!surf) {
+        surf = this._ensureOrphanSurface(surfaceId, this.outputWidth || 1, this.outputHeight || 1, pixelFormat);
+        this._log("rdpgfx: WIRE_TO_SURFACE_2 for absent surface " + surfaceId +
+            " — painting into orphan surface (adopted on CREATE_SURFACE)");
+    }
 
     if (codecId === RDPGFX_CODECID_CAPROGRESSIVE || codecId === RDPGFX_CODECID_CAPROGRESSIVE_V2) {
         if (!this.progressive) { this._log("rdpgfx: Progressive module not loaded"); return; }
         if (this._verbose()) {
             this._log("rdpgfx: WIRE_TO_SURFACE_2 Progressive surface=" + surfaceId + " ctx=" + codecContextId +
                 " " + bitmapData.length + "B");
+        }
+        // RDP_GFX_DIAG>=2: dump the full inbound Progressive bitstream at receipt time.
+        if (this._diag() >= 2) {
+            this._log("rdpgfx: [DIAG] WIRE_TO_SURFACE_2 Progressive codecId=0x" + codecId.toString(16) +
+                " fmt=0x" + pixelFormat.toString(16) + " surface=" + surfaceId + " ctx=" + codecContextId +
+                " len=" + bitmapData.length + "B bytes=[" + this._hexDump(bitmapData, 1024) + "]");
         }
         this._decodeProgressive(surfaceId, surf, bitmapData, codecContextId);
     } else {
@@ -650,9 +847,16 @@ RdpGfx.prototype._onWireToSurface2 = function (r) {
 // (_decodeProgressiveSync) if the worker isn't available.
 RdpGfx.prototype._decodeProgressive = function (surfaceId, surf, bitmapData, codecContextId) {
     this._decodeSeq++;
-    if (!this._worker) { this._decodeProgressiveSync(surfaceId, surf, bitmapData, codecContextId); return; }
+    if (!this._worker) {
+        const diagBytes = this._diag() ? bitmapData.slice() : null;
+        this._decodeProgressiveSync(surfaceId, surf, bitmapData, codecContextId, diagBytes);
+        return;
+    }
     const reqId = ++this._workerReqId;
-    this._workerPending[reqId] = { surfaceId: surfaceId, kind: "progressive" };
+    // Stash the raw codec bytes for black-frame diagnostics (only when RDP_GFX_DIAG is on — the copy
+    // below is transferred to the worker, so keep an independent slice here for the reply-side dump).
+    this._workerPending[reqId] = { surfaceId: surfaceId, kind: "progressive",
+        diagBytes: this._diag() ? bitmapData.slice() : null };
     // bitmapData is a view into the (about-to-be-reused) ZGFX inflate buffer, so copy it before the
     // transfer — postMessage with a transfer list detaches the buffer, and we don't own the original.
     const copy = bitmapData.slice();
@@ -685,6 +889,12 @@ RdpGfx.prototype._finishProgressive = function (surfaceId, surf, msg) {
             if (this._verbose()) {
                 this._log("rdpgfx: progressive PAINT(sparse) surface=" + surfaceId + " " + msg.tiles.length + " tiles");
             }
+            if (this._diag() && regions.length) {
+                // Diagnose against the bounding box of all painted tiles.
+                let l = Infinity, t = Infinity, rr = -Infinity, bb = -Infinity;
+                for (const rc of regions) { if (rc.left < l) l = rc.left; if (rc.top < t) t = rc.top; if (rc.right > rr) rr = rc.right; if (rc.bottom > bb) bb = rc.bottom; }
+                this._diagPaint("Progressive(sparse)", surfaceId, surf, { left: l, top: t, right: rr, bottom: bb }, msg.diagBytes);
+            }
             this._afterSurfaceUpdate(surfaceId, surf, regions);
             return;
         }
@@ -694,8 +904,9 @@ RdpGfx.prototype._finishProgressive = function (surfaceId, surf, msg) {
             this._log("rdpgfx: progressive PAINT surface=" + surfaceId + " at " + msg.minX + "," + msg.minY +
                 " " + msg.bw + "x" + msg.bh);
         }
-        this._afterSurfaceUpdate(surfaceId, surf,
-            [{ left: msg.minX, top: msg.minY, right: msg.minX + msg.bw, bottom: msg.minY + msg.bh }]);
+        const progRect = { left: msg.minX, top: msg.minY, right: msg.minX + msg.bw, bottom: msg.minY + msg.bh };
+        this._diagPaint("Progressive", surfaceId, surf, progRect, msg.diagBytes);
+        this._afterSurfaceUpdate(surfaceId, surf, [progRect]);
     } catch (e) {
         this._log("rdpgfx: progressive paint exception: " + e);
     }
@@ -703,15 +914,15 @@ RdpGfx.prototype._finishProgressive = function (surfaceId, surf, msg) {
 
 // Main-thread fallback (no Worker support / Worker construction failed): identical decode+composite
 // logic to decode-worker.js's decodeProgressive, just called and painted synchronously in one pass.
-RdpGfx.prototype._decodeProgressiveSync = function (surfaceId, surf, bitmapData, codecContextId) {
+RdpGfx.prototype._decodeProgressiveSync = function (surfaceId, surf, bitmapData, codecContextId, diagBytes) {
     try {
-        this._decodeProgressiveSyncInner(surfaceId, surf, bitmapData, codecContextId);
+        this._decodeProgressiveSyncInner(surfaceId, surf, bitmapData, codecContextId, diagBytes);
     } finally {
         this._decodeSettled(surfaceId);
     }
 };
 
-RdpGfx.prototype._decodeProgressiveSyncInner = function (surfaceId, surf, bitmapData, codecContextId) {
+RdpGfx.prototype._decodeProgressiveSyncInner = function (surfaceId, surf, bitmapData, codecContextId, diagBytes) {
     // Keyed by surfaceId ONLY, matching FreeRDP (progressive_create_surface_context takes just the
     // surfaceId; codecContextId is ignored for tile state). Windows 11 bumps codecContextId on EVERY
     // progressive PDU, yet still sends FIRST tiles with the diff flag — those coefficients are deltas
@@ -782,7 +993,7 @@ RdpGfx.prototype._decodeProgressiveSyncInner = function (surfaceId, surf, bitmap
     }
     if (holes) {
         this._finishProgressive(surfaceId, surf, {
-            ok: true, sparse: true,
+            ok: true, sparse: true, diagBytes: diagBytes,
             tiles: tiles.map(function (t) { return { x: t.x, y: t.y, w: t.w, h: t.h, buffer: t.rgba.buffer }; }),
         });
         return;
@@ -796,7 +1007,7 @@ RdpGfx.prototype._decodeProgressiveSyncInner = function (surfaceId, surf, bitmap
             frame.set(t.rgba.subarray(src, src + t.w * 4), dst);
         }
     }
-    this._finishProgressive(surfaceId, surf, { ok: true, minX: minX, minY: minY, bw: bw, bh: bh, buffer: frame.buffer });
+    this._finishProgressive(surfaceId, surf, { ok: true, minX: minX, minY: minY, bw: bw, bh: bh, buffer: frame.buffer, diagBytes: diagBytes });
 };
 
 // AVC420 bitstream ([MS-RDPEGFX] 2.2.4.4 / 2.2.4.5): an RFX_AVC420_METABLOCK (region rects + quant
@@ -887,7 +1098,10 @@ RdpGfx.prototype._decodeClear = function (surfaceId, surf, rect, data) {
         this._log("rdpgfx: ClearCodec decode failed (" + w + "x" + h + ", " + data.length + " bytes)");
         return;
     }
-    this._finishClear(surfaceId, surf, { ok: true, rect: rect, buffer: res.rgba.buffer, glyphEntry: res.glyphEntry });
+    // Keep the raw codec bytes for black-frame diagnostics (only when RDP_GFX_DIAG is on — copy so the
+    // ZGFX inflate buffer this views into can be reused; a no-op alloc when diagnostics are off).
+    const diagBytes = this._diag() ? data.slice() : null;
+    this._finishClear(surfaceId, surf, { ok: true, rect: rect, buffer: res.rgba.buffer, glyphEntry: res.glyphEntry, diagBytes: diagBytes });
 };
 
 RdpGfx.prototype._finishClear = function (surfaceId, surf, msg) {
@@ -924,6 +1138,7 @@ RdpGfx.prototype._finishClear = function (surfaceId, surf, msg) {
             this._log("rdpgfx: ClearCodec PAINT surface=" + surfaceId + " at " + msg.rect.left + "," + msg.rect.top +
                 " " + w + "x" + h);
         }
+        this._diagPaint("ClearCodec", surfaceId, surf, msg.rect, msg.diagBytes);
         this._afterSurfaceUpdate(surfaceId, surf, [msg.rect]);
     } catch (e) {
         this._log("rdpgfx: ClearCodec paint exception: " + e);
@@ -1094,13 +1309,27 @@ RdpGfx.prototype._onSolidFill = function (r) {
     // XA is only meaningful on ARGB surfaces ([MS-RDPEGFX] 2.2.1.2); on XRGB surfaces Windows sends
     // 0x00 there, and honoring it makes the fill fully transparent — fillRect becomes a no-op and the
     // rect keeps its stale pixels (FreeRDP's gdi_SolidFill hardcodes 0xFF for the same reason).
-    const a = (surf.pixelFormat === GFX_PIXEL_FORMAT_ARGB_8888) ? xa : 255;
+    // [MS-RDPEGFX] 3.3.5.4 / FreeRDP gdi_SolidFill: the fill pixel's alpha is ALWAYS ignored — the fill is
+    // opaque on EVERY surface, XRGB and ARGB alike (FreeRDP hardcodes `BYTE a = 0xff` and comments "the
+    // alpha value is always ignored"). We previously honored `xa` on ARGB (0x21) surfaces; Windows sends
+    // xa=0 there for an opaque fill, so honoring it made the fill transparent/black — an ARGB desktop
+    // surface (fmt 0x21, which this host uses) then had SOLIDFILL rects blacked out, and SURFACE_TO_CACHE
+    // snapshotted that black and CACHE_TO_SURFACE tiled it across the desktop (the persistent black areas).
+    void xa; // parsed for completeness; deliberately unused (alpha ignored)
+    const a = 255;
     surf.ctx.fillStyle = "rgba(" + rd + "," + g + "," + b + "," + (a / 255) + ")";
     const updated = [];
     for (let i = 0; i < fillRectCount; i++) {
         const left = r.u16le(), top = r.u16le(), right = r.u16le(), bottom = r.u16le();
         surf.ctx.fillRect(left, top, right - left, bottom - top);
         updated.push({ left, top, right, bottom });
+    }
+    // A SOLIDFILL with a black color over a large rect is itself a "black frame" source — surface the
+    // fill color + rects when it lands black (RDP_GFX_DIAG). There is no codec bitstream, so the byte
+    // dump carries the RGBA fill value instead.
+    if (this._diag() && updated.length) {
+        const colorBytes = new Uint8Array([rd, g, b, a]);
+        for (const rc of updated) this._diagPaint("SOLIDFILL(rgba=" + rd + "," + g + "," + b + "," + a + ")", surfaceId, surf, rc, colorBytes);
     }
     this._afterSurfaceUpdate(surfaceId, surf, updated);
 };
@@ -1124,6 +1353,10 @@ RdpGfx.prototype._onSurfaceToSurface = function (r) {
         const dx = r.u16le(), dy = r.u16le();
         dst.ctx.drawImage(src.canvas, rectSrcLeft, rectSrcTop, w, h, dx, dy, w, h);
         updated.push({ left: dx, top: dy, right: dx + w, bottom: dy + h });
+    }
+    // If the source rect on `src` was itself black, this blit spreads black onto dst — surface it.
+    if (this._diag()) {
+        for (const rc of updated) this._diagPaint("SURFACE_TO_SURFACE(src=" + srcId + " srcRect=[" + rectSrcLeft + "," + rectSrcTop + "," + rectSrcRight + "," + rectSrcBottom + "])", dstId, dst, rc, null);
     }
     this._afterSurfaceUpdate(dstId, dst, updated);
 };
@@ -1158,6 +1391,19 @@ RdpGfx.prototype._onSurfaceToCache = function (r) {
     }
     slot.srcLeft = left; slot.srcTop = top; // diagnostic only: origin this snapshot was taken from
     slot.ctx.drawImage(surf.canvas, left, top, w, h, 0, 0, w, h);
+    // Diagnostics: record whether the SOURCE surface rect was black AT SNAPSHOT TIME. This is the crux of
+    // the "black returns from cache" bug — if the slot is snapshotted black, the content for that region
+    // never landed on the surface before the host cached it (upstream drop / mis-order), and every later
+    // CACHE_TO_SURFACE faithfully replays black. A slot that snapshotted NON-black but paints black on
+    // replay would instead point at the blit itself. Gated behind RDP_GFX_DIAG (the scan isn't free).
+    if (this._diag()) {
+        slot.snapBlack = this._scanBlack(surf, { left: left, top: top, right: right, bottom: bottom }).black;
+        if (slot.snapBlack) {
+            this._log("rdpgfx: [DIAG] SURFACE_TO_CACHE slot=" + cacheSlot + " snapshotted BLACK from surface=" +
+                surfaceId + " rect=[" + left + "," + top + "," + right + "," + bottom + "] — content for this " +
+                "region never reached the surface before it was cached; CACHE_TO_SURFACE will replay black");
+        }
+    }
 };
 
 // CACHE_TO_SURFACE ([MS-RDPEGFX] 2.2.2.7): blit a cached slot onto a surface at one or more points.
@@ -1188,6 +1434,29 @@ RdpGfx.prototype._onCacheToSurface = function (r) {
                 " " + slot.w + "x" + slot.h + " -> " + dx + "," + dy);
         }
         updated.push({ left: dx, top: dy, right: dx + slot.w, bottom: dy + slot.h });
+    }
+    // A cache slot that was snapshotted while black (or never really populated) paints black here. Rather
+    // than logging every dest point (a full-desktop background tiles the same black slot HUNDREDS of times
+    // and floods/truncates the console), coalesce: count how many dest rects came out black and emit ONE
+    // line naming the slot, its snapshot origin, and — critically — whether the slot was black AT SNAPSHOT
+    // TIME (slot.snapBlack, set in _onSurfaceToCache). snapBlack=true ⇒ upstream never painted the content;
+    // snapBlack=false but replayed black ⇒ look at the blit. Level 2 still logs per-rect for fine tracing.
+    if (this._diag()) {
+        let blackCount = 0;
+        const blackDests = [];
+        for (const rc of updated) {
+            if (this._scanBlack(surf, rc).black) { blackCount++; if (blackDests.length < 12) blackDests.push("[" + rc.left + "," + rc.top + "]"); }
+            if (this._diag() >= 2) this._diagPaint("CACHE_TO_SURFACE(slot=" + cacheSlot + ")", surfaceId, surf, rc, null);
+        }
+        if (blackCount) {
+            this._log("rdpgfx: [DIAG] BLACK CACHE_TO_SURFACE slot=" + cacheSlot + " -> " + blackCount + "/" +
+                updated.length + " dest rects black; snapshotted from surface rect=[" + slot.srcLeft + "," +
+                slot.srcTop + "," + (slot.srcLeft + slot.w) + "," + (slot.srcTop + slot.h) + "] " +
+                slot.w + "x" + slot.h + " snapBlack=" + (slot.snapBlack === true) +
+                " destsAt=" + blackDests.join(",") +
+                (slot.snapBlack ? " (ROOT CAUSE: slot cached black — content never landed upstream)"
+                                : " (slot cached NON-black yet replays black — investigate the blit/surface state)"));
+        }
     }
     if (updated.length) this._afterSurfaceUpdate(surfaceId, surf, updated);
 };

@@ -5,6 +5,20 @@
 // stale tile back to the PDU that produced it. Use 1 for normal diagnostic logging.
 window.RDP_LOG = window.RDP_LOG || 0;
 
+// Black-partial-frame diagnostics (see rdpgfx.js _diag/_diagPaint). Independent of RDP_LOG.
+//   window.RDP_GFX_DIAG = 1  — after each ClearCodec/Progressive paint, scan the written region; if it
+//                              came out black/transparent, log its geometry + a hex dump of the FULL
+//                              codec message that produced it (so the exact bytes can be replayed).
+//   window.RDP_GFX_DIAG = 2  — additionally dump EVERY ClearCodec/Progressive message (at receipt and
+//                              after paint), black or not. Very noisy; use only when hunting a codec bug.
+// Black-frame scanning also covers the blit/fill ops (SOLIDFILL / SURFACE_TO_SURFACE / CACHE_TO_SURFACE),
+// so a black area spread by a fill or an empty cache slot — not just a codec decode — is caught too.
+// Set in devtools with no reconnect needed (read live per PDU). Off by default (the scan reads back
+// canvas pixels via getImageData, which isn't free).
+// window.rdpDiagScan() — call anytime (even with the flag off) to scan every surface NOW and print an
+// 8x8 black-cell grid per surface; use it to pin a stale black area that appeared before diag was on.
+window.RDP_GFX_DIAG = window.RDP_GFX_DIAG || 0;
+
 // ---- first-frame timing tracer (TEMP: chasing the "first frame only after mouse move" delay) ----
 // One line per lifecycle milestone, gated behind RDP_LOG like the rest of the client's diagnostics
 // (set window.RDP_LOG = 1 in devtools to enable). Each line carries a wall-clock time and Δms since
@@ -507,6 +521,17 @@ Client.prototype._startProtocol = function () {
         onGfxDirectFrame: function (frame, surfaceId, map) { self._onGfxDirectFrame(frame, surfaceId, map); },
     });
     this.proto.start();
+    // Devtools helper: window.rdpDiagScan() scans every GFX surface for black regions on demand and logs
+    // an 8x8 black-cell grid per surface (see RdpGfx.diagScanAll). Works even when RDP_GFX_DIAG is off and
+    // regardless of when the black appeared, so a stale black area can still be pinned to a surface.
+    if (typeof window !== "undefined") {
+        const self2 = this;
+        window.rdpDiagScan = function () {
+            const gfx = self2.proto && self2.proto.gfx;
+            if (!gfx) { console.log("rdp: no GFX session active"); return null; }
+            return gfx.diagScanAll();
+        };
+    }
 };
 
 // ---- remote audio playback (Web Audio) -----------------------------------------------------------

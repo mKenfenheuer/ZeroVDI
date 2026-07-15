@@ -7,6 +7,51 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.22] — 2026-07-15 — GFX black content areas fixed (ClearCodec state desync) + diagnostics
+
+Large areas of the desktop rendered permanently black over GFX (ClearCodec / RemoteFX Progressive), while
+other clients (mstsc, FreeRDP) rendered the same host fine. Hovering revealed the real content; leaving the
+hover restored black from the GFX cache. New opt-in diagnostics traced it to a **codec state desync**, and
+this release fixes the underlying cause.
+
+### Fixed
+- **ClearCodec content no longer decodes black after a dropped tile.** When the host streamed a
+  `WIRE_TO_SURFACE_1/2` for a surface id that was transiently absent (its `DELETE_SURFACE → … → RESET_GRAPHICS
+  → CREATE_SURFACE` reuse window, or the first paint arriving before `CREATE_SURFACE`), the client dropped
+  the whole PDU. ClearCodec is a **stateful stream** — each tile carries a `seqNumber` and populates the
+  session-global glyph / VBar caches. Dropping a tile skipped that state: the `seqNumber` jumped
+  (`seqNumber N != expected`) and later tiles that `VBAR_CACHE_HIT` the never-populated slots decoded blank
+  (black), which `SURFACE_TO_CACHE` then snapshotted and `CACHE_TO_SURFACE` tiled across the desktop.
+- **Content painted before `CREATE_SURFACE` is now preserved.** A PDU for an absent surface now lazily
+  materialises a real **orphan surface** (sized to the known output), decoded and painted normally so codec
+  state *and* pixels stay correct; the next `CREATE_SURFACE` for that id **adopts** the orphan's canvas
+  instead of allocating a fresh black one, keeping everything already drawn.
+
+### Added
+- **`window.RDP_GFX_DIAG` web-client flag** (default off, set live in devtools — no reconnect). At level 1,
+  every ClearCodec / Progressive paint scans the region it just wrote; if it came out black/transparent,
+  the client logs the frame's surface + geometry and a hex dump of the **full codec message** that produced
+  it, so the exact wire bytes can be replayed and inspected. Level 2 additionally dumps every ClearCodec /
+  Progressive message (at receipt and after paint), black or not.
+- **Blit/fill ops are scanned too.** The same black-region check runs after `SOLIDFILL`,
+  `SURFACE_TO_SURFACE`, and `CACHE_TO_SURFACE`, so a black area spread by a black fill or an empty/black
+  cache slot — not only a codec decode — is caught and attributed (the log names the fill color or the
+  source surface / cache slot + rect).
+- **Cache-slot provenance for the "black returns from cache" case.** `SURFACE_TO_CACHE` now records
+  whether the source rect was black *at snapshot time* (`slot.snapBlack`), and the `CACHE_TO_SURFACE`
+  black report is coalesced into one line per PDU that states whether the slot was cached black (content
+  never landed upstream — the root cause) or cached non-black yet replays black (a blit/surface-state
+  problem). This turns the hover-reveals / un-hover-restores-black symptom into a single decisive log line
+  instead of hundreds of per-tile lines that overflow the console.
+- **`window.rdpDiagScan()` devtools helper** (`RdpGfx.diagScanAll`). Call it anytime — even with the flag
+  off, and regardless of when the black appeared — to scan every GFX surface right now and print an 8×8
+  black-cell grid plus each surface's size, `touched` state, and mapped output origin, pinning a stale
+  black region to a specific surface.
+- Diagnostic helpers in `rdpgfx.js`: `_scanBlack` (stride-sampled non-black/opacity scan of a painted
+  region), `_hexDump`, and `_diagPaint`, wired through the worker, sync-fallback, sparse, and single-bbox
+  paint paths for both codecs and the blit/fill ops. All work is gated behind the flag (the pixel readback
+  and byte copies are skipped entirely when it is off), so normal rendering is unaffected.
+
 ## [0.6.21] — 2026-07-13 — Idle reaper: startup grace period and an off switch
 
 The idle reaper could pause a VM immediately after the gateway started, before it had any way of knowing
