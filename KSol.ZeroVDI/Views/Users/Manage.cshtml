@@ -26,7 +26,7 @@
     </div>
 }
 
-<div class="max-w-4xl" x-tabs>
+<div class="max-w-4xl" x-tabs data-user-id="@u.Id">
     <div class="flex flex-wrap gap-1 border-b border-border mb-6" role="tablist">
         @foreach (var (id, label, icon) in tabs)
         {
@@ -340,6 +340,9 @@
             if (!root) return;
             var btns = root.querySelectorAll('.tab-btn');
             var panels = root.querySelectorAll('[data-panel]');
+            // Remember the active tab per user so a POST -> redirect (which drops the URL
+            // fragment) lands the user back on the tab they were editing instead of "account".
+            var storeKey = 'user-tab:' + (root.dataset.userId || location.pathname);
             function activate(id) {
                 btns.forEach(function (b) {
                     var on = b.dataset.tab === id;
@@ -349,10 +352,15 @@
                 });
                 panels.forEach(function (p) { p.classList.toggle('hidden', p.dataset.panel !== id); });
                 history.replaceState(null, '', '#' + id);
+                try { sessionStorage.setItem(storeKey, id); } catch (e) { /* ignore */ }
             }
             btns.forEach(function (b) { b.addEventListener('click', function () { activate(b.dataset.tab); }); });
-            var initial = (location.hash || '').replace('#', '') || 'account';
-            activate([].some.call(btns, function (b) { return b.dataset.tab === initial; }) ? initial : 'account');
+            function knownTab(id) { return [].some.call(btns, function (b) { return b.dataset.tab === id; }); }
+            var stored = '';
+            try { stored = sessionStorage.getItem(storeKey) || ''; } catch (e) { /* ignore */ }
+            // Prefer an explicit fragment (deep link), then the last remembered tab, then default.
+            var initial = (location.hash || '').replace('#', '') || stored || 'account';
+            activate(knownTab(initial) ? initial : 'account');
         })();
     </script>
 }

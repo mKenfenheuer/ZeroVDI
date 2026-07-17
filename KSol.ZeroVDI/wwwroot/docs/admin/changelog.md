@@ -7,6 +7,25 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.30] — 2026-07-17 — Downward scroll speed & tab persistence on resource/user pages
+
+Two admin-console papercuts. Scrolling **down** inside the web RDP client ran far faster than
+scrolling up, and saving anything inside a tab on the resource or user edit pages bounced you back
+to the first tab.
+
+### Fixed
+- **Web RDP client: downward scrolling no longer races.** The RDP wheel rotation field is only 8
+  bits with a separate sign flag, but the client masked the magnitude to 9 bits (`0x01FF`), letting
+  it collide with the negative-direction flag and inflate the delta the host decoded — so downward
+  (negative) scrolls moved much faster than upward ones. The magnitude is now masked to 8 bits and
+  encoded as a two's-complement value for negative directions, and per-event wheel deltas are
+  normalised across the browser's `deltaMode` and capped at one notch so both directions move at the
+  same speed.
+- **Resource & user edit pages stay on the active tab after saving.** Forms inside a tab POST and
+  redirect, which drops the URL fragment and previously landed the user back on the default tab
+  ("General" / "Account"). The active tab is now remembered per resource/user in `sessionStorage`
+  and restored on load, while an explicit URL fragment (deep link) still wins.
+
 ## [0.6.25] — 2026-07-17 — Wake-on-LAN reaches the physical LAN (host networking)
 
 Wake-on-LAN never woke the target machine. The app sends the magic packet as a UDP broadcast to

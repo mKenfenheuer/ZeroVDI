@@ -17,6 +17,10 @@ window.RDP_LOG = window.RDP_LOG || 0;
 // canvas pixels via getImageData, which isn't free).
 // window.rdpDiagScan() — call anytime (even with the flag off) to scan every surface NOW and print an
 // 8x8 black-cell grid per surface; use it to pin a stale black area that appeared before diag was on.
+// window.rdpDiagDump() — returns the persisted ring buffer of the last ~2000 [DIAG] lines (newest last),
+// ALWAYS populated, even in production with RDP_GFX_DIAG=0 and RDP_LOG=0 (the buffer is cheap; only the
+// pixel scans behind some lines need the flag). After the artifact shows, run copy(rdpDiagDump().join('\n'))
+// in devtools to grab the history; rdpDiagDump(true) clears it.
 window.RDP_GFX_DIAG = window.RDP_GFX_DIAG || 0;
 
 // ---- first-frame timing tracer (TEMP: chasing the "first frame only after mouse move" delay) ----
@@ -548,6 +552,16 @@ Client.prototype._startProtocol = function () {
             const gfx = self2.proto && self2.proto.gfx;
             if (!gfx) { console.log("rdp: no GFX session active"); return null; }
             return gfx.diagScanAll();
+        };
+        // window.rdpDiagDump() returns the persisted diagnostic ring buffer (last ~2000 [DIAG] lines),
+        // newest last — available even in PRODUCTION with console logging off, because the buffer is
+        // always populated (only the pixel-scan work behind some lines is gated by RDP_GFX_DIAG). Use it
+        // to grab the history after the black artifact appears: `copy(rdpDiagDump().join('\n'))` in
+        // devtools copies it to the clipboard. Pass true to also clear the buffer: rdpDiagDump(true).
+        window.rdpDiagDump = function (clear) {
+            const gfx = self2.proto && self2.proto.gfx;
+            if (!gfx) { console.log("rdp: no GFX session active"); return []; }
+            return gfx.diagDump(clear === true);
         };
     }
 };
@@ -1357,11 +1371,6 @@ Client.prototype._onGfxReset = function (w, h) {
     }
 };
 
-// Gated pointer-update tracing. Off unless window.RDP_LOG >= 1 (see top of file), so the
-// hot path stays quiet in production but pointer-cache issues (e.g. reverting to the OS
-// default cursor) can be diagnosed by flipping the flag in devtools.
-function PTR_LOG(msg) { if (window.RDP_LOG >= 1) console.log("rdp: pointer " + msg); }
-
 // Select the active RDP cursor by swapping the single pointer-cache-* class on cursorEl.
 // Only that class is touched, so any other classes on the element are preserved. Pass null
 // to clear the cursor (revert to whatever the element's own CSS specifies).
@@ -1374,9 +1383,6 @@ Client.prototype._setCursorClass = function (cls) {
 };
 
 Client.prototype.handlePointer = function (header, r) {
-    if (header.isPTRNull()) { PTR_LOG("PTR_NULL"); this._setCursorClass("pointer-cache-null"); return; }
-    if (header.isPTRDefault()) { PTR_LOG("PTR_DEFAULT -> OS default cursor"); this._setCursorClass("pointer-cache-default"); return; }
-
     // PTR_COLOR and PTR_NEW carry the same cursor bitmap (PTR_COLOR is implicitly 24-bpp);
     // both must be cached so later PTR_CACHED references resolve. Dropping PTR_COLOR left
     // its cache slot empty, so a subsequent PTR_CACHED to that index reverted to the OS
@@ -1389,15 +1395,11 @@ Client.prototype.handlePointer = function (header, r) {
         if (!this.pointerCache.hasOwnProperty(cacheIndex)) {
             // Referenced a slot we never built (unsupported/failed decode). Keeping the
             // current cursor is less jarring than snapping to the OS default.
-            PTR_LOG("PTR_CACHED miss idx=" + cacheIndex + " (keeping current cursor)");
             return;
         }
-        PTR_LOG("PTR_CACHED idx=" + cacheIndex);
         this._setCursorClass("pointer-cache-" + cacheIndex);
         return;
     }
-    // PTR_POSITION / large pointer: not handled in v1.
-    PTR_LOG("unhandled pointer update");
 };
 
 // Crop an ImageData to the bounding box of its non-transparent pixels. RDP cursor bitmaps
@@ -1435,14 +1437,11 @@ function cropImageDataToOpaqueBounds(ctx, img) {
 Client.prototype._cachePointer = function (u, kind) {
     const full = u.getImageData(this.pointerCacheCanvasCtx);
     if (!full) {
-        PTR_LOG(kind + " decode failed bpp=" + u.xorBpp + " " + u.width + "x" + u.height +
-            " lenXor=" + u.lengthXorMask + " lenAnd=" + u.lengthAndMask + " (keeping current cursor)");
         return;
     }
     const crop = cropImageDataToOpaqueBounds(this.pointerCacheCanvasCtx, full);
     if (!crop) {
         // Fully transparent bitmap: the host means "hide the pointer".
-        PTR_LOG(kind + " idx=" + u.cacheIndex + " fully transparent -> null cursor");
         this._setCursorClass("pointer-cache-null");
         return;
     }
@@ -1504,9 +1503,6 @@ Client.prototype._cachePointer = function (u, kind) {
     document.getElementsByTagName("head")[0].appendChild(style);
     this.pointerCache[u.cacheIndex] = style;
     this._setCursorClass(className);
-    PTR_LOG(kind + " cached idx=" + u.cacheIndex + " bpp=" + u.xorBpp + " " +
-        u.width + "x" + u.height + " cropped=" + img.width + "x" + img.height +
-        "+" + crop.x + "+" + crop.y + " hot=" + hotX + "," + hotY);
 };
 
 // ---- input ---------------------------------------------------------------------------------------
@@ -1584,7 +1580,15 @@ Client.prototype.handleWheel = function (e) {
     const p = this._canvasCoords(e);
     const isHorizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY);
     const delta = isHorizontal ? e.deltaX : e.deltaY;
-    const step = Math.round(Math.abs(delta) * 15 / 8);
+    // Normalise across the browser's deltaMode (0=pixel, 1=line, 2=page) so momentum/pixel
+    // scrolling can't send an oversized rotation, then scale to RDP notch units. One notch is
+    // 120 units; the RDP rotation field is only 8 bits, so cap the per-event magnitude at 120
+    // to keep both scroll directions moving at the same, sane speed.
+    let px = Math.abs(delta);
+    if (e.deltaMode === 1) px *= 16;        // lines -> ~px
+    else if (e.deltaMode === 2) px *= this.canvas.height || 800; // pages -> ~px
+    const step = Math.min(120, Math.round(px * 120 / 100));
+    if (step === 0) { e.preventDefault(); return false; }
     this._sendEvent(new MouseWheelEvent(p.x, p.y, step, delta > 0, isHorizontal).serialize());
     e.preventDefault();
     return false;

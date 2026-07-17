@@ -1,6 +1,6 @@
 {
   "name": "ksol-zerovdi-ui",
-  "version": "0.6.30",
+  "version": "0.6.31",
   "private": true,
   "description": "Tailwind CSS build for the KSol.ZeroVDI. web UI (Cleopatra design system).",
   "scripts": {

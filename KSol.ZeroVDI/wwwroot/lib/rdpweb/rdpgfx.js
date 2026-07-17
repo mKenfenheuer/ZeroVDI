@@ -220,6 +220,30 @@ RdpGfx.prototype._paintH264Frame = function (msg) {
 
 RdpGfx.prototype._log = function (m) { if (this.cb.onLog) this.cb.onLog(m); };
 
+// Diagnostic ring buffer. EVERY diagnostic line goes here in addition to the normal console log, so the
+// last N diag events survive even when console logging is off (RDP_LOG=0) — including in PRODUCTION. This
+// is always-on because it's cheap (just retaining strings); only the pixel-scan work that PRODUCES some of
+// these lines is gated behind RDP_GFX_DIAG. Dump it from devtools with window.rdpDiagDump() (newest last),
+// or clear with window.rdpDiagDump(true). Bounded so it can't grow without limit on a long session.
+RdpGfx.prototype._DIAG_RING_MAX = 2000;
+RdpGfx.prototype._diagLog = function (m) {
+    if (!this._diagRing) this._diagRing = [];
+    this._diagRing.push({ t: Date.now(), m: m });
+    if (this._diagRing.length > this._DIAG_RING_MAX) this._diagRing.shift();
+    // Still emit to the console when logging is enabled, so live tailing is unchanged.
+    if (this.cb.onLog) this.cb.onLog(m);
+};
+
+// Return the buffered diagnostic lines (each "ISO-time  message"), newest last. Pass clear=true to also
+// empty the buffer after reading. Exposed to the page via window.rdpDiagDump (see client.js).
+RdpGfx.prototype.diagDump = function (clear) {
+    const out = (this._diagRing || []).map(function (e) {
+        return new Date(e.t).toISOString().substr(11, 12) + "  " + e.m;
+    });
+    if (clear) this._diagRing = [];
+    return out;
+};
+
 // RDP_LOG == 2 (see client.js) turns on verbose per-tile ClearCodec/Progressive decode tracing, on top
 // of the always-on error logging those decoders already do. Read live (not cached) so toggling
 // window.RDP_LOG in devtools takes effect on the next PDU without a reconnect.
@@ -305,10 +329,10 @@ RdpGfx.prototype.diagScanAll = function () {
         const line = "rdpgfx: [DIAG] surface " + id + " " + surf.width + "x" + surf.height +
             " touched=" + surf.touched + " mapped=" + (map ? ("@" + map.originX + "," + map.originY) : "no") +
             " black=" + full.black + " (nonBlack " + full.nonBlack + "/" + full.total + " sampled)\n" + grid.join("\n");
-        this._log(line);
+        this._diagLog(line);
         out.push({ surfaceId: id | 0, width: surf.width, height: surf.height, black: full.black, grid });
     }
-    if (!out.length) this._log("rdpgfx: [DIAG] no surfaces");
+    if (!out.length) this._diagLog("rdpgfx: [DIAG] no surfaces");
     return out;
 };
 
@@ -322,11 +346,11 @@ RdpGfx.prototype._diagPaint = function (codec, surfaceId, surf, rect, msgBytes) 
     const geo = "surface=" + surfaceId + " rect=[" + rect.left + "," + rect.top + "," +
         rect.right + "," + rect.bottom + "] (" + (rect.right - rect.left) + "x" + (rect.bottom - rect.top) + ")";
     if (scan.black) {
-        this._log("rdpgfx: [DIAG] BLACK " + codec + " frame — " + geo +
+        this._diagLog("rdpgfx: [DIAG] BLACK " + codec + " frame — " + geo +
             " sampled=" + scan.total + " nonBlack=" + scan.nonBlack + " opaque=" + scan.opaque +
             " msgLen=" + (msgBytes ? msgBytes.length : 0) + "B bytes=[" + this._hexDump(msgBytes, 1024) + "]");
     } else if (level >= 2) {
-        this._log("rdpgfx: [DIAG] " + codec + " frame — " + geo +
+        this._diagLog("rdpgfx: [DIAG] " + codec + " frame — " + geo +
             " sampled=" + scan.total + " nonBlack=" + scan.nonBlack + " opaque=" + scan.opaque +
             " msgLen=" + (msgBytes ? msgBytes.length : 0) + "B bytes=[" + this._hexDump(msgBytes, 256) + "]");
     }
@@ -472,7 +496,7 @@ RdpGfx.prototype._censusPdu = function (cmdId, body) {
     this._census[key] = (this._census[key] || 0) + 1;
     if (++this._censusN % 200 === 0) {
         const parts = Object.keys(this._census).sort().map((k) => k + "=" + this._census[k]);
-        this._log("rdpgfx: [DIAG] PDU census (" + this._censusN + " total): " + parts.join("  "));
+        this._diagLog("rdpgfx: [DIAG] PDU census (" + this._censusN + " total): " + parts.join("  "));
     }
 };
 
@@ -776,7 +800,7 @@ RdpGfx.prototype._onWireToSurface1 = function (r) {
     // RDP_GFX_DIAG>=2: dump the full inbound WIRE_TO_SURFACE_1 message (header fields + codec bitstream)
     // for ClearCodec, so the exact wire bytes are captured even if the paint later comes out non-black.
     if (this._diag() >= 2 && codecId === RDPGFX_CODECID_CLEARCODEC) {
-        this._log("rdpgfx: [DIAG] WIRE_TO_SURFACE_1 codecId=0x" + codecId.toString(16) + " fmt=0x" +
+        this._diagLog("rdpgfx: [DIAG] WIRE_TO_SURFACE_1 codecId=0x" + codecId.toString(16) + " fmt=0x" +
             pixelFormat.toString(16) + " surface=" + surfaceId + " rect=[" + destLeft + "," + destTop + "," +
             destRight + "," + destBottom + "] len=" + bitmapDataLength + "B bytes=[" + this._hexDump(bitmapData, 1024) + "]");
     }
@@ -828,7 +852,7 @@ RdpGfx.prototype._onWireToSurface2 = function (r) {
         }
         // RDP_GFX_DIAG>=2: dump the full inbound Progressive bitstream at receipt time.
         if (this._diag() >= 2) {
-            this._log("rdpgfx: [DIAG] WIRE_TO_SURFACE_2 Progressive codecId=0x" + codecId.toString(16) +
+            this._diagLog("rdpgfx: [DIAG] WIRE_TO_SURFACE_2 Progressive codecId=0x" + codecId.toString(16) +
                 " fmt=0x" + pixelFormat.toString(16) + " surface=" + surfaceId + " ctx=" + codecContextId +
                 " len=" + bitmapData.length + "B bytes=[" + this._hexDump(bitmapData, 1024) + "]");
         }
@@ -1391,13 +1415,17 @@ RdpGfx.prototype._onSurfaceToCache = function (r) {
     }
     slot.srcLeft = left; slot.srcTop = top; // diagnostic only: origin this snapshot was taken from
     slot.ctx.drawImage(surf.canvas, left, top, w, h, 0, 0, w, h);
-    // Diagnostics: record whether the SOURCE surface rect was black AT SNAPSHOT TIME. This is the crux of
-    // the "black returns from cache" bug — if the slot is snapshotted black, the content for that region
-    // never landed on the surface before the host cached it (upstream drop / mis-order), and every later
-    // CACHE_TO_SURFACE faithfully replays black. A slot that snapshotted NON-black but paints black on
-    // replay would instead point at the blit itself. Gated behind RDP_GFX_DIAG (the scan isn't free).
-    if (this._diag()) {
-        slot.snapBlack = this._scanBlack(surf, { left: left, top: top, right: right, bottom: bottom }).black;
+    // Record whether the SOURCE surface rect was black AT SNAPSHOT TIME. This is the crux of the "black
+    // returns from cache" bug — if the slot is snapshotted black, the content for that region never landed
+    // on the surface before the host cached it (upstream drop / mis-order), and every later
+    // CACHE_TO_SURFACE faithfully replays black. This check runs ALWAYS (even in prod, flag off): it's the
+    // root-cause signal and cheap — one small readback per cache-populate, and SURFACE_TO_CACHE is far less
+    // frequent than CACHE_TO_SURFACE. We skip the scan entirely for benign base-layer corners/edges (the
+    // host's expected black background) via a coordinate test first, so only INTERIOR regions are scanned.
+    {
+        // Corner/edge tile (touches x==0, top, or the bottom/right edge) = host's black background — skip.
+        const isEdge = (left <= 0) || (top <= 0) || (bottom >= (this.outputHeight || 1e9)) || (right >= (this.outputWidth || 1e9));
+        slot.snapBlack = !isEdge && this._scanBlack(surf, { left: left, top: top, right: right, bottom: bottom }).black;
         if (slot.snapBlack) {
             // Distinguish an ORDERING bug from a MISSING-content bug: report whether an async decode was
             // still in flight at snapshot time (decodeSeq > settledSeq) or any op is queued behind the
@@ -1405,9 +1433,12 @@ RdpGfx.prototype._onSurfaceToCache = function (r) {
             // black too early (ordering). If NOT (fully settled, empty queue), the host cached a region
             // whose content we never painted at all (missing/dropped content upstream).
             const inflight = this._decodeSeq - this._decodeSettledSeq;
-            this._log("rdpgfx: [DIAG] SURFACE_TO_CACHE slot=" + cacheSlot + " snapshotted BLACK from surface=" +
+            const headBarrier = this._orderedQueue.length ? this._orderedQueue[0].barrier : null;
+            this._diagLog("rdpgfx: [DIAG] SURFACE_TO_CACHE slot=" + cacheSlot + " snapshotted BLACK from surface=" +
                 surfaceId + " rect=[" + left + "," + top + "," + right + "," + bottom + "]" +
                 " inflightDecodes=" + inflight + " queuedOps=" + this._orderedQueue.length +
+                " decodeSeq=" + this._decodeSeq + " settledSeq=" + this._decodeSettledSeq +
+                " queueHeadBarrier=" + headBarrier +
                 (inflight > 0 || this._orderedQueue.length
                     ? " — ORDERING: barrier let SURFACE_TO_CACHE snapshot before content painted"
                     : " — MISSING: no decode pending, host cached a region we never painted (dropped content)"));
@@ -1466,7 +1497,7 @@ RdpGfx.prototype._onCacheToSurface = function (r) {
             if (this._diag() >= 2) this._diagPaint("CACHE_TO_SURFACE(slot=" + cacheSlot + ")", surfaceId, surf, rc, null);
         }
         if (blackCount) {
-            this._log("rdpgfx: [DIAG] BLACK CACHE_TO_SURFACE slot=" + cacheSlot + " -> " + blackCount + "/" +
+            this._diagLog("rdpgfx: [DIAG] BLACK CACHE_TO_SURFACE slot=" + cacheSlot + " -> " + blackCount + "/" +
                 updated.length + " dest rects black; snapshotted from surface rect=[" + slot.srcLeft + "," +
                 slot.srcTop + "," + (slot.srcLeft + slot.w) + "," + (slot.srcTop + slot.h) + "] " +
                 slot.w + "x" + slot.h + " snapBlack=" + (slot.snapBlack === true) +

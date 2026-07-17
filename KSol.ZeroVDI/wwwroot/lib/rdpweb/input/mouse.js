@@ -6,7 +6,12 @@ const PTRFLAGS_DOWN = 0x8000;
 const PTRFLAGS_BUTTON1 = 0x1000;
 const PTRFLAGS_BUTTON2 = 0x2000;
 const PTRFLAGS_BUTTON3 = 0x4000;
-const WheelRotationMask = 0x01FF;
+// Per MS-RDPBCGR 2.2.8.1.1.3.1.1.3, the wheel rotation delta lives in the low byte
+// (bits 0-7) of pointerFlags; bit 8 (0x0100) is PTRFLAGS_WHEEL_NEGATIVE, the sign bit.
+// A negative rotation is sent as its two's-complement in the low byte together with the
+// negative flag, so the magnitude must be masked to 8 bits — NOT 9 — or it collides with
+// the sign bit and the host reads a corrupted (much larger) delta.
+const WheelRotationMask = 0x00FF;
 
 function MouseMoveEvent(xPos, yPos) {
     this.pointerFlags = PTRFLAGS_MOVE;
@@ -60,11 +65,18 @@ function MouseWheelEvent(xPos, yPox, step, isNegative, isHorizontal) {
         this.pointerFlags = PTRFLAGS_HWHEEL;
     }
 
+    // Clamp the magnitude to the 8-bit rotation field first (one notch is 120 units).
+    var magnitude = step & WheelRotationMask;
     if (isNegative) {
+        // Express the negative rotation as a two's-complement value in the low byte and set
+        // the sign bit, matching how RDP hosts decode a downward/leftward scroll. Sending the
+        // raw magnitude alongside the negative flag (the previous behaviour) made the host read
+        // an inflated delta, so downward scrolling ran far faster than upward.
         this.pointerFlags |= PTRFLAGS_WHEEL_NEGATIVE;
+        magnitude = (-magnitude) & WheelRotationMask;
     }
 
-    this.pointerFlags |= (step & WheelRotationMask);
+    this.pointerFlags |= magnitude;
 }
 
 const serialize = function () {

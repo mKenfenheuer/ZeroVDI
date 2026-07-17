@@ -36,7 +36,7 @@
     </div>
 }
 
-<div class="max-w-4xl" x-tabs>
+<div class="max-w-4xl" x-tabs data-resource-id="@r.Id">
     <!-- Tab bar -->
     <div class="flex flex-wrap gap-1 border-b border-border mb-6" role="tablist">
         @foreach (var (id, label, icon) in tabs)
@@ -477,6 +477,9 @@
             if (!root) return;
             var btns = root.querySelectorAll('.tab-btn');
             var panels = root.querySelectorAll('[data-panel]');
+            // Remember the active tab per resource so a POST -> redirect (which drops the URL
+            // fragment) lands the user back on the tab they were editing instead of "general".
+            var storeKey = 'rdpres-tab:' + (root.dataset.resourceId || location.pathname);
             function activate(id) {
                 btns.forEach(function (b) {
                     var on = b.dataset.tab === id;
@@ -486,11 +489,17 @@
                 });
                 panels.forEach(function (p) { p.classList.toggle('hidden', p.dataset.panel !== id); });
                 history.replaceState(null, '', '#' + id);
+                try { sessionStorage.setItem(storeKey, id); } catch (e) { /* ignore */ }
                 if (id === 'backend' && !rrdLoaded) loadRrd();
             }
             btns.forEach(function (b) { b.addEventListener('click', function () { activate(b.dataset.tab); }); });
-            var initial = (location.hash || '').replace('#', '') || 'general';
-            activate(btns.length && [].some.call(btns, function (b) { return b.dataset.tab === initial; }) ? initial : 'general');
+            function knownTab(id) { return btns.length && [].some.call(btns, function (b) { return b.dataset.tab === id; }); }
+            var stored = '';
+            try { stored = sessionStorage.getItem(storeKey) || ''; } catch (e) { /* ignore */ }
+            // Prefer an explicit fragment (deep link / manual navigation), then the last tab this
+            // session remembered for this resource, then fall back to the first tab.
+            var initial = (location.hash || '').replace('#', '') || stored || 'general';
+            activate(knownTab(initial) ? initial : 'general');
 
             // Wake method toggle
             var wakeSelect = document.getElementById('wake-method');
