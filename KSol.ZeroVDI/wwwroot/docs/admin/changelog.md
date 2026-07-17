@@ -7,6 +7,24 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.25] — 2026-07-17 — Wake-on-LAN reaches the physical LAN (host networking)
+
+Wake-on-LAN never woke the target machine. The app sends the magic packet as a UDP broadcast to
+`255.255.255.255`, but the app container ran on a **bridged** Docker network, so the broadcast was
+trapped inside the container's isolated subnet and never reached the physical LAN where the target
+machine sits.
+
+### Fixed
+- **Wake-on-LAN magic packet now reaches the LAN.** The app container runs with `network_mode: host`
+  so the broadcast egresses on the host's real network interface.
+
+### Changed
+- The app now binds directly on the host at port **8084** (via `ASPNETCORE_HTTP_PORTS`) instead of
+  the bridged `8084:80` port mapping, which is invalid under host networking. The external port is
+  unchanged.
+
+---
+
 ## [0.6.24] — 2026-07-15 — Console auto-reconnect on network/protocol drops (keeps the last frame)
 
 When a live console session **dropped because of a network or protocol failure** — the WebSocket died, or the

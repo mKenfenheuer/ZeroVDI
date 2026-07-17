@@ -4,7 +4,9 @@ services:
     environment:
       - "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
       - "APP_UID=1654"
-      - "ASPNETCORE_HTTP_PORTS=80"
+      # With network_mode: host the container binds directly on the host, so listen
+      # on the published port (8084) rather than 80.
+      - "ASPNETCORE_HTTP_PORTS=8084"
       - "DOTNET_RUNNING_IN_CONTAINER=true"
       - "DOTNET_VERSION=9.0.3"
       - "ASPNET_VERSION=9.0.3"
@@ -14,8 +16,10 @@ services:
       # The app refuses to start in Production if this is empty.
       - "DataProtection__MasterKeyPassphrase=${DataProtection__MasterKeyPassphrase}"
     image: ${APP_IMAGE}
-    ports:
-      - "0.0.0.0:8084:80/tcp"
+    # Host networking so the Wake-on-LAN magic packet broadcast (255.255.255.255)
+    # reaches the physical LAN. In a bridged network the broadcast is trapped in the
+    # container's isolated subnet and never hits the target machine.
+    network_mode: "host"
     restart: "always"
     volumes:
       - "/mnt/data/rdpgw:/app/Data"
