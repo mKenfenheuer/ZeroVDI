@@ -315,18 +315,33 @@ function decodeH264(msg) {
 
 self.onmessage = function (e) {
     const msg = e.data;
-    switch (msg.cmd) {
-        case "progressive": decodeProgressive(msg); break;
-        case "h264": decodeH264(msg); break;
-        case "reset":
-            for (const k in progCtx) delete progCtx[k];
-            for (const k in h264) { h264[k].close(); delete h264[k]; }
-            break;
-        case "destroy-surface":
-            delete progCtx[msg.surfaceId];
-            if (h264[msg.surfaceId]) { h264[msg.surfaceId].close(); delete h264[msg.surfaceId]; }
-            break;
-        default:
-            log("decode-worker: unknown cmd " + msg.cmd);
+    try {
+        switch (msg.cmd) {
+            case "progressive": decodeProgressive(msg); break;
+            case "h264": decodeH264(msg); break;
+            case "reset":
+                for (const k in progCtx) delete progCtx[k];
+                for (const k in h264) { h264[k].close(); delete h264[k]; }
+                break;
+            case "destroy-surface":
+                delete progCtx[msg.surfaceId];
+                if (h264[msg.surfaceId]) { h264[msg.surfaceId].close(); delete h264[msg.surfaceId]; }
+                break;
+            default:
+                log("decode-worker: unknown cmd " + msg.cmd);
+        }
+    } catch (err) {
+        // A throw ESCAPING a handler is catastrophic for the ordered-decode barrier: decodeProgressive/
+        // decodeH264 that die before posting their reply leave the main thread's decode #N unsettled, so
+        // settledSeq stalls below decodeSeq and EVERY later order-sensitive op (SURFACE_TO_CACHE, …) queues
+        // forever and snapshots black (observed: queuedOps in the thousands, inflightDecodes stuck > 0).
+        // So for a decode command, ALWAYS emit a (failed) result carrying its reqId so the barrier advances.
+        // decodeProgressive/decodeH264 catch their own inner errors and reply normally; this only fires for
+        // a throw OUTSIDE those inner try blocks (e.g. building the decode context).
+        log("decode-worker: handler threw for cmd " + (msg && msg.cmd) + ": " + (err && err.stack ? err.stack : err));
+        if (msg && (msg.cmd === "progressive" || msg.cmd === "h264") && msg.reqId != null) {
+            postMessage({ cmd: "progressive-result", reqId: msg.reqId, surfaceId: msg.surfaceId, ok: false,
+                error: "worker handler threw: " + (err && err.message || err) });
+        }
     }
 };

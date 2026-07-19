@@ -198,14 +198,25 @@ RdpGfx.prototype._onWorkerMessage = function (msg) {
     if (!pending) return; // reset() cleared it — stale pre-reset reply; the seq counters were reset too
     delete this._workerPending[msg.reqId];
     const surf = this.surfaces[pending.surfaceId];
-    // Settle even when the surface was destroyed while the decode was in flight (only the paint is
-    // skipped) — every submitted decode must advance the barrier or the ordered queue wedges forever.
-    if (surf && msg.cmd === "progressive-result") {
-        if (pending.diagBytes) msg.diagBytes = pending.diagBytes;
-        this._finishProgressive(pending.surfaceId, surf, msg);
+    // CRITICAL: every submitted decode MUST advance the barrier exactly once, or the ordered queue wedges
+    // FOREVER (settledSeq stalls below decodeSeq, every later order-sensitive op queues and never drains,
+    // and SURFACE_TO_CACHE snapshots go out black — observed as queuedOps piling into the thousands with
+    // inflightDecodes stuck > 0). _finishProgressive does canvas putImageData/drawImage that CAN throw
+    // (detached buffer, bad size), and if it threw here the _decodeSettled() below never ran → wedge. So
+    // the paint is now guarded and _decodeSettled() runs in a finally, unconditionally.
+    try {
+        // Settle even when the surface was destroyed while the decode was in flight (only the paint is
+        // skipped) — every submitted decode must advance the barrier or the ordered queue wedges forever.
+        if (surf && msg.cmd === "progressive-result") {
+            if (pending.diagBytes) msg.diagBytes = pending.diagBytes;
+            this._finishProgressive(pending.surfaceId, surf, msg);
+        }
+    } catch (e) {
+        this._log("rdpgfx: progressive finish threw (barrier still advanced): " + (e && e.stack ? e.stack : e));
+    } finally {
+        // "h264-submitted" only advances the barrier (its frame paints later, off-barrier).
+        this._decodeSettled();
     }
-    // "h264-submitted" only advances the barrier (its frame paints later, off-barrier).
-    this._decodeSettled();
 };
 
 // Paint a VideoFrame transferred from the decode worker. Runs the exact old onDecodedFrame paint path
