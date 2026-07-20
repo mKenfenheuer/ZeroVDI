@@ -7,7 +7,51 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
-## [0.6.30] — 2026-07-17 — Downward scroll speed & tab persistence on resource/user pages
+## [0.6.31] — 2026-07-19 — GFX black content areas fixed (decode barrier could wedge)
+
+Large regions of the desktop rendered permanently black over GFX (ClearCodec / RemoteFX Progressive) —
+intermittently, and only for some areas (e.g. a strip of the Windows taskbar). Hovering the mouse
+repainted the region; leaving restored black. Other clients (mstsc, FreeRDP) rendered the same host fine.
+
+### Fixed
+- **`SURFACE_TO_CACHE` no longer snapshots a surface mid-decode (the black-cache bug).** Two defects in the
+  ordered-decode queue let a cache snapshot run before its content had painted, so the slot stored black
+  and every later `CACHE_TO_SURFACE` replayed it (hover repainted the region; leaving restored the black):
+  - **Re-entrant drain.** Draining the queue dispatches PDUs, and a queued Progressive `WIRE_TO_SURFACE_2`
+    submits a *new* async decode whose worker reply could land while the drain loop was still running —
+    re-entering the drain, advancing the settle counter again and releasing ops whose content decode was
+    still in flight. The drain is now serialised with a re-entrancy guard and a re-run flag.
+  - **A long-queued cache op could outlive its barrier's meaning.** `SURFACE_TO_CACHE` *reads* the surface,
+    so "every decode queued before me landed" is not enough — a newer decode carrying the content for its
+    rect could still be running (observed: `barrier=4, settledSeq=4` releasing it while decode #5 was
+    inflight, with 1225 ops backed up). It now additionally waits for the decode pipeline to fully quiesce.
+- **The ordered-decode barrier could wedge, poisoning the GFX cache with black.** Every async decode
+  submitted to the decode worker must advance a settle counter exactly once; order-sensitive ops
+  (`SURFACE_TO_CACHE`, `SURFACE_TO_SURFACE`, `CACHE_TO_SURFACE`, `SOLIDFILL`) queue behind it until the
+  content has painted. If a worker decode threw **before** posting its reply — a throw outside the inner
+  try (e.g. building the per-surface decode context) — that reply never came, the settle counter stalled
+  below the submit counter, and **every** later order-sensitive op queued forever. `SURFACE_TO_CACHE` then
+  snapshotted the still-black surface, and `CACHE_TO_SURFACE` tiled that black across the desktop; the
+  region only refreshed on a fresh hover-triggered decode. Diagnosed from a persisted trace showing the
+  queue piling into the thousands (`queuedOps=2979`) with the settle counter stuck (`settledSeq=2 <
+  decodeSeq=5`, `inflightDecodes=3`). The decode worker's message handler now always emits a (failed)
+  result carrying the request id when a handler throws, and the main thread advances the barrier in a
+  `finally`, so the queue can never wedge regardless of a decode failure.
+- **SOLIDFILL is always opaque.** The fill pixel's alpha is ignored per [MS-RDPEGFX] 3.3.5.4 (FreeRDP
+  hardcodes `0xFF`); the client previously honored it on ARGB surfaces, where Windows sends alpha 0 for an
+  opaque fill, blacking out filled rects.
+- **GFX surface canvases are created with `willReadFrequently`.** They are read back regularly (ClearCodec
+  re-snapshots its glyph from the composed destination; the black-cache detection scans cache source rects),
+  and without the hint each `getImageData` stalled on a GPU readback.
+
+### Added
+- **Persisted GFX diagnostic ring buffer, always on (including production).** The last ~2000 `[DIAG]`
+  lines are retained in memory even with logging off; dump them from devtools with `window.rdpDiagDump()`
+  (`copy(rdpDiagDump().join('\n'))` to grab the history after an artifact appears, `rdpDiagDump(true)` to
+  clear). The interior black-cache-snapshot detection that produces the decisive line runs unconditionally
+  (it's cheap and skips the benign black-background edges), so a production occurrence is captured without
+  pre-enabling anything. `window.RDP_GFX_DIAG=1/2` still gates the heavier per-tile scans, hex dumps, and
+  PDU census; `window.rdpDiagScan()` scans every surface on demand.
 
 Two admin-console papercuts. Scrolling **down** inside the web RDP client ran far faster than
 scrolling up, and saving anything inside a tab on the resource or user edit pages bounced you back

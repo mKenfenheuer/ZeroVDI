@@ -568,9 +568,34 @@ RdpGfx.prototype._dispatchNow = function (cmdId, body) {
 // waiting — FIFO order must never be violated by skipping ahead.
 RdpGfx.prototype._decodeSettled = function () {
     if (this._decodeSettledSeq < this._decodeSeq) this._decodeSettledSeq++;
-    while (this._orderedQueue.length && this._orderedQueue[0].barrier <= this._decodeSettledSeq) {
-        const cmd = this._orderedQueue.shift();
-        this._dispatchNow(cmd.cmdId, cmd.body);
+    // RE-ENTRANCY GUARD. Draining calls _dispatchNow, and a queued WIRE_TO_SURFACE_2 (Progressive) there
+    // submits a NEW async decode (_decodeSeq++), whose worker reply can land while we are still inside this
+    // loop — re-entering _decodeSettled, advancing settledSeq again and draining ops whose content decode
+    // is still in flight. That reordering is how a SURFACE_TO_CACHE ended up snapshotting a region before
+    // its content painted (observed: barrier=4, settledSeq=4, yet decode #5 carrying the content still
+    // inflight → the slot cached black and CACHE_TO_SURFACE replayed it). Serialise instead: if a drain is
+    // already running, just record that another pass is needed and let the outer loop do it.
+    if (this._draining) { this._drainAgain = true; return; }
+    this._draining = true;
+    try {
+        do {
+            this._drainAgain = false;
+            while (this._orderedQueue.length && this._orderedQueue[0].barrier <= this._decodeSettledSeq) {
+                // SURFACE_TO_CACHE *reads* the surface, so it must see a fully-settled surface: not just
+                // "every decode queued before me landed" (its barrier) but "no decode is in flight at all".
+                // A long-queued cache op can otherwise drain when its own barrier is met while a NEWER
+                // decode — submitted after it was queued, carrying the very content for its rect — is still
+                // running, snapshotting black. Hold it until the pipeline quiesces; the next settle retries.
+                if (this._orderedQueue[0].cmdId === RDPGFX_CMDID_SURFACETOCACHE &&
+                    this._decodeSettledSeq < this._decodeSeq) {
+                    break;
+                }
+                const cmd = this._orderedQueue.shift();
+                this._dispatchNow(cmd.cmdId, cmd.body);
+            }
+        } while (this._drainAgain);
+    } finally {
+        this._draining = false;
     }
 };
 
@@ -606,7 +631,13 @@ RdpGfx.prototype._makeSurfaceRecord = function (width, height, pixelFormat) {
     const canvas = (typeof OffscreenCanvas !== "undefined")
         ? new OffscreenCanvas(width, height)
         : Object.assign(document.createElement("canvas"), { width: width, height: height });
-    const ctx = canvas.getContext("2d", { alpha: false });
+    // willReadFrequently: surface canvases are read back regularly — ClearCodec re-snapshots its glyph from
+    // the composed destination (_finishClear) and the always-on black-cache detection scans cache source
+    // rects (_scanBlack). Without the hint the browser keeps the canvas GPU-backed and every getImageData
+    // forces a readback stall (Chrome logs "Multiple readback operations ... are faster with
+    // willReadFrequently"). A CPU-backed canvas is the right tradeoff here: our draws are putImageData /
+    // drawImage of decoded tiles, not GPU-heavy compositing.
+    const ctx = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
     return { width, height, canvas, ctx, pixelFormat, touched: false };
 };
 

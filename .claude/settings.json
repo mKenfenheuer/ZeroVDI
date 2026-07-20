@@ -3,7 +3,8 @@
     "allow": [
       "Bash(npm run *)",
       "Skill(run)",
-      "Skill(run:*)"
+      "Skill(run:*)",
+      "Bash(node -e \"new Function\\(require\\('fs'\\).readFileSync\\('KSol.ZeroVDI/wwwroot/lib/rdpweb/rdpgfx.js','utf8'\\)\\)\")"
     ]
   }
 }
