@@ -1469,21 +1469,29 @@ RdpGfx.prototype._onSurfaceToCache = function (r) {
         const isEdge = (left <= 0) || (top <= 0) || (bottom >= (this.outputHeight || 1e9)) || (right >= (this.outputWidth || 1e9));
         slot.snapBlack = !isEdge && this._scanBlack(surf, { left: left, top: top, right: right, bottom: bottom }).black;
         if (slot.snapBlack) {
-            // Distinguish an ORDERING bug from a MISSING-content bug: report whether an async decode was
-            // still in flight at snapshot time (decodeSeq > settledSeq) or any op is queued behind the
-            // barrier. If in-flight/queued, the barrier failed to hold this SURFACE_TO_CACHE and we cached
-            // black too early (ordering). If NOT (fully settled, empty queue), the host cached a region
-            // whose content we never painted at all (missing/dropped content upstream).
+            // Distinguish an ORDERING bug from a MISSING-content bug from expected PRIMING. inflight
+            // (decodeSeq > settledSeq) is the only real ordering signal — the drain loop in
+            // _decodeSettled already refuses to dispatch a queued SURFACE_TO_CACHE until settledSeq ===
+            // decodeSeq (see the SURFACETOCACHE check there), so by the time we get here inflight is
+            // structurally always 0; this is a defensive check, not the common case. orderedQueue.length
+            // is NOT a signal: it's measured after this op was already dequeued from a FIFO drain, so
+            // during any backlog burst it's nonzero for every item except the last purely as an artifact
+            // of batch draining — using it here used to mislabel ordinary backlog as "ORDERING" on every
+            // single black snapshot in a burst, even fully-settled ones (see conversation/log evidence:
+            // inflightDecodes=0 on every reported line). Separately, a surface that has never received
+            // ANY real content yet (surf.touched false) caching black from itself is the host priming its
+            // GFX cache from a still-blank canvas at connect — expected, not a bug — so it gets its own
+            // label instead of alarming as MISSING.
             const inflight = this._decodeSeq - this._decodeSettledSeq;
-            const headBarrier = this._orderedQueue.length ? this._orderedQueue[0].barrier : null;
             this._diagLog("rdpgfx: [DIAG] SURFACE_TO_CACHE slot=" + cacheSlot + " snapshotted BLACK from surface=" +
                 surfaceId + " rect=[" + left + "," + top + "," + right + "," + bottom + "]" +
-                " inflightDecodes=" + inflight + " queuedOps=" + this._orderedQueue.length +
-                " decodeSeq=" + this._decodeSeq + " settledSeq=" + this._decodeSettledSeq +
-                " queueHeadBarrier=" + headBarrier +
-                (inflight > 0 || this._orderedQueue.length
+                " inflightDecodes=" + inflight + " decodeSeq=" + this._decodeSeq +
+                " settledSeq=" + this._decodeSettledSeq + " surfTouched=" + !!surf.touched +
+                (inflight > 0
                     ? " — ORDERING: barrier let SURFACE_TO_CACHE snapshot before content painted"
-                    : " — MISSING: no decode pending, host cached a region we never painted (dropped content)"));
+                    : !surf.touched
+                        ? " — PRIMING: surface has no real content yet (host caching from blank canvas at connect — expected)"
+                        : " — MISSING: no decode pending, host cached a region we never painted (dropped content)"));
         }
     }
 };
