@@ -445,6 +445,16 @@ RdpGfx.prototype._onAvcUnsupported = function (reason) {
 // WebCodecs, locked-down Firefox, anything without WebCodecs at all) is steered to RemoteFX Progressive
 // up front instead of negotiating AVC and then dropping every frame. Accept either High or Main profile
 // (RDP hosts emit both); the config mirrors the annexb, no-description setup decode-worker.js uses.
+// CPU-backed GFX surfaces (see _makeSurfaceRecord). WebKit only, unless overridden for A/B testing via
+// window.RDP_GFX_CPU_SURFACES = true|false. Chromium/Gecko keep their canvas command stream coherent
+// between putImageData and a later drawImage-as-source, so they get the GPU-backed surface.
+RdpGfx.cpuSurfaces = (function () {
+    if (typeof window === "undefined") return false;
+    if (typeof window.RDP_GFX_CPU_SURFACES === "boolean") return window.RDP_GFX_CPU_SURFACES;
+    const ua = (navigator && navigator.userAgent) || "";
+    return /AppleWebKit/.test(ua) && !/Chrome|Chromium|CriOS|Edg|OPR|Firefox|FxiOS/.test(ua);
+})();
+
 RdpGfx.avcSupported = null; // null = unknown (still probing), else true/false
 RdpGfx.probeAvc = function () {
     if (typeof VideoDecoder === "undefined") {
@@ -710,13 +720,18 @@ RdpGfx.prototype._makeSurfaceRecord = function (width, height, pixelFormat) {
     const canvas = (typeof OffscreenCanvas !== "undefined")
         ? new OffscreenCanvas(width, height)
         : Object.assign(document.createElement("canvas"), { width: width, height: height });
-    // NO willReadFrequently: that hint pins the canvas to CPU memory, and then every drawImage(VideoFrame)
-    // into it is a GPU→CPU readback plus a colour conversion, every blit OUT of it to the visible canvas is
-    // a CPU→GPU upload, and (on WebKit) every putImageData after a blit copies the whole backing store.
-    // Surfaces are written by putImageData/drawImage and read back only in two rare places — a ClearCodec
-    // glyph with uncovered pixels (_finishClear, ≤1024 px) and the RDP_GFX_DIAG black-cache scan — which
-    // is far cheaper than paying a readback for every frame.
-    const ctx = canvas.getContext("2d", { alpha: false });
+    // Surface backing store. GPU-backed (no willReadFrequently) is the fast choice: drawImage(VideoFrame)
+    // into it is a GPU-side copy, the coalesced blit out of it is GPU→GPU, and the two remaining readbacks
+    // (ClearCodec glyph with uncovered pixels, RDP_GFX_DIAG scans) are rare. BUT WebKit's accelerated
+    // OffscreenCanvas is not read-coherent: a putImageData (progressive tiles, uncompressed rects) is
+    // queued on the GPU side and a drawImage that uses the canvas as a SOURCE — the output blit,
+    // SURFACE_TO_SURFACE window moves, SURFACE_TO_CACHE snapshots, the ClearCodec scratch composite — can
+    // sample the previous flushed backing store. Live symptom (v0.6.37/38): progressive tiles duplicated
+    // and offset, ClearCodec rects black, cache slots snapshotted stale. So on WebKit the surface stays
+    // CPU-backed (willReadFrequently), where every write and read go through the same buffer. That costs
+    // one upload per flush, not per tile — the per-tile blit storm was the actual Safari perf problem and
+    // the coalesced dirty flush already fixes it independently of the backing store.
+    const ctx = canvas.getContext("2d", RdpGfx.cpuSurfaces ? { alpha: false, willReadFrequently: true } : { alpha: false });
     return { width, height, canvas, ctx, pixelFormat, touched: false, dirty: null };
 };
 
@@ -1303,7 +1318,9 @@ RdpGfx.prototype._finishClear = function (surfaceId, surf, msg) {
             this._clearScratch = (typeof OffscreenCanvas !== "undefined")
                 ? new OffscreenCanvas(cw, ch)
                 : Object.assign(document.createElement("canvas"), { width: cw, height: ch });
-            this._clearScratchCtx = this._clearScratch.getContext("2d"); // alpha:true — carries the coverage mask
+            // alpha:true — carries the coverage mask. Same WebKit read-coherence rule as the surfaces: the
+            // scratch is putImageData'd and immediately used as a drawImage source (see _makeSurfaceRecord).
+            this._clearScratchCtx = this._clearScratch.getContext("2d", RdpGfx.cpuSurfaces ? { willReadFrequently: true } : {});
         }
         this._clearScratchCtx.putImageData(new ImageData(rgba, w, h), 0, 0);
         surf.ctx.drawImage(this._clearScratch, 0, 0, w, h, msg.rect.left, msg.rect.top, w, h);
@@ -1345,16 +1362,41 @@ RdpGfx.prototype.onDecodedFrame = function (surfaceId, frame, regions) {
         if (frame.close) frame.close();
         return;
     }
-    // Draw the WHOLE coded frame at 0,0 and mark the whole frame dirty — never a source sub-rect. WebKit
-    // (Safari) mishandles the 9-argument drawImage(VideoFrame, sx, sy, sw, sh, dx, dy, dw, dh) form: it
-    // ignores the source rect and squeezes the entire frame into the destination rect, so per-region
-    // copies rendered the full desktop scaled into every changed tile (v0.6.37 regression). The full-frame
-    // draw is a single GPU-side copy and the output blit is coalesced to one drawImage per flush anyway.
-    void regions; // the AVC420 metablock rects are advisory here; the decoded frame is the surface's truth
+    // Honour the AVC420 metablock region rects ([MS-RDPEGFX] 2.2.4.4): the host encodes ONLY those rects;
+    // the rest of the coded frame is undefined (black on the first keyframe, stale afterwards), and on a
+    // mixed ClearCodec/H.264 surface (the "clearcodec" capset also carries AVC420) stamping the whole
+    // frame blacks out everything the other codec painted — the "black desktop at session start". Copying
+    // the rects with the 9-argument drawImage(VideoFrame, sx, sy, sw, sh, …) is NOT an option: WebKit
+    // ignores the source rect and squeezes the entire frame into every destination rect (v0.6.37
+    // regression). So draw the whole frame ONCE through a clip path made of the region rects — a single
+    // GPU-side draw, pixel-exact on every engine. No rects → the whole coded frame.
+    const rects = [];
+    if (regions && regions.length) {
+        for (const rc of regions) {
+            const l = Math.max(0, rc.left | 0), t = Math.max(0, rc.top | 0);
+            const r = Math.min(cw, rc.right | 0), b = Math.min(ch, rc.bottom | 0);
+            if (r > l && b > t) rects.push({ left: l, top: t, right: r, bottom: b });
+        }
+        if (!rects.length) { if (frame.close) frame.close(); return; } // nothing visible in this update
+    }
     const self = this;
     const paint = function (src) {
-        surf.ctx.drawImage(src, 0, 0, cw, ch);
-        self._afterSurfaceUpdate(surfaceId, surf, [{ left: 0, top: 0, right: cw, bottom: ch }]);
+        const ctx = surf.ctx;
+        if (!rects.length) {
+            ctx.drawImage(src, 0, 0, cw, ch);
+            self._afterSurfaceUpdate(surfaceId, surf, [{ left: 0, top: 0, right: cw, bottom: ch }]);
+            return;
+        }
+        ctx.save();
+        try {
+            ctx.beginPath();
+            for (const rc of rects) ctx.rect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
+            ctx.clip();
+            ctx.drawImage(src, 0, 0, cw, ch);
+        } finally {
+            ctx.restore();
+        }
+        self._afterSurfaceUpdate(surfaceId, surf, rects);
     };
 
     // Fast path: Canvas2D accepts a VideoFrame as an image source on every current engine (Chrome/Edge/

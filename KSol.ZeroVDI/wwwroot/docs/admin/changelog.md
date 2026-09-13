@@ -7,6 +7,27 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.39] — 2026-09-13 — WebKit surface coherence fix
+
+### Fixed
+- **RemoteFX Progressive garbled and ClearCodec black rects in Safari after 0.6.37.** 0.6.37 made the
+  GFX surface canvases GPU-backed (dropped `willReadFrequently`). WebKit's accelerated OffscreenCanvas
+  is not read-coherent: a `putImageData` (progressive tiles) is queued on the GPU side, and a later
+  `drawImage` that uses the surface as a *source* — the coalesced output blit, SURFACE_TO_SURFACE window
+  moves, SURFACE_TO_CACHE snapshots, the ClearCodec scratch composite and glyph readback — can sample the
+  previous backing store. Result: duplicated/offset window fragments, black ClearCodec rects, stale cache
+  slots replayed. Surfaces are now CPU-backed on WebKit only (`RdpGfx.cpuSurfaces`, override with
+  `window.RDP_GFX_CPU_SURFACES`); Chromium and Firefox keep the GPU-backed surface. The coalesced
+  per-surface blit, deferred frame acknowledgements and H.264 probe from 0.6.37 are all retained — the
+  per-tile blit storm was the real Safari cost and is fixed by coalescing regardless of backing store.
+- **Black desktop at session start in ClearCodec mode.** The "clearcodec" capset also advertises AVC420,
+  so Windows opens with H.264 keyframes. The host encodes only the metablock region rects; the rest of
+  the coded frame is black on a keyframe and stale afterwards. 0.6.38's full-frame draw stamped that over
+  everything ClearCodec had painted. The region rects are honoured again, now through a clip path around
+  a single full-frame draw instead of the per-rect source-sub-rect copy that WebKit mishandles.
+
+---
+
 ## [0.6.38] — 2026-09-13 — H.264 rendering regression fix
 
 ### Fixed
