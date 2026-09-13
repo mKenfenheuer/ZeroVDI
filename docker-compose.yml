@@ -1,31 +1,41 @@
+# ZeroVDI — reference stack.
+#
+# Quick start:
+#   1. cp .env.example .env   and set at least DataProtection__MasterKeyPassphrase and App__PublicBaseUrl
+#   2. docker compose up -d
+#   3. docker compose logs ksol-zerovdi-app | grep "Bootstrapped initial admin"
+#
+# Put a TLS-terminating reverse proxy in front of this (nginx, Caddy, Traefik) and forward the
+# Upgrade/Connection headers — the console relay is a WebSocket.
+
 services:
   ksol-zerovdi-app:
     container_name: "ksol-zerovdi-app"
-    image: ${APP_IMAGE}
+    image: ${APP_IMAGE:-ghcr.io/mkenfenheuer/ksol-zerovdi:latest}
+    restart: "unless-stopped"
+    ports:
+      - "${ZEROVDI_PORT:-8080}:8080"
     environment:
-      - "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-      # With network_mode: host the container binds directly on the host, so listen
-      # on the published port (8084) rather than the image's default 8080.
-      - "ASPNETCORE_HTTP_PORTS=8084"
-      - "DOTNET_RUNNING_IN_CONTAINER=true"
       - "ASPNETCORE_ENVIRONMENT=Production"
-      # Encrypts the credential keyring at rest (stored VM/IPMI/SSH secrets). Sourced from the
-      # DataProtection__MasterKeyPassphrase GitLab CI/CD variable, exported by the deploy job.
-      # The app refuses to start in Production if this is empty.
-      - "DataProtection__MasterKeyPassphrase=${DataProtection__MasterKeyPassphrase}"
-      # The public address users reach ZeroVDI on. Password-reset / e-mail-change links and the
-      # OpenID Connect redirect URI are built from it instead of the request's Host header, which a
-      # forged request could otherwise point at an attacker's site.
-      - "App__PublicBaseUrl=${App__PublicBaseUrl}"
-    # Host networking so the Wake-on-LAN magic packet broadcast (255.255.255.255)
-    # reaches the physical LAN. In a bridged network the broadcast is trapped in the
-    # container's isolated subnet and never hits the target machine.
-    network_mode: "host"
-    restart: "always"
-    # Runs as UID 1654 (set in the image). The bind mount below must be owned by it:
-    #   chown -R 1654:1654 /mnt/data/rdpgw
+      # REQUIRED in production: encrypts the credential keyring at rest (stored VM/IPMI/SSH secrets).
+      # The app refuses to start without it. Back it up — losing it makes every stored credential and
+      # every encrypted recording unrecoverable.
+      - "DataProtection__MasterKeyPassphrase=${DataProtection__MasterKeyPassphrase:?set this in .env}"
+      # The address users reach ZeroVDI on. Password-reset / e-mail-change links and the OpenID Connect
+      # redirect URI are built from it instead of the request's Host header, which a forged request
+      # could otherwise point at someone else's site.
+      - "App__PublicBaseUrl=${App__PublicBaseUrl:-}"
+      - "AllowedHosts=${AllowedHosts:-*}"
+      # Optional: pin the first administrator. Without a password one is generated and logged once.
+      - "Bootstrap__AdminEmail=${Bootstrap__AdminEmail:-admin@example.com}"
+      - "Bootstrap__AdminPassword=${Bootstrap__AdminPassword:-}"
+      # Behind a reverse proxy, name it here so the audit log and rate limiting see real client IPs.
+      - "ForwardedHeaders__KnownProxies=${ForwardedHeaders__KnownProxies:-}"
     volumes:
-      - "/mnt/data/rdpgw:/app/Data"
+      # The SQLite database, the DataProtection keyring and the session recordings. Back this up.
+      # The container runs as UID 1654; a host bind mount must be owned by it
+      # (chown -R 1654:1654 /path), a named volume like this one needs nothing.
+      - "zerovdi-data:/app/Data"
     security_opt:
       # A compromised process must not be able to gain privileges through a setuid binary.
       - "no-new-privileges:true"
@@ -36,7 +46,7 @@ services:
       # the gateway does is ordinary TCP/UDP.
       - NET_RAW
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8084/healthz"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/healthz"]
       interval: 30s
       timeout: 5s
       start_period: 40s
@@ -47,20 +57,36 @@ services:
         max-size: "20m"
         max-file: "5"
 
+    # --- Wake-on-LAN ------------------------------------------------------------------------------
+    # Waking a physical machine sends a broadcast to 255.255.255.255, which a bridged container
+    # network traps in its own subnet. If you publish physical hosts and want WoL, replace the `ports`
+    # block above with host networking and set ASPNETCORE_HTTP_PORTS to the port you want to bind:
+    #
+    #   network_mode: "host"
+    #   environment:
+    #     - "ASPNETCORE_HTTP_PORTS=8080"
+    #
+    # Everything else, including the health check, stays as it is.
+
+  # Optional. Deploy one connector near any network the gateway cannot reach directly; it holds an
+  # outbound WebSocket to the gateway and tunnels desktop connections back through it. Remove this
+  # service entirely if every desktop is directly reachable.
   ksol-zerovdi-connector:
     container_name: "ksol-zerovdi-connector"
-    image: ${CONNECTOR_IMAGE}
+    image: ${CONNECTOR_IMAGE:-ghcr.io/mkenfenheuer/ksol-zerovdi/connector:latest}
+    restart: "unless-stopped"
+    profiles: ["connector"]
     environment:
       - "ASPNETCORE_ENVIRONMENT=Production"
-      # Gateway URL and enrollment come from GitLab CI/CD variables (exported by the deploy job).
-      # Supply either ZEROVDI_AUTH_TOKEN (stateless) or ZEROVDI_REGISTRATION_TOKEN (self-enrolls on
-      # first boot and persists to the mounted volume).
-      - "ZEROVDI_URL=${ZEROVDI_URL}"
-      - "ZEROVDI_AUTH_TOKEN=${ZEROVDI_AUTH_TOKEN}"
-      - "ZEROVDI_REGISTRATION_TOKEN=${ZEROVDI_REGISTRATION_TOKEN}"
-    restart: "always"
+      # The gateway's base URL, plus ONE of:
+      #   ZEROVDI_AUTH_TOKEN          a long-lived token — fully stateless, no volume needed
+      #   ZEROVDI_REGISTRATION_TOKEN  a one-time token from Admin -> Connectors — self-enrols on first
+      #                               boot and persists the result to the volume below
+      - "ZEROVDI_URL=${ZEROVDI_URL:-}"
+      - "ZEROVDI_AUTH_TOKEN=${ZEROVDI_AUTH_TOKEN:-}"
+      - "ZEROVDI_REGISTRATION_TOKEN=${ZEROVDI_REGISTRATION_TOKEN:-}"
     volumes:
-      - "/mnt/data/rdpgw-connector:/data"
+      - "zerovdi-connector-data:/data"
     security_opt:
       - "no-new-privileges:true"
     logging:
@@ -68,3 +94,7 @@ services:
       options:
         max-size: "20m"
         max-file: "5"
+
+volumes:
+  zerovdi-data:
+  zerovdi-connector-data:

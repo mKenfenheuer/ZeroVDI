@@ -1,99 +1,181 @@
-![ZeroVDI](KSol.ZeroVDI/wwwroot/img/zerovdi-logo.svg "ZeroVDI")
+<p align="center">
+  <img src="KSol.ZeroVDI/wwwroot/img/zerovdi-logo.svg" alt="ZeroVDI" height="72">
+</p>
+
+<p align="center">
+  <strong>Virtual desktops in a browser tab. No client. No plugin. No agent. No <code>.rdp</code> file.</strong>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Source--Available-blue"></a>
+  <a href="../../actions/workflows/ci.yml"><img alt="Build &amp; test" src="https://img.shields.io/github/actions/workflow/status/mkenfenheuer/ksol-zerovdi/ci.yml?label=build%20%26%20test"></a>
+  <a href="../../pkgs/container/ksol-zerovdi"><img alt="Container image" src="https://img.shields.io/badge/ghcr.io-ksol--zerovdi-1f6feb"></a>
+  <img alt="Last commit" src="https://img.shields.io/github/last-commit/mkenfenheuer/ksol-zerovdi/main">
+</p>
 
 ---
 
-![GitHub License](https://img.shields.io/github/license/mkenfenheuer/ksol-zerovdi)
-![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/mkenfenheuer/ksol-zerovdi/docker-publish.yml)
-![GitHub last commit (branch)](https://img.shields.io/github/last-commit/mkenfenheuer/ksol-zerovdi/main)
+**ZeroVDI** is a self-hosted VDI platform for **Proxmox VE**. It brokers Windows and Linux desktops
+and delivers them straight into the browser — the RDP stream is decoded live in JavaScript over a
+WebSocket, so a user needs nothing but a tab and a login.
 
-**ZeroVDI** is a self-hosted, **fully browser-based virtual-desktop (VDI) platform** built
-on ASP.NET Core and Proxmox VE. It publishes Windows and Linux desktops to your users
-through a **pure web console — no client, no plugin, no agent, no downloaded file** — while
-centrally enforcing access, device policy, and a complete, tamper-evident audit trail.
+It is not a wrapper around FreeRDP or a `guacd` front end. The RDP client is implemented from the
+wire up, in C# on the gateway and in JavaScript in the browser: RemoteFX Progressive and H.264
+(WebCodecs) decoding, dynamic virtual channels, clipboard, audio, microphone, camera, NLA/CredSSP
+with host-certificate pinning, and server redirection all live in this repository.
 
----
+```
+┌──────────┐   HTTPS + WSS   ┌───────────────┐   RDP / TLS + NLA   ┌──────────────┐
+│ Browser  │ ──────────────► │ ZeroVDI       │ ──────────────────► │ Windows /    │
+│ console  │ ◄────────────── │ gateway       │ ◄────────────────── │ Linux desktop│
+└──────────┘                 └───────┬───────┘                     └──────────────┘
+                                     │ API                    ┌──────────────┐
+                                     └───────────────────────►│ Proxmox VE   │
+                                       clone · start · stop   └──────────────┘
+```
 
-## What it does
+## What you get
 
-- **Browser-native desktop console.** Connect to any authorized desktop straight from the
-  web UI. The remote-desktop stream (including RemoteFX Progressive and H.264) is decoded
-  live in the browser over WebSocket — clipboard, audio, HiDPI scaling, and dynamic
-  resolution included.
-- **VDI desktop pools.** Broker automatically-provisioned desktops cloned from a Proxmox
-  template. Supports dedicated and floating assignment, per-user and per-group scoping,
-  and lazy on-connect provisioning.
-- **Publish individual machines.** Expose a single existing VM or physical host as an RDP
-  resource, with credentials injected server-side.
-- **Access control.** Authorization is the union of direct grants and group membership,
-  managed on both the user and the resource pages.
-- **Device & security policy.** Centrally gate clipboard, drive, printer, camera, and
-  other redirections; enforce MFA.
-- **Session management & recordings.** See who is connected in real time; record sessions
-  for compliance review (Admin/Auditor-only).
-- **Tamper-evident audit log** of who connected to what, and when.
-- **Appearance & branding** of the console for your organization.
+**For the people using it**
+- A desktop in a browser tab — clipboard, sound, microphone, camera, HiDPI, and a resolution that
+  follows the window.
+- Nothing to install, nothing to download, nothing to configure. An optional Electron desktop app
+  exists for people who want a window without browser chrome.
+- Reconnects on its own after a network blip, keeping the last frame on screen instead of a black one.
 
-Everything runs in the browser — there is no client, plugin, agent, or `.rdp` file for
-end users to install.
+**For the people running it**
+- **Desktop pools** — clone from a Proxmox template on first connect, per-user or per-group, with a
+  reconciler that cleans up after interrupted provisioning instead of leaving desktops stuck.
+- **Publish individual machines** — an existing VM or a physical host, woken by Wake-on-LAN and put
+  back to sleep when idle.
+- **Connectors** — a small agent deployed inside an isolated network; it dials out to the gateway and
+  tunnels desktop connections back, so no inbound firewall rule is needed.
+- **Access control** as the union of direct grants and group membership, editable from either side.
+- **Single sign-on** against any OpenID Connect provider, with directory groups driving who gets which
+  desktops.
+- **Device policy** enforced in the protocol, not just the UI: a modified client cannot turn the
+  clipboard, audio, microphone or camera back on.
+- **MFA** (authenticator app or e-mail) with an enrolment policy you set.
+- **Session recording** with encryption at rest, a tamper-evident hash chain, and retention rules.
+- **An audit trail** of who connected to what, when, and from where — plus every administrative action.
+- **An operations page** that tells you whether the background workers are alive and lets you test
+  SMTP, your identity provider and every Proxmox backend from one screen.
 
-## Components
+## Quick start
 
-| Component | Description |
-|---|---|
-| **KSol.ZeroVDI** | The gateway web application — console, broker, admin UI, API. |
-| **KSol.ZeroVDI.Connector** | A lightweight agent deployed near your backends. It enrolls with the gateway and proxies connections into networks the gateway cannot reach directly. |
-
-Built on **.NET 9 / ASP.NET Core**, backed by **SQLite** and **Proxmox VE**.
-
-## Deployment
-
-ZeroVDI ships as container images and is deployed with Docker Compose. See
-[`docker-compose.yml`](docker-compose.yml) for the reference stack (gateway + connector).
+You need Docker, and a Proxmox VE cluster with an API token.
 
 ```bash
+git clone https://github.com/mkenfenheuer/ksol-zerovdi.git
+cd ksol-zerovdi
+cp .env.example .env
+
+# Generate the passphrase that protects every stored credential, and put it in .env
+openssl rand -base64 48
+
 docker compose up -d
 ```
 
-Full setup guides live in the in-app documentation under **Admin → Docs**
-(installation, configuration, architecture) or in
-[`KSol.ZeroVDI/wwwroot/docs/admin/`](KSol.ZeroVDI/wwwroot/docs/admin/).
+Then:
 
-## Required security configuration
+1. Find the generated administrator password — it is printed **once**:
+   ```bash
+   docker compose logs ksol-zerovdi-app | grep "Bootstrapped initial admin"
+   ```
+2. Open `http://localhost:8080`, sign in as `admin@example.com`, and change the password.
+3. **Admin → Backends** — add your Proxmox cluster (host, API token id and secret).
+4. **Admin → Resources** — publish a machine, or **Admin → VDI pools** to clone desktops from a
+   template on demand.
+5. **Admin → Users** — create an account and grant it the resource. Sign in as that user and connect.
 
-Before deploying, set these environment variables (shown in Docker `__` form):
+Two things to do before anyone else uses it:
 
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `DataProtection__MasterKeyPassphrase` | **Yes (Production)** | Strong secret that encrypts the credential keyring **at rest** (AES-256-GCM). All stored VM/IPMI/SSH credentials are sealed with the DataProtection keyring, and the keyring itself is encrypted with this passphrase. **The app refuses to start in Production without it.** Keep it out of source control and back it up — losing it makes stored credentials unrecoverable. |
-| `Bootstrap__AdminPassword` | Recommended | Password for the initial admin account on first run. If unset, a strong random password is generated and **logged once** at startup — capture it from the logs and change it immediately. There is no hardcoded default password. |
-| `Bootstrap__AdminEmail` | Optional | Username/email of the initial admin (default `admin@example.com`). |
-| `ForwardedHeaders__KnownProxies` / `ForwardedHeaders__KnownNetworks` | Recommended behind a proxy | Trusted reverse-proxy addresses (IPs or `cidr/prefix`). Only `X-Forwarded-*` headers from these hops are honored, preventing host-header / client-IP spoofing. Defaults to trusting loopback only; set `ForwardedHeaders__TrustAllProxies=true` only if the app is reachable solely through the proxy. |
+- Put a **TLS-terminating reverse proxy** in front of it and forward the `Upgrade`/`Connection`
+  headers — the console is a WebSocket. Then set `App__PublicBaseUrl` and `AllowedHosts` in `.env`.
+- **Back up the `zerovdi-data` volume.** It holds the database *and* the encryption keyring. Without
+  the keyring, every stored credential and every encrypted recording is gone.
 
-The connector agent authenticates to the gateway with either `ZEROVDI_AUTH_TOKEN`
-(stateless) or `ZEROVDI_REGISTRATION_TOKEN` (self-enrolls on first boot and persists to
-its mounted volume).
+Full guides live in the app itself under **Admin → Docs**, and in
+[`KSol.ZeroVDI/wwwroot/docs/admin/`](KSol.ZeroVDI/wwwroot/docs/admin/) —
+[installation](KSol.ZeroVDI/wwwroot/docs/admin/getting-started/installation.md),
+[configuration keys](KSol.ZeroVDI/wwwroot/docs/admin/reference/configuration-keys.md),
+[VDI pools](KSol.ZeroVDI/wwwroot/docs/admin/features/vdi-pools.md),
+[identity federation](KSol.ZeroVDI/wwwroot/docs/admin/features/identity-federation.md),
+[security](KSol.ZeroVDI/wwwroot/docs/admin/features/security.md).
 
-**Everything sensitive is encrypted at rest.** No secret is stored in a plaintext database
-column: stored VM/IPMI/SSH/Windows credentials, the per-user NTLM `NtHash`, and the Proxmox
-API token secret are all sealed with the keyring (which is itself encrypted with
-`DataProtection__MasterKeyPassphrase`). On first start after upgrading, any pre-existing
-plaintext `NtHash` / API secret is automatically encrypted in place (idempotent). User login
-passwords are stored only as the standard salted ASP.NET Identity hash.
+## Configuration you should not skip
+
+| Setting | Why |
+|---|---|
+| `DataProtection__MasterKeyPassphrase` | **Required in production.** Encrypts the credential keyring at rest. The app refuses to start without it. Back it up; losing it makes stored credentials unrecoverable. |
+| `App__PublicBaseUrl` | The address users type. Password-reset links and the OIDC redirect are built from it, so a forged `Host` header cannot point them somewhere else. |
+| `AllowedHosts` | Reject requests carrying any other `Host` header. |
+| `ForwardedHeaders__KnownProxies` | Your reverse proxy, so the audit log and rate limiting see real client IPs instead of the proxy's. |
+| `Bootstrap__AdminEmail` / `Bootstrap__AdminPassword` | The first administrator. Without a password, one is generated and logged once — there is no default password. |
+
+Everything else is in the
+[configuration keys reference](KSol.ZeroVDI/wwwroot/docs/admin/reference/configuration-keys.md).
+
+## What's in the repository
+
+| Path | What it is |
+|---|---|
+| `KSol.ZeroVDI/` | The gateway: web console, broker, admin UI, and the C# RDP implementation (`RDP/`). |
+| `KSol.ZeroVDI/wwwroot/lib/rdpweb/` | The browser RDP client — protocol, codecs, decode worker. |
+| `KSol.ZeroVDI/wwwroot/docs/` | The documentation the app serves under **Admin → Docs** and **Docs**. |
+| `KSol.ZeroVDI.Connector/` | The connector agent for networks the gateway cannot reach directly. |
+| `KSol.ZeroVDI.Desktop/` | The optional Electron shell around the console. |
+| `KSol.ZeroVDI.Tests/` | Unit tests for the protocol decoders and the security-critical policies. |
+| `Spec/` | Pointers to the Microsoft Open Specifications the protocol code cites. |
+
+Built on **.NET 9** (connector: .NET 10), **ASP.NET Core**, **EF Core / SQLite**, **Tailwind CSS**,
+and **Proxmox VE**.
+
+## Development
+
+```bash
+dotnet build KSol.ZeroVDI.sln -c Release
+dotnet test  KSol.ZeroVDI.sln -c Release
+dotnet run   --project KSol.ZeroVDI
+```
+
+The Tailwind bundle rebuilds automatically when Node is available; the compiled
+`wwwroot/css/app.css` is committed, so a machine without Node still builds (`npm ci` in
+`KSol.ZeroVDI/` if you want to work on the styles). Pass `-p:SkipTailwindBuild=true` on a build
+agent.
+
+Working on this with an AI coding agent? [`AGENTS.md`](AGENTS.md) explains the layout, the invariants
+that are easy to break, and how to validate a change.
+
+## Security
+
+ZeroVDI terminates RDP for a whole organisation, so it is built to be pointed at hostile input:
+the container runs unprivileged, the CSP allows no inline script, host certificates are pinned on
+first use, device policy is enforced in the protocol, and every dependency is checked for known
+vulnerabilities in CI.
+
+Found something? Please report it privately — see [`SECURITY.md`](SECURITY.md).
 
 ## License
 
-ZeroVDI is distributed under the **KSol.IT Non-Commercial License** — see [`LICENSE`](LICENSE).
+ZeroVDI is **source-available**, not open source. See [`LICENSE`](LICENSE).
 
-- **Free** for personal, private, and educational **non-commercial, non-enterprise** use.
-- **Commercial and enterprise use** (including internal business operations of any legal
-  entity), as well as any copying, modification, or redistribution, require a separate
-  license from KSol.IT.
+- **Free to deploy and run**, including in commercial and enterprise infrastructure, with no user
+  limit and no fee — an organisation running it to give its own users and administrators desktop
+  access needs no further permission.
+- **Not** free to modify, redistribute, resell, rebrand, or build another product out of — in whole
+  or in part.
 
-For commercial or enterprise licensing, contact **maximilian.kenfenheuer@ksol.it**.
+Need something the licence does not cover (a local change, an integration, redistribution)? Ask:
+**maximilian.kenfenheuer@ksol.it**. A contribution merged upstream is usually the better path for
+everyone, and pull requests are welcome.
 
 ## Support
 
-- Found a bug? Want to suggest a feature? Open an
-  [issue](https://github.com/mKenfenheuer/ksol-zerovdi/issues).
+- Bug or feature request → [open an issue](../../issues).
+- Security vulnerability → [`SECURITY.md`](SECURITY.md), not an issue.
+- Changes between versions → [`CHANGELOG.md`](CHANGELOG.md).
+
+---
 
 Copyright © 2026 KSol.IT. All rights reserved.

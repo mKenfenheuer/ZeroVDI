@@ -43,9 +43,15 @@ working until it re-registers.
 
 ## Deploying the agent
 
-The agent ships as the `KSol.ZeroVDI.Connector` container image (see the `ksol-rdpgw-connector`
-service in [`docker-compose.yml`](../../../../../docker-compose.yml)). It persists no state
-unless you give it a volume.
+The agent ships as a container image, `ghcr.io/mkenfenheuer/ksol-zerovdi/connector`. The reference
+`docker-compose.yml` in the repository root carries it as the `ksol-zerovdi-connector` service behind
+a profile, so it stays out of the way of deployments that do not need one:
+
+```bash
+docker compose --profile connector up -d
+```
+
+It persists no state unless you give it a volume.
 
 Configure it with environment variables:
 

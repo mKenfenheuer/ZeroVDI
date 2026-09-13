@@ -35,11 +35,22 @@ Both use the shared access-picker UI. There is no standalone authorizations CRUD
 Every grant and revoke is recorded in the [audit log](audit): `GroupAccessGranted/Revoked`,
 direct grant/revoke, group membership changes, and group lifecycle events.
 
-## Not yet available
+## Where the grants live
 
-External identity federation (AD/LDAP/OIDC group sync) is **not** implemented yet — groups are
-managed inside ZeroVDI.
+Granting and revoking happen on the two object pages above. There is also a read-only overview of
+every direct (user, resource) grant at `/admin/authorizations` — handy for an audit sweep, but it has
+no nav link and no edit actions on purpose, so each grant has exactly one place it is managed.
+
+## Federation
+
+Group membership can be driven by your identity provider instead of by hand: the provider's group
+claim is matched against ZeroVDI group **names**, and matching groups are joined automatically. Only
+memberships federation created are withdrawn again when the directory changes, so hand-made
+assignments are never touched. See [Identity federation](identity-federation).
+
+Direct LDAP/Active Directory binding (without an OIDC provider in front) is not implemented.
 
 ## Related
 
-- [Users & groups](../administration/users-and-groups) · [Roles](../reference/roles)
+- [Users & groups](../administration/users-and-groups) · [Roles](../reference/roles) ·
+  [Identity federation](identity-federation)

@@ -5,7 +5,9 @@ own hosting standards (reverse proxy, TLS termination, service supervision).
 
 ## Prerequisites
 
-- **.NET 9 runtime** (or SDK for building from source).
+- **.NET 9 runtime** to run the gateway. Building from source additionally needs the .NET 10 SDK —
+  the [connector agent](../features/connectors) targets it — or use the container image and need
+  neither.
 - A **Proxmox VE** cluster reachable from the ZeroVDI host, with an API token (see
   [Backends](../administration/backends)).
 - A reverse proxy terminating **HTTPS** in front of the app (nginx, Caddy, IIS, Traefik, …).
@@ -32,27 +34,58 @@ vulnerability audit, before any image is built.
 
 ## First run
 
-1. Set the required configuration (see [Configuration](configuration)), at minimum a master
-   passphrase and at least one Proxmox backend.
-2. Start the app. The SQLite database (`app.db`) is created/migrated automatically.
-3. Sign in with the seeded administrator account (or the account configured in your environment) and
-   immediately enrol MFA if your policy requires it.
+1. Set the required configuration (see [Configuration](configuration)) — at minimum
+   `DataProtection:MasterKeyPassphrase`, without which the app refuses to start in Production.
+2. Start the app. The SQLite database (`Data/app_db.sqlite` by default) is created and migrated
+   automatically, as is the DataProtection keyring beside it.
+3. Sign in as the initial administrator. Unless you set `Bootstrap:AdminPassword`, a strong random
+   password was generated and written to the log **once** at first start — take it from there:
+   ```bash
+   docker compose logs ksol-zerovdi-app | grep "Bootstrapped initial admin"
+   ```
+   Change it immediately, and enrol MFA (it is required for Admins by default).
 4. Add a [backend](../administration/backends), publish a [resource](../features/resources) or define
    a [VDI pool](../features/vdi-pools), and grant [access](../features/access-control).
+5. Open **Admin → [Operations](../administration/operations)** and check that the background workers
+   are healthy and the SMTP and backend tests pass.
 
 ## Running in a container
 
-The published image runs as the **unprivileged user 1654** and listens on **8080**. That matters for
-an existing deployment: a host bind mount carries its own ownership, so chown it once before
-upgrading, or the app cannot write its database, keyring or recordings.
+This is the intended deployment. The reference stack is in `docker-compose.yml` at the repository
+root, with every setting documented in `.env.example`:
 
 ```bash
-chown -R 1654:1654 /mnt/data/rdpgw
+cp .env.example .env
+openssl rand -base64 48        # put this in DataProtection__MasterKeyPassphrase
+docker compose up -d
+docker compose logs ksol-zerovdi-app | grep "Bootstrapped initial admin"
 ```
 
-The bundled `docker-compose.yml` additionally drops every Linux capability except `NET_RAW` — which
-the resource status probe needs for ICMP — sets `no-new-privileges`, caps the log files, and health-
-checks the container against `/healthz`.
+Images are published to the GitHub Container Registry and signed with
+[cosign](https://docs.sigstore.dev/):
+
+- `ghcr.io/mkenfenheuer/ksol-zerovdi` — the gateway
+- `ghcr.io/mkenfenheuer/ksol-zerovdi/connector` — the [connector agent](../features/connectors)
+  (start it with `docker compose --profile connector up -d`)
+
+Pin a version tag rather than `latest` if you want reproducible rollbacks (`APP_IMAGE` and
+`CONNECTOR_IMAGE` in `.env`).
+
+Both images run as the **unprivileged user 1654**, and the gateway listens on **8080**. That matters
+if you use a host bind mount instead of the named volume: the mount carries its own ownership, so
+chown it once, or the app cannot write its database, keyring or recordings.
+
+```bash
+chown -R 1654:1654 /path/to/zerovdi-data
+```
+
+The compose file additionally drops every Linux capability except `NET_RAW` — which the resource
+status probe needs for ICMP — sets `no-new-privileges`, caps the log files, and health-checks the
+container against `/healthz`.
+
+**Wake-on-LAN** needs host networking: the magic packet goes to `255.255.255.255`, which a bridged
+container network traps in its own subnet. If you publish physical machines, swap the `ports` block
+for `network_mode: "host"` as described in the comments in `docker-compose.yml`.
 
 `/healthz` is anonymous and deliberately shallow: it answers *is this process serving requests?*, not
 *is Proxmox reachable?* A probe that failed on a backend hiccup would have the orchestrator restart a

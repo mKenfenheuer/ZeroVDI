@@ -7,6 +7,68 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.45] — 2026-09-13 — Prepared for public release
+
+### Changed
+- **New licence.** The KSol.IT Non-Commercial License is replaced by the **KSol.IT Source-Available
+  License 2.0**. Any organisation — commercial ones included — may now deploy ZeroVDI in its own
+  infrastructure and use it to give its users and administrators desktop access, free of charge and
+  with no user limit. What remains reserved is modifying, redistributing, reselling, rebranding, or
+  building another product out of it or out of parts of it. Contributions are explicitly allowed to
+  modify the code for the purpose of submitting them.
+- **CI moved from GitLab to GitHub Actions.** `.gitlab-ci.yml` is gone. Three workflows replace it:
+  `ci.yml` (build, test and a NuGet vulnerability gate), `docker-publish.yml` (the gateway and
+  connector images to `ghcr.io`, cosign-signed, gated on tests, tagged from branches and `v*.*.*`
+  tags), and `desktop-release.yml` (the Electron client built natively on Windows, macOS and Linux
+  and attached to the GitHub release for a tag). The gateway image picks the newest released desktop
+  installers up automatically, so the in-app download menu keeps working.
+- **`docker-compose.yml` is now a working quick start** — named volumes, published port, pinned-or-
+  latest images from `ghcr.io`, and every setting documented in the new `.env.example`. The
+  host-networking variant needed for Wake-on-LAN is kept as inline guidance.
+- **The connector image runs unprivileged** (UID 1654), matching the gateway, and carries OCI labels.
+
+### Added
+- A rewritten [`Readme.md`](https://github.com/mkenfenheuer/ksol-zerovdi) aimed at someone who has
+  never seen the project: what it is, a five-minute quick start, the configuration that must not be
+  skipped, and a map of the repository.
+- `SECURITY.md` — private vulnerability reporting, what is in and out of scope, and the controls
+  already in place.
+- `CONTRIBUTING.md`, `AGENTS.md` and `CLAUDE.md` — how to build, test and validate a change, the
+  invariants that are easy to break (safe VM destruction, credentials never reaching the browser,
+  direction-keyed decoder state, the nonce CSP), and the changelog-plus-version discipline.
+
+### Removed
+- Internal deployment leftovers: the GitLab pipeline, the committed internal audit reports, tracked
+  `.DS_Store` files and local editor/agent settings.
+- The vendored copies of the Microsoft Open Specification documents. They are Microsoft's to publish,
+  and a stale copy in a third-party repository serves nobody; `Spec/README.md` now points at the
+  official pages for every document the protocol code cites. The files stay ignored rather than
+  deleted, so a working copy keeps them next to the source.
+
+### Fixed
+- `appsettings.json` shipped an internal SMTP relay address and sender domain, and set the
+  application's own log level to `Debug`. It now carries neutral placeholders, `Information`, and
+  commented `App` / `AllowedHosts` entries pointing at what has to be set for production.
+- **The bundled documentation was audited against the code and corrected.** What was wrong:
+  - Access control still said identity federation was "not implemented yet" (it landed in 0.6.39).
+  - The configuration page showed rate limiting with nested keys (`RateLimiting:Auth:PermitLimit`),
+    which the code has never read — the flat `AuthPermitLimit` form is authoritative.
+  - The backends page pointed at `/admin/proxmoxbackends`; the route is `/admin/backends`.
+  - Installation named the database `app.db`; it is `Data/app_db.sqlite`, and building from source now
+    also needs the .NET 10 SDK for the connector.
+  - The connectors page referenced a compose service (`ksol-rdpgw-connector`) and a file link that no
+    longer existed.
+  - The user guide's index advertised in-session **file** transfer, which ZeroVDI does not have.
+  - The audit page listed category names that are not in the enum.
+- Documentation added for what shipped without it: every configuration key the code actually reads
+  (`Smtp`, `DataProtection:KeysDir`, `Recording:Directory` / `DefaultEnabled` / `RetentionSweepHours`
+  / `FfmpegPath` / `MkvmergePath`, and the environment-only variables), e-mail MFA and single sign-on
+  in the *user* guide, the operations page and account-security actions in the role matrix, the
+  automatic session reconnect in troubleshooting, the backends' Kerberos fields, and the newer
+  services in the architecture overview.
+
+---
+
 ## [0.6.44] — 2026-09-13 — Container hardening, CI gate and a test project (audit finding 10)
 
 ### Security
@@ -35,10 +97,9 @@ All notable changes to ZeroVDI are recorded here. The format is based on
   does not — the false positive that used to tear down healthy sessions), the redirect-target rules,
   the device-policy channel guard including its fail-open behaviour, the account-lockout predicates,
   the public-URL precedence, the CSP nonce's freshness and entropy, and background-worker staleness.
-- **CI actually builds and tests.** The GitHub workflow gained a build/test job and a NuGet
-  vulnerability audit, and both image jobs now depend on tests passing — an image that is published
-  *and signed* without compiling cleanly is worse than no image. The GitLab pipeline gained the same
-  gate as a `test` stage ahead of `build`.
+- **CI actually builds and tests.** A build/test job and a NuGet vulnerability audit were added, and
+  both image jobs now depend on tests passing — an image that is published *and signed* without
+  compiling cleanly is worse than no image.
 - **`/healthz`** — an anonymous, deliberately shallow liveness endpoint for the container health check
   and orchestrators. It answers "is this process serving requests?", not "is Proxmox reachable?": a
   probe that failed on a backend hiccup would make the orchestrator restart a healthy gateway and drop

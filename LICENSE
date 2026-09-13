@@ -1,5 +1,5 @@
-KSol.IT Non-Commercial License
-Version 1.0
+KSol.IT Source-Available License
+Version 2.0
 
 Copyright (c) 2026 KSol.IT. All rights reserved.
 
@@ -8,64 +8,125 @@ This software and its associated source code, documentation, and other files
 ("Licensor"). By downloading, accessing, or using the Software, you (the
 "Licensee") agree to the terms of this License.
 
+In short: any organisation may deploy this software in its own infrastructure
+and use it to give its users and administrators virtual-desktop access, free of
+charge, without a user limit, commercial operations included. What you may not
+do is modify it, redistribute it, sell it, or build another product out of it
+or out of parts of it. The formal terms follow.
 
-1. GRANT OF LICENSE
+
+1. DEFINITIONS
+
+"Use" means installing, configuring, operating, and running the Software as
+supplied by the Licensor, without modification, within the Licensee's own
+infrastructure, and making its functionality available to the Licensee's own
+personnel, contractors, and users as part of the Licensee's own operations.
+Configuring the Software through its own settings, environment variables,
+administrative interface, branding options, and documented extension points is
+Use and is not modification.
+
+"Distribute" means to make the Software, or any part of it, available to any
+third party in any form — source or compiled, whole or partial, standalone or
+embedded — including by sale, licence, sublicence, rental, lease, loan,
+hosting for redistribution, bundling, or publication.
+
+"Derivative Work" means any work that is based upon, incorporates, adapts,
+translates, or is derived from the Software or any portion of it, including
+any product, library, service, or codebase into which any part of the Software
+has been copied or adapted.
+
+
+2. GRANT OF LICENSE
 
 Subject to the terms and conditions of this License, the Licensor grants the
-Licensee a limited, non-exclusive, non-transferable, revocable, royalty-free
-license to install and use the Software solely for personal, private,
-educational, or other non-commercial and non-enterprise purposes.
+Licensee a worldwide, non-exclusive, non-transferable, royalty-free license to:
 
+  (a) Use the Software for any purpose, including commercial and enterprise
+      purposes, without limitation on the number of users, servers, or
+      organizational units; and
 
-2. DEFINITIONS
+  (b) make copies of the Software as reasonably necessary for that Use,
+      including for backup, testing, staging, and disaster recovery.
 
-"Commercial Use" means any use of the Software that is primarily intended for
-or directed toward commercial advantage or monetary compensation, including
-but not limited to use in connection with a product or service offered for
-sale, use to generate revenue, or use in the operation of a business.
-
-"Enterprise Use" means any use of the Software by, on behalf of, or for the
-benefit of a company, corporation, partnership, government body, non-profit
-organization, or any other legal entity, including internal business
-operations, regardless of whether such use generates revenue.
+No fee is payable for the rights granted in this Section. The grant covers the
+Software as supplied by the Licensor; Section 3 governs modification.
 
 
 3. RESTRICTIONS
 
-Except to the extent expressly permitted under Section 1, or as separately and
-explicitly licensed in writing by the Licensor, the Licensee shall NOT:
+Except as separately and explicitly licensed in writing by the Licensor, the
+Licensee shall NOT:
 
-  (a) use the Software for any Commercial Use or Enterprise Use;
+  (a) Distribute the Software or any Derivative Work, whether or not for a
+      fee, and whether modified or unmodified;
 
-  (b) copy, reproduce, or distribute the Software, in whole or in part;
+  (b) incorporate the Software or any part of it — including source code,
+      protocol implementations, algorithms, or assets — into any other product,
+      library, service, or codebase that is Distributed or offered to third
+      parties;
 
-  (c) modify, adapt, translate, or create derivative works based upon the
-      Software;
+  (c) sell, resell, licence, sublicence, rent, lease, or lend the Software, or
+      offer the Software itself (as opposed to services the Licensee delivers
+      using it) as a product or as a hosted, managed, or white-labelled
+      offering to third parties;
 
-  (d) redistribute, sublicense, sell, rent, lease, lend, or otherwise transfer
-      the Software or any rights granted under this License to any third party;
+  (d) modify, adapt, translate, or create a Derivative Work of the Software, or
+      distribute modifications, patches, or forks of it, except as permitted by
+      Section 4 (Contributions);
 
-  (e) remove, alter, or obscure any copyright, trademark, or other proprietary
-      notices contained in or on the Software;
+  (e) remove, alter, or obscure any copyright, trademark, licence, or other
+      proprietary notice contained in or on the Software, or use the Licensor's
+      names, logos, or trademarks except to identify the Software accurately;
 
-  (f) reverse engineer, decompile, or disassemble the Software, except to the
-      extent such restriction is expressly prohibited by applicable law; or
+  (f) reverse engineer, decompile, or disassemble the compiled Software, except
+      to the extent such restriction is expressly prohibited by applicable law;
+      or
 
   (g) use the Software in any manner not expressly authorized by this License.
 
+For the avoidance of doubt: an organisation deploying the Software in its own
+infrastructure and using it to give its users and administrators virtual-desktop
+access is Use under Section 2(a), is permitted, and needs no further licence —
+whether or not that organisation is commercial, and whether or not the desktops
+support revenue-generating work. Providing the Software itself to a third party
+so that the third party operates it, reselling it, and building a competing or
+derivative product out of it or out of parts of it are not.
 
-4. COMMERCIAL AND ENTERPRISE LICENSING
 
-Any Commercial Use or Enterprise Use of the Software, and any use, copying,
-modification, or redistribution beyond the scope of Section 1, requires a
-separate commercial license obtained from the Licensor. To obtain such a
-license, please contact:
+4. CONTRIBUTIONS
+
+Notwithstanding Section 3(d), the Licensee may modify the Software solely for
+the purpose of preparing and submitting a contribution to the Licensor (for
+example as a pull request), and may run such a modification privately to develop
+and test it. By submitting a contribution, the Licensee grants the Licensor a
+perpetual, worldwide, irrevocable, royalty-free licence to use, reproduce,
+modify, sublicense, and distribute it as part of the Software, and confirms that
+the Licensee has the right to grant that licence. Submitting a contribution does
+not grant the Licensee any right to Distribute the Software or to run a modified
+version in production.
+
+
+5. ADDITIONAL LICENSING
+
+Any modification, Distribution, redistribution, sublicensing, embedding, or
+creation of a Derivative Work beyond the scope of Sections 2 and 4 requires a
+separate written licence from the Licensor. Organisations that need local
+changes — a custom integration, a bug fix they cannot wait for — are invited to
+ask; the Licensor would rather grant a licence or merge a contribution than have
+anyone in breach. To obtain one, please contact:
 
   KSol.IT
   Email: maximilian.kenfenheuer@ksol.it
 
 
-5. OWNERSHIP
+6. THIRD-PARTY COMPONENTS
+
+The Software includes third-party components distributed under their own
+licences. Those licences govern those components, and nothing in this License
+limits the rights granted by them.
+
+
+7. OWNERSHIP
 
 The Software is licensed, not sold. The Licensor retains all right, title, and
 interest in and to the Software, including all intellectual property rights
@@ -73,16 +134,16 @@ therein. No rights are granted to the Licensee other than those expressly set
 forth in this License.
 
 
-6. TERMINATION
+8. TERMINATION
 
-This License is effective until terminated. The Licensor may terminate this
-License at any time. This License, and the rights granted hereunder, will
-terminate automatically and immediately if the Licensee breaches any term of
-this License. Upon termination, the Licensee must cease all use of the Software
-and destroy all copies in their possession or control.
+This License is effective until terminated. It terminates automatically and
+immediately if the Licensee breaches any term of this License. Upon
+termination, the Licensee must cease all use of the Software and destroy all
+copies in their possession or control. Sections 3, 4, 7, 9, 10, and 11 survive
+termination.
 
 
-7. DISCLAIMER OF WARRANTY
+9. DISCLAIMER OF WARRANTY
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -90,7 +151,7 @@ FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. THE LICENSOR MAKES NO
 WARRANTY THAT THE SOFTWARE WILL BE ERROR-FREE OR OPERATE WITHOUT INTERRUPTION.
 
 
-8. LIMITATION OF LIABILITY
+10. LIMITATION OF LIABILITY
 
 IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM,
@@ -98,7 +159,7 @@ OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 
-9. GOVERNING LAW
+11. GOVERNING LAW
 
 This License shall be governed by and construed in accordance with the laws of
 the jurisdiction in which the Licensor is established, without regard to its

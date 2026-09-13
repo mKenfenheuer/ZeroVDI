@@ -404,7 +404,25 @@ FodyWeavers.xsd
 # JetBrains Rider
 *.sln.iml
 
+# --- ZeroVDI -------------------------------------------------------------------------------------
+
+# The SQLite database and its WAL/SHM sidecars.
 app_db.sqlite
 app_db.sqlite*
+
+# macOS Finder metadata.
+.DS_Store
+
+# Local agent/editor configuration. Shared instructions live in CLAUDE.md / AGENTS.md at the root.
+.claude/
+
+# Protocol stream dumps (RDPGW_DUMP_DIR) and captured sessions — decrypted session data, never commit.
 dump/**
-KSol.ZeroVDI/.DS_Store
+capture/
+
+# Microsoft Open Specification documents. Useful to keep next to the source while working on the
+# protocol code, but they are Microsoft's to publish — see Spec/README.md for the official links.
+Spec/[[]MS-*.md
+
+# Local environment for docker compose — holds the keyring passphrase.
+.env

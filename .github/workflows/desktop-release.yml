@@ -1,0 +1,132 @@
+name: Desktop client
+
+# Builds the Electron desktop client (a native shell around the web console) for Windows, macOS and
+# Linux. Each platform builds on its own runner: electron-builder can cross-build Windows from Linux
+# with Wine, but a DMG needs Apple's own tooling, and building each target natively also keeps the
+# artifacts comparable.
+#
+#   PR touching KSol.ZeroVDI.Desktop  → build, upload artifacts (90 days), publish nothing
+#   push of a v*.*.* tag              → build and attach the installers to the GitHub release
+#
+# The gateway image picks the newest released installers up automatically (see docker-publish.yml),
+# so the in-app "Download desktop app" menu serves them.
+#
+# The installers are UNSIGNED: signing needs an Apple Developer ID and a Windows code-signing
+# certificate, which this repository does not carry. Users will see the usual "unidentified
+# developer" / SmartScreen prompts. To sign, add the certificates as repository secrets and set
+# electron-builder's CSC_LINK / CSC_KEY_PASSWORD (and APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD /
+# APPLE_TEAM_ID for notarisation) on the matching matrix entries.
+
+on:
+  # A tag always builds and publishes. Note there is deliberately no `paths` filter here: path filters
+  # are evaluated against the pushed commits, and a tag push usually carries none, which would skip the
+  # release build exactly when it is wanted.
+  push:
+    tags: [ "v*.*.*" ]
+  # Changes to the desktop client are proven to build on all three platforms before they merge.
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'KSol.ZeroVDI.Desktop/**'
+      - '.github/workflows/desktop-release.yml'
+  # Lets installers be rebuilt on demand without touching the desktop sources.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: KSol.ZeroVDI.Desktop
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: --linux
+            artifact: ZeroVDI-Linux.AppImage
+            pattern: 'dist/*.AppImage'
+          - os: windows-latest
+            target: --win
+            artifact: ZeroVDI-Setup-Windows.exe
+            pattern: 'dist/*.exe'
+          - os: macos-latest
+            target: --mac
+            artifact: ZeroVDI-macOS.dmg
+            pattern: 'dist/*.dmg'
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: KSol.ZeroVDI.Desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # --publish never: this workflow attaches the artifacts itself, so electron-builder must not
+      # try to reach GitHub on its own.
+      - name: Build installer
+        run: npx electron-builder ${{ matrix.target }} --publish never
+
+      # electron-builder names files after the product and version; rename to the stable names the
+      # gateway's download menu links to.
+      - name: Normalise the artifact name
+        shell: bash
+        run: |
+          built=$(ls ${{ matrix.pattern }} | head -n 1)
+          if [ -z "$built" ]; then
+            echo "::error::electron-builder produced no ${{ matrix.pattern }}"
+            exit 1
+          fi
+          mv "$built" "dist/${{ matrix.artifact }}"
+          ls -la dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: KSol.ZeroVDI.Desktop/dist/${{ matrix.artifact }}
+          retention-days: 90
+          if-no-files-found: error
+
+  # Attach the three installers to the GitHub release for this tag, creating a draft release if the
+  # tag has none yet. Runs once, after every platform has built, so a release is never half-populated.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download built installers
+        uses: actions/download-artifact@v4
+        with:
+          path: KSol.ZeroVDI.Desktop/installers
+          merge-multiple: true
+
+      - name: Attach installers to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -la installers
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --draft --title "$TAG" \
+              --notes "Desktop client installers for $TAG. See the changelog for what changed."
+          fi
+          gh release upload "$TAG" installers/* --clobber
