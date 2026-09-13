@@ -3,21 +3,12 @@ using Microsoft.AspNetCore.Identity;
 namespace KSol.ZeroVDI.Models;
 
 /// <summary>
-/// Application user that, in addition to the standard ASP.NET Identity password hash, stores the
-/// NTLM NT hash derived from the plaintext password at set-time so the gateway's NLA/CredSSP
-/// man-in-the-middle can validate NTLMv2 responses without prompting the user for anything extra.
-///
-/// Populated automatically by <see cref="RDP.DerivingPasswordHasher"/> whenever a password is
-/// created, changed or reset.
+/// Application user. Only ASP.NET Identity's own salted password hash is stored — the gateway never
+/// needs a reversible or NTLM-usable form of the sign-in password, because it authenticates to RDP
+/// hosts with the per-resource credentials, not with the portal password.
 /// </summary>
 public class ApplicationUser : IdentityUser
 {
-    /// <summary>
-    /// NTLM NT hash = MD4(UTF16LE(password)), hex-encoded. Used to validate NTLMv2 responses.
-    /// Null until the user next sets a password.
-    /// </summary>
-    public string? NtHash { get; set; }
-
     /// <summary>
     /// Whether the user has enrolled email-based MFA (one-time codes sent to their account email).
     /// Identity's built-in <c>TwoFactorEnabled</c> is the master switch and the authenticator is keyed

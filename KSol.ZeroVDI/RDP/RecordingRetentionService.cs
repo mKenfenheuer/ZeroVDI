@@ -22,14 +22,20 @@ public sealed class RecordingRetentionService : BackgroundService
 {
     private readonly IServiceScopeFactory _scopes;
     private readonly IConfiguration _config;
+    /// <summary>Name this worker reports liveness under on the operations page.</summary>
+    private const string HeartbeatName = "Recording retention";
+    private readonly ServiceHeartbeats _heartbeats;
     private readonly ILogger<RecordingRetentionService> _logger;
 
     public RecordingRetentionService(IServiceScopeFactory scopes, IConfiguration config,
-        ILogger<RecordingRetentionService> logger)
+        ServiceHeartbeats heartbeats, ILogger<RecordingRetentionService> logger)
     {
         _scopes = scopes;
         _config = config;
+        _heartbeats = heartbeats;
         _logger = logger;
+        _heartbeats.Register(HeartbeatName,
+            TimeSpan.FromHours(Math.Max(1, config.GetValue("Recording:RetentionSweepHours", 6))));
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -40,8 +46,17 @@ public sealed class RecordingRetentionService : BackgroundService
 
         while (!ct.IsCancellationRequested)
         {
-            try { await SweepAsync(ct); }
-            catch (Exception ex) { _logger.LogWarning(ex, "RecordingRetentionService: sweep failed"); }
+            var interval = TimeSpan.FromHours(sweepHours);
+            try
+            {
+                await SweepAsync(ct);
+                _heartbeats.Success(HeartbeatName, interval);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "RecordingRetentionService: sweep failed");
+                _heartbeats.Failure(HeartbeatName, interval, ex.Message);
+            }
             try { await Task.Delay(TimeSpan.FromHours(sweepHours), ct); }
             catch (OperationCanceledException) { break; }
         }

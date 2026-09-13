@@ -209,7 +209,8 @@ public sealed class RdpRelaySession
         if (!_redirected && PolicyViolation == null && finished == toWs && _routingToken != null && _onRedirect != null)
         {
             _handoverContinue = true;
-            _onRedirect(RdpServerRedirection.FromToken(_routingToken, _redirectCreds?.user, _redirectCreds?.domain, _redirectCreds?.password));
+            _onRedirect(RdpServerRedirection.FromToken(_routingToken, _redirectCreds?.user,
+                _redirectCreds?.domain, _redirectCreds?.password, _host));
             _logger.LogInformation("RDP relay: host ended token-bearing session -> re-arming handover reconnect (token {Len}B)", _routingToken.Length);
             if (_ws.State == WebSocketState.Open)
             {

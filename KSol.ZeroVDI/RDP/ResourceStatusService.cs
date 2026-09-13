@@ -29,18 +29,24 @@ public class ResourceStatusService : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ProxmoxClient _proxmox;
     private readonly ProxmoxBackendProvider _backends;
+    /// <summary>Name this worker reports liveness under on the operations page.</summary>
+    private const string HeartbeatName = "Resource status probe";
+    private readonly ServiceHeartbeats _heartbeats;
     private readonly ILogger<ResourceStatusService> _logger;
 
     public ResourceStatusService(
         IServiceScopeFactory scopeFactory,
         ProxmoxClient proxmox,
         ProxmoxBackendProvider backends,
+        ServiceHeartbeats heartbeats,
         ILogger<ResourceStatusService> logger)
     {
         _scopeFactory = scopeFactory;
         _proxmox = proxmox;
         _backends = backends;
+        _heartbeats = heartbeats;
         _logger = logger;
+        _heartbeats.Register(HeartbeatName, ScanInterval);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -53,10 +59,15 @@ public class ResourceStatusService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            try { await ScanOnceAsync(stoppingToken); }
+            try
+            {
+                await ScanOnceAsync(stoppingToken);
+                _heartbeats.Success(HeartbeatName, ScanInterval);
+            }
             catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
             {
                 _logger.LogError(ex, "Resource status scan failed");
+                _heartbeats.Failure(HeartbeatName, ScanInterval, ex.Message);
             }
 
             try { await Task.Delay(ScanInterval, stoppingToken); }

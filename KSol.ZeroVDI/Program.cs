@@ -47,10 +47,10 @@ public class Program
         builder.Services.Configure<DataProtectionTokenProviderOptions>(o =>
             o.TokenLifespan = TimeSpan.FromMinutes(5));
 
-        // Replace the default password hasher with one that also derives the Digest HA1 and NTLM
-        // NT hash on every password set, enabling Digest and NTLM/Negotiate gateway auth without
-        // asking the user for anything extra.
-        builder.Services.AddScoped<IPasswordHasher<ApplicationUser>, DerivingPasswordHasher>();
+        // Raw RDP stream dumps (RDPGW_DUMP_DIR) write the DECRYPTED session to disk in the clear,
+        // bypassing the recording pipeline's encryption, retention and tamper-evidence. Gate them on
+        // the hosting environment so setting the variable on a production box does nothing.
+        RDP.RdpStreamRecorder.StreamDumpAllowed = builder.Environment.IsDevelopment();
 
         // Persist the DataProtection keyring on disk so credentials encrypted with
         // CredentialProtector (stored VM passwords) remain decryptable across restarts. The directory
@@ -144,6 +144,25 @@ public class Program
         // policy decides who is REQUIRED to enroll (Mfa section). The middleware (added below) forces
         // required-but-unenrolled users to the authenticator setup page.
         builder.Services.AddSingleton<RDP.MfaPolicy>();
+
+        // Rules for following a Server Redirection to a different host (Redirection section).
+        builder.Services.AddSingleton<RDP.RedirectionTargetPolicy>();
+
+        // Liveness registry for the background workers, surfaced on the operations page.
+        builder.Services.AddSingleton<RDP.ServiceHeartbeats>();
+
+        // Lock-out protection for the admin surface (last-admin / self-demote guards).
+        builder.Services.AddScoped<RDP.AdminAccountSafety>();
+
+        // A disabled account, a revoked role or a forced sign-out only take effect when the auth cookie
+        // is re-validated against the user's security stamp. The 30-minute default is far too long for
+        // "disable this account now"; re-check every two minutes instead (one cheap user lookup).
+        builder.Services.Configure<SecurityStampValidatorOptions>(o =>
+            o.ValidationInterval = TimeSpan.FromMinutes(2));
+
+        // Optional OpenID Connect federation (Oidc section). Registers the provider only when
+        // configured; the returned options are also used for the startup warning below.
+        var oidc = builder.Services.AddExternalIdentity(builder.Configuration);
 
         // Rate limiting (brute-force / abuse protection). Two policies:
         //  - "auth": IP-based fixed window on the login/register/password endpoints.
@@ -280,7 +299,7 @@ public class Program
                 context.Database.Migrate();
             }
 
-            // One-time, idempotent: encrypt any legacy plaintext secrets (NtHash, Proxmox API token) now
+            // One-time, idempotent: encrypt any legacy plaintext secrets (the Proxmox API token) now
             // that those columns are encrypted at rest. Safe to run every startup — already-encrypted
             // values are detected and skipped.
             if (context != null)
@@ -355,12 +374,30 @@ public class Program
             }
             else if (userManager != null)
             {
-                // If the configured/default bootstrap admin exists but lacks the Admin role, grant it.
-                var bootstrapEmail = builder.Configuration["Bootstrap:AdminEmail"] ?? "admin@example.com";
-                var adminUser = userManager.FindByNameAsync(bootstrapEmail).Result;
-                if (adminUser != null && !userManager.IsInRoleAsync(adminUser, "Admin").Result)
+                // Recovery path only. This used to re-grant Admin to Bootstrap:AdminEmail on EVERY boot,
+                // which quietly undid a deliberate demotion and made "restart the service" a privilege-
+                // escalation step. Now it fires only when the deployment has no administrator left at
+                // all — the situation it was meant to rescue — and says so loudly.
+                var startupLogger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+                var existingAdmins = userManager.GetUsersInRoleAsync("Admin").Result;
+                if (existingAdmins.Count == 0)
                 {
-                    userManager.AddToRoleAsync(adminUser, "Admin").Wait();
+                    var bootstrapEmail = builder.Configuration["Bootstrap:AdminEmail"] ?? "admin@example.com";
+                    var adminUser = userManager.FindByNameAsync(bootstrapEmail).Result;
+                    if (adminUser != null)
+                    {
+                        userManager.AddToRoleAsync(adminUser, "Admin").Wait();
+                        startupLogger.LogWarning(
+                            "No account held the Admin role; restored it for the bootstrap account '{Email}'.",
+                            bootstrapEmail);
+                    }
+                    else
+                    {
+                        startupLogger.LogError(
+                            "No account holds the Admin role and the bootstrap account '{Email}' does not exist. " +
+                            "Nobody can administer this deployment — create the account or set Bootstrap:AdminEmail " +
+                            "to an existing one.", bootstrapEmail);
+                    }
                 }
             }
 
@@ -390,9 +427,16 @@ public class Program
         // views carry many; a nonce migration is the follow-up), styles/fonts to this origin plus the
         // two CDNs _ThemeHead uses, and everything else (objects, base, form targets) to self.
         // WebSocket and worker sources are allowed for the console relay and decode workers.
-        const string Csp =
+        // script-src carries a per-request nonce instead of 'unsafe-inline'. Every <script> the app
+        // renders is stamped with it automatically (ScriptNonceTagHelper), so an injected one — the
+        // payload of every reflected and stored XSS — has no nonce and does not execute. Browsers ignore
+        // 'unsafe-inline' entirely once a nonce is present, so it is simply gone.
+        // style-src keeps 'unsafe-inline': the views use inline style attributes throughout, and a
+        // nonce does not cover those (only <style> elements), so removing it would need a real refactor
+        // for a much smaller gain than the script side.
+        static string Csp(string nonce) =>
             "default-src 'self'; " +
-            "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; " +
+            $"script-src 'self' 'nonce-{nonce}' 'wasm-unsafe-eval'; " +
             "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; " +
             "font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net; " +
             "img-src 'self' data: blob:; " +
@@ -403,7 +447,7 @@ public class Program
         app.Use(async (ctx, next) =>
         {
             var h = ctx.Response.Headers;
-            h["Content-Security-Policy"] = Csp;
+            h["Content-Security-Policy"] = Csp(RDP.CspNonce.Get(ctx));
             h["X-Frame-Options"] = "DENY";
             h["X-Content-Type-Options"] = "nosniff";
             h["Referrer-Policy"] = "strict-origin-when-cross-origin";
@@ -411,6 +455,19 @@ public class Program
             h["Permissions-Policy"] = "camera=(self), microphone=(self), geolocation=(), payment=(), usb=(), display-capture=()";
             await next();
         });
+
+        if (oidc.ConfigurationProblem is { } oidcProblem)
+        {
+            app.Logger.LogWarning(
+                "Identity federation is enabled but incomplete: {Problem} The single-sign-on button is hidden " +
+                "until it is configured.", oidcProblem);
+        }
+        else if (oidc.IsConfigured && string.IsNullOrWhiteSpace(app.Configuration["App:PublicBaseUrl"]))
+        {
+            app.Logger.LogWarning(
+                "Identity federation is enabled but App:PublicBaseUrl is not set. The OpenID Connect redirect URI " +
+                "is then derived from the request host, which must match the URI registered at the provider.");
+        }
 
         if (!app.Environment.IsDevelopment() && string.IsNullOrWhiteSpace(app.Configuration["App:PublicBaseUrl"]))
         {
@@ -451,6 +508,12 @@ public class Program
         // The Electron desktop client is console-only; block the admin surface for it (404, same as an
         // unmapped route) regardless of the user's role.
         app.UseMiddleware<RDP.DesktopAdminBlockMiddleware>();
+
+        // Container / orchestrator liveness probe. Deliberately anonymous and deliberately shallow: it
+        // answers "is this process serving requests?", not "is Proxmox reachable?" — a health check that
+        // fails on a backend hiccup makes the orchestrator restart a perfectly healthy gateway and drop
+        // everyone's desktops. The operations page is where dependency health belongs.
+        app.MapGet("/healthz", () => Results.Ok(new { status = "ok" })).AllowAnonymous();
 
         app.MapStaticAssets();
         app.MapControllerRoute(

@@ -26,6 +26,7 @@ public class RdpWebSocketController : Controller
     private readonly CredentialProtector _credentials;
     private readonly RecordingPolicy _recordingPolicy;
     private readonly RedirectionTokenCache _redirections;
+    private readonly RedirectionTargetPolicy _redirectTargets;
     private readonly SessionTracker _sessions;
     private readonly IConfiguration _config;
     private readonly IAuditLogger _audit;
@@ -46,6 +47,7 @@ public class RdpWebSocketController : Controller
         CredentialProtector credentials,
         RecordingPolicy recordingPolicy,
         RedirectionTokenCache redirections,
+        RedirectionTargetPolicy redirectTargets,
         SessionTracker sessions,
         IConfiguration config,
         IAuditLogger audit,
@@ -65,6 +67,7 @@ public class RdpWebSocketController : Controller
         _credentials = credentials;
         _recordingPolicy = recordingPolicy;
         _redirections = redirections;
+        _redirectTargets = redirectTargets;
         _sessions = sessions;
         _config = config;
         _audit = audit;
@@ -162,6 +165,33 @@ public class RdpWebSocketController : Controller
         if (pending?.Username != null && pending.Password != null)
             redirectCreds = new RdpRelaySession.VmCredentials(pending.Username, pending.Password, pending.Domain);
 
+        // A broker (a Windows RD Connection Broker farm, a load balancer in front of a pool) answers the
+        // first connection by naming the session host that should actually serve this user. Follow it —
+        // under RedirectionTargetPolicy's rules, since the name arrives from the host rather than from
+        // our own configuration.
+        var redirectedHost = false;
+        if (pending?.TargetHost is { Length: > 0 })
+        {
+            var resolvedHost = host;
+            var decision = _redirectTargets.Resolve(pending.TargetHost, resolvedHost);
+            redirectedHost = decision.Redirected;
+            if (decision.Redirected)
+            {
+                host = decision.Host;
+                await _audit.LogAsync(AuditCategory.Session, "SessionRedirected",
+                    targetType: nameof(RDPResource), targetId: id, targetName: resource.Name,
+                    detail: new { from = resolvedHost, to = host });
+            }
+            else if (decision.Refusal != null)
+            {
+                _logger.LogWarning("Server Redirection: NOT following '{Target}' for {Resource} — {Reason}",
+                    pending.TargetHost, resource.Name, decision.Refusal);
+                await _audit.LogAsync(AuditCategory.Session, "SessionRedirectRefused", success: false,
+                    targetType: nameof(RDPResource), targetId: id, targetName: resource.Name,
+                    detail: new { target = pending.TargetHost, reason = decision.Refusal });
+            }
+        }
+
         // Concurrent-session limit: cap how many live tunnels a single user may hold at once (0 = unlimited).
         // Redirect/handover continuation legs (pending != null) are part of an existing session, so they
         // bypass the cap. The check runs after socket accept so we can report the reason to the browser.
@@ -241,7 +271,11 @@ public class RdpWebSocketController : Controller
         // feature needs. The guard refuses the session on the first blocked channel request/accept.
         var policyGuard = ChannelPolicyGuard.ForPolicy(_devicePolicy.Get(), _logger);
         // Host certificate pinning (trust on first use) for the concrete resource this leg connects to.
-        var hostCertCheck = _hostCerts.CheckFor(id, resource.Name, _audit);
+        // The pin is the fingerprint of the RESOURCE's host. A leg that followed a broker's redirect is
+        // talking to a different machine, whose certificate was never pinned and legitimately differs —
+        // enforcing the pin there would refuse every brokered connection. The broker is itself pinned and
+        // is what vouches for the target, which is the same trust chain mstsc follows.
+        var hostCertCheck = redirectedHost ? null : _hostCerts.CheckFor(id, resource.Name, _audit);
 
         var session = new RdpRelaySession(socket, host, port, kerberos, _logger, presupplied, recorder,
             pending?.Token, redirectCreds,
@@ -250,7 +284,7 @@ public class RdpWebSocketController : Controller
                 continuationArmed = true;
                 _redirections.Store(userId, id,
                     new RedirectionTokenCache.Pending(redir.LoadBalanceInfo!, redir.Username, redir.Domain, redir.Password,
-                        recId, baseDir, leg + 1));
+                        recId, baseDir, leg + 1, redir.TargetHost));
             },
             hostTransport,
             _resolverImpl,

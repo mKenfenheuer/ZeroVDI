@@ -7,6 +7,208 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.44] — 2026-09-13 — Container hardening, CI gate and a test project (audit finding 10)
+
+### Security
+- **The container no longer runs as root.** The image runs as UID 1654 and listens on 8080 (a port it
+  needs no capability to bind). A gateway that terminates RDP for a whole organisation had no reason
+  to be root. **Upgrading an existing deployment needs one command first** — the bind mount carries
+  its own ownership: `chown -R 1654:1654 /mnt/data/rdpgw`.
+- **`docker-compose.yml` drops every Linux capability** except `NET_RAW` (the resource status probe
+  pings hosts, and ICMP from .NET needs a raw socket), sets `no-new-privileges`, adds a health check
+  and caps the JSON log files so a busy gateway cannot fill the host disk with logs.
+- **A `.dockerignore`**: `COPY . .` was shipping `bin/`, `obj/`, `node_modules/` and the entire `.git`
+  history into the build context and the image layers, along with any local `appsettings.Development`
+  or SQLite database lying in the tree.
+- **Vulnerable dependencies removed.** SSH.NET (`GHSA-q939-rpr3-3284`, high) is on 2026.0.0, the
+  ASP.NET and EF Core packages are on 9.0.20 (which drops the vulnerable SQLitePCLRaw), and the
+  design-time `Microsoft.VisualStudio.Web.CodeGeneration.Design` package — which dragged vulnerable
+  `Microsoft.Build` and `NuGet.*` into the dependency closure for no runtime purpose — is gone. Add it
+  back temporarily if you need `dotnet aspnet-codegenerator`. `dotnet list package --vulnerable` is
+  now clean, and CI fails if it stops being.
+
+### Added
+- **`KSol.ZeroVDI.Tests`** — the solution's first test project (xUnit, 45 tests), covering the code
+  where a mistake is expensive and a manual check is impractical: ZGFX against hostile input
+  (including the 4 GB allocation an unbounded multipart header used to ask for), the Server
+  Redirection scanner (a real redirect parses; graphics payload that merely contains the 0x0400 marker
+  does not — the false positive that used to tear down healthy sessions), the redirect-target rules,
+  the device-policy channel guard including its fail-open behaviour, the account-lockout predicates,
+  the public-URL precedence, the CSP nonce's freshness and entropy, and background-worker staleness.
+- **CI actually builds and tests.** The GitHub workflow gained a build/test job and a NuGet
+  vulnerability audit, and both image jobs now depend on tests passing — an image that is published
+  *and signed* without compiling cleanly is worse than no image. The GitLab pipeline gained the same
+  gate as a `test` stage ahead of `build`.
+- **`/healthz`** — an anonymous, deliberately shallow liveness endpoint for the container health check
+  and orchestrators. It answers "is this process serving requests?", not "is Proxmox reachable?": a
+  probe that failed on a backend hiccup would make the orchestrator restart a healthy gateway and drop
+  everyone's desktops.
+- The Dockerfile restores against the project file first (so a source-only change reuses the restore
+  layer), carries OCI labels, and documents why ffmpeg, mkvtoolnix, ipmitool and samba-common-bin are
+  installed.
+
+---
+
+## [0.6.43] — 2026-09-13 — Nonce-based Content-Security-Policy
+
+### Security
+- **`script-src` no longer allows `'unsafe-inline'`.** It names a fresh 16-byte random nonce per
+  response instead, so only the scripts ZeroVDI itself rendered execute — a script injected into a
+  page, which is the payload of every reflected and stored XSS, carries no nonce and is refused by the
+  browser. With `'unsafe-inline'` present the policy offered no XSS protection at all on the script
+  side; it was a placeholder from 0.6.36 and this closes it.
+- Every `<script>` the application renders is stamped with the nonce **automatically**
+  (`ScriptNonceTagHelper`), rather than each view having to remember: a new inline script cannot
+  silently fail to run, and nobody is tempted to re-add `'unsafe-inline'` to make one work.
+- The four inline `on*` handlers were replaced with listeners in `wwwroot/js/site.js` and a nonce-
+  carrying script — a nonce applies to elements, never to attributes, so those would have stopped
+  working.
+- `style-src` deliberately keeps `'unsafe-inline'`: the views use inline style attributes throughout
+  and a nonce does not cover attributes, so removing it needs a real refactor for a much smaller gain.
+
+---
+
+## [0.6.42] — 2026-09-13 — Server Redirection target host (audit finding 11)
+
+### Fixed
+- **A redirect that names a different host is now followed.** The Server Redirection PDU's
+  `TargetNetAddress` / `TargetFQDN` ([MS-RDPBCGR] 2.2.13.1) was parsed and then discarded: every
+  reconnect went back to the resource's own host, so a Windows RD Connection Broker farm or any load
+  balancer in front of a desktop pool bounced the user between the broker and itself forever. GNOME
+  Remote Desktop's "Remote Login", which hands off on the same machine, was unaffected and still is.
+  The target travels with the routing token through the redirect chain, including the handover re-arm.
+
+### Security
+- The target name comes off the wire from the host, so it is followed under
+  `RedirectionTargetPolicy`: loopback, link-local (including the `169.254.169.254` cloud metadata
+  address), multicast and unspecified addresses are always refused — a compromised desktop must not be
+  able to aim the gateway, which connects from inside the datacentre with the user's credentials, at a
+  machine of its choosing. The new `Redirection:AllowedTargetHosts` narrows it further to named hosts,
+  addresses or domain suffixes, and `Redirection:FollowTargetHost: false` turns cross-host redirects
+  off. Followed and refused redirects are both audited (`SessionRedirected`, `SessionRedirectRefused`).
+- A leg that followed a redirect connects to a machine whose certificate was never pinned for that
+  resource, so the pin is not enforced there (it would refuse every brokered connection). The broker is
+  pinned and vouches for the target — the trust chain the Windows client follows.
+
+---
+
+## [0.6.41] — 2026-09-13 — Operations page (audit finding 9)
+
+### Added
+- **Admin → Operations** (`/admin/operations`) — one screen answering whether this deployment is
+  healthy and whether what you configured actually works. See
+  [Operations](administration/operations.md).
+- **Background-worker liveness.** The VDI reconciler, idle reaper, Proxmox sync, resource status probe
+  and recording-retention sweep now report after every pass (`ServiceHeartbeats`), and the page shows
+  each as Healthy / Starting / Overdue / Failing with the last error. A worker that dies used to take
+  its feature with it in complete silence — a stopped idle reaper leaves VMs running and billing, a
+  stopped reconciler leaves desktops stuck in *Provisioning*.
+- **Test buttons** for the integrations that were previously only exercised at the worst possible
+  moment: send a test e-mail through the configured SMTP server, fetch and validate the identity
+  provider's discovery document, and probe every Proxmox backend with its stored API token. All three
+  are audited whether they pass or fail (`SmtpTested`, `OidcDiscoveryTested`, `BackendsTested`).
+- **Configuration warnings in context**: `App:PublicBaseUrl` unset, `AllowedHosts` still `*`,
+  `DataProtection:MasterKeyPassphrase` unset, pending EF migrations, and recordings accumulating with
+  no retention rule. Each says what the consequence is rather than only naming the key.
+- Database file and size, audit-event count, keyring location and key count (with the reminder to back
+  it up alongside the database), recording storage and free space, and the running version — which the
+  app never surfaced anywhere before.
+
+---
+
+## [0.6.40] — 2026-09-13 — Admin account safety and help-desk actions (audit finding 8)
+
+### Security
+- **Lock-out protection.** ZeroVDI now refuses the moves that leave nobody able to administer it: the
+  last administrator cannot lose the Admin role, be deleted or be disabled, and an administrator
+  cannot remove their own Admin role, delete themselves or disable themselves. Previously any of
+  these silently succeeded and the only way back in was editing the database.
+- **The security stamp is rotated on every role change**, so a revoked administrator loses the admin
+  area immediately instead of keeping it until their cookie is next validated (and a promotion takes
+  effect at once). The validation interval itself is cut from Identity's 30-minute default to two
+  minutes, so a disable or forced sign-out lands promptly.
+- **The bootstrap admin is no longer re-granted the Admin role on every start.** A deliberate
+  demotion of `Bootstrap:AdminEmail` used to be undone by the next restart, which made restarting the
+  service a privilege-escalation step. The re-grant now fires only when no account holds the Admin
+  role at all — the recovery case it was meant for — and logs that it happened. With no administrator
+  and no bootstrap account, startup logs an error naming the problem.
+
+### Added
+- **Help-desk actions on a user's Account tab**: set a password directly (optionally signing the user
+  out everywhere and dropping their open desktops), e-mail a password-reset link, sign out
+  everywhere, unlock an account locked by failed sign-ins, and disable/enable an account. Disabling
+  blocks sign-in and cuts live console sessions while keeping the account, its grants and its stored
+  credentials — the reversible alternative to deleting someone who has left. All audited
+  (`PasswordResetByAdmin`, `PasswordResetLinkSent`, `UserSignedOutEverywhere`, `UserUnlocked`,
+  `UserDisabled`, `UserEnabled`).
+- Deleting a user, disabling them or resetting their password now force-disconnects their live console
+  sessions rather than leaving tunnels open under an identity that no longer exists.
+- The user list and a user's page show **Disabled** and **Locked out** badges.
+
+---
+
+## [0.6.39] — 2026-09-13 — Identity federation (OpenID Connect single sign-on)
+
+### Added
+- **OpenID Connect sign-in** against any standard provider (Entra ID, Keycloak, Okta, Authentik,
+  Google Workspace…), configured under the new `Oidc` section and **off by default**. Authorization
+  code flow with PKCE, a confidential client, tokens never stored in the browser or the auth cookie.
+  A **Sign in with …** button appears beneath the password form once the configuration is complete;
+  local accounts keep working alongside it. See
+  [Identity federation](features/identity-federation.md).
+- **Account provisioning.** A first sign-in creates the ZeroVDI account from the provider's e-mail
+  (already confirmed, since there is no local password to confirm against), or links the identity to
+  an existing account with that e-mail so its grants and stored credentials survive the move to SSO.
+  Later sign-ins match on the provider's stable subject, so a renamed mailbox doesn't fork the
+  account. `Oidc:AutoProvision: false` restricts sign-in to accounts an administrator created.
+- **Group and role mapping.** The `Oidc:GroupsClaim` values are matched by name against existing
+  ZeroVDI [user groups](administration/users-and-groups.md) — Keycloak-style paths match on their last
+  segment too — and drive membership, so a directory group grants every resource that ZeroVDI group is
+  granted. The provider never creates groups: an administrator opts a directory group in by creating a
+  ZeroVDI group with that name. `Oidc:AdminGroups` / `Oidc:AuditorGroups` grant and revoke the
+  corresponding roles (an empty list never touches the role), and `Oidc:RequireMappedGroup` turns the
+  claim into an access gate. Memberships created by federation carry a flag
+  (`UserGroupMembership.IsExternal`, migration `AddExternalGroupMembership`) so only they are
+  withdrawn when the directory changes — a membership added by hand is never removed by a sign-in.
+- **MFA interoperability**: a federated session satisfies ZeroVDI's own MFA requirement by default
+  (`Oidc:SatisfiesMfa`), because enforcing MFA at the provider is the usual reason to federate.
+  Turning it off demands a second factor here as well.
+- Audited throughout: `ExternalUserProvisioned`, `ExternalGroupsSynced`, `ExternalRoleSynced`,
+  `ExternalLoginRejected`, and `LoginSucceeded` with the provider recorded.
+
+### Fixed
+- The stock Identity "external login" page ended a federated sign-in at a second registration form.
+  It is replaced by a flow that resolves the account and lands the user on their desktops, and that
+  shows a ZeroVDI-worded explanation (not the provider's error page) when a sign-in is refused.
+- Behind a reverse proxy the OpenID Connect redirect URI is taken from `App:PublicBaseUrl` when set,
+  rather than from the request host, which must otherwise match the provider's registration exactly.
+
+---
+
+## [0.6.38] — 2026-09-13 — Remove the stored NT hash and the dead MITM path (audit finding 7)
+
+### Security
+- **The NTLM NT hash of every user's portal password is no longer stored.** `ApplicationUser.NtHash`
+  held an unsalted MD4 of the sign-in password, written on every registration, password change and
+  reset by a custom `IPasswordHasher`. It existed only for a CredSSP man-in-the-middle that was never
+  constructed, so the database carried an offline-crackable, pass-the-hash-usable copy of every
+  password for no functional gain. The column is dropped (migration `DropUserNtHash`), the deriving
+  hasher is gone and ASP.NET Identity's own salted hasher is used unchanged. Existing users keep
+  their passwords and need no action.
+- **Raw stream dumps are development-only.** `RDPGW_DUMP_DIR` wrote the decrypted session — keystrokes,
+  screen contents, connection-sequence PDUs — to plain files outside the recording pipeline, with none
+  of its encryption-at-rest, retention or tamper-evidence, and an environment variable was enough to
+  turn it on anywhere. It is now ignored outside the Development environment, with a warning when set.
+
+### Removed
+- `MitmRdpStream` and `CredSspServer` (the gateway-as-NLA-server relay) — never constructed by any
+  code path since the browser console moved to `RdpRelaySession`. With them go the NTLM server
+  helpers in `Ntlm` (challenge generation, Type 3 parsing, NTLMv2 verification, SPNEGO unwrapping)
+  and `AuthCrypto.NtHash`; the NT hash the gateway needs for its own outbound NLA is still derived
+  on the fly from the per-resource credential by `NtlmClient` and never stored.
+
+---
+
 ## [0.6.39] — 2026-09-13 — WebKit surface coherence fix
 
 ### Fixed

@@ -16,7 +16,7 @@
 <form method="get" class="flex flex-wrap items-end gap-3 mb-5">
     <div>
         <label class="block text-xs font-medium text-muted-foreground mb-1">Category</label>
-        <select name="category" class="input-surface" onchange="this.form.submit()">
+        <select name="category" class="input-surface" data-autosubmit>
             <option value="">All categories</option>
             @foreach (AuditCategory c in Enum.GetValues<AuditCategory>())
             {

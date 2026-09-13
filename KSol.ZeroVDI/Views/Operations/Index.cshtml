@@ -1,0 +1,246 @@
+@model KSol.ZeroVDI.Controllers.OperationsViewModel
+@{
+    ViewData["Title"] = "Operations";
+    ViewData["Subtitle"] = "Health of this instance and the integrations it depends on.";
+
+    string Bytes(long b)
+    {
+        string[] units = { "B", "KB", "MB", "GB", "TB" };
+        double v = b; var u = 0;
+        while (v >= 1024 && u < units.Length - 1) { v /= 1024; u++; }
+        return $"{v:0.#} {units[u]}";
+    }
+    string Ago(DateTime? utc) => utc is { } t
+        ? (DateTime.UtcNow - t) switch
+        {
+            { TotalSeconds: < 90 } d => $"{(int)d.TotalSeconds}s ago",
+            { TotalMinutes: < 90 } d => $"{(int)d.TotalMinutes} min ago",
+            { TotalHours: < 48 } d => $"{(int)d.TotalHours} h ago",
+            var d => $"{(int)d.TotalDays} d ago",
+        }
+        : "not yet";
+    string Duration(TimeSpan t) => t.TotalDays >= 1
+        ? $"{(int)t.TotalDays}d {t.Hours}h"
+        : t.TotalHours >= 1 ? $"{(int)t.TotalHours}h {t.Minutes}m" : $"{(int)t.TotalMinutes}m";
+}
+
+<div class="space-y-6">
+
+    <!-- Deployment ------------------------------------------------------------------------ -->
+    <section class="card-surface p-6">
+        <h2 class="font-semibold mb-4 flex items-center gap-2"><i class="ri-server-line"></i> Deployment</h2>
+        <dl class="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+            <div><dt class="text-muted-foreground">Version</dt><dd class="font-medium">@Model.Version</dd></div>
+            <div><dt class="text-muted-foreground">Environment</dt><dd class="font-medium">@Model.Environment</dd></div>
+            <div><dt class="text-muted-foreground">Uptime</dt><dd class="font-medium">@Duration(Model.Uptime)</dd></div>
+            <div><dt class="text-muted-foreground">.NET</dt><dd class="font-medium">@Model.Runtime</dd></div>
+            <div><dt class="text-muted-foreground">Users</dt><dd class="font-medium">@Model.UserCount (@Model.AdminCount admin)</dd></div>
+            <div><dt class="text-muted-foreground">Active sessions</dt><dd class="font-medium">@Model.ActiveSessions</dd></div>
+            <div>
+                <dt class="text-muted-foreground">Per-user limit</dt>
+                <dd class="font-medium">@(Model.MaxConcurrentPerUser == 0 ? "unlimited" : Model.MaxConcurrentPerUser.ToString())</dd>
+            </div>
+            <div><dt class="text-muted-foreground">Backends / connectors</dt><dd class="font-medium">@Model.BackendCount / @Model.ConnectorCount</dd></div>
+        </dl>
+
+        <div class="mt-5 pt-4 border-t border-border space-y-2 text-sm">
+            <div class="flex items-start gap-2">
+                @if (!string.IsNullOrWhiteSpace(Model.PublicBaseUrl))
+                {
+                    <i class="ri-checkbox-circle-line text-success mt-0.5"></i>
+                    <span>Public address <span class="font-mono">@Model.PublicBaseUrl</span></span>
+                }
+                else
+                {
+                    <i class="ri-error-warning-line text-warning mt-0.5"></i>
+                    <span>
+                        <strong>App:PublicBaseUrl is not set.</strong> Password-reset links, e-mail-change
+                        links and the OpenID Connect redirect are built from the request's Host header,
+                        which a forged request can point elsewhere.
+                    </span>
+                }
+            </div>
+            @if (Model.AllowedHosts == "*")
+            {
+                <div class="flex items-start gap-2">
+                    <i class="ri-error-warning-line text-warning mt-0.5"></i>
+                    <span><strong>AllowedHosts is <span class="font-mono">*</span>.</strong> Set it to the
+                    host names this deployment answers on so a forged Host header is rejected outright.</span>
+                </div>
+            }
+        </div>
+    </section>
+
+    <!-- Background workers ---------------------------------------------------------------- -->
+    <section class="card-surface p-6">
+        <h2 class="font-semibold mb-1 flex items-center gap-2"><i class="ri-loop-right-line"></i> Background workers</h2>
+        <p class="form-hint mb-4">
+            A worker that stops takes its feature with it quietly — an idle reaper that died leaves VMs
+            running, a reconciler that died leaves desktops stuck in <em>Provisioning</em>.
+        </p>
+        <div class="table-scroll">
+            <table class="table-surface">
+                <thead>
+                    <tr><th>Worker</th><th>Every</th><th>Last pass</th><th>State</th></tr>
+                </thead>
+                <tbody>
+                @foreach (var hb in Model.Heartbeats)
+                {
+                    <tr>
+                        <td class="font-medium">@hb.Name</td>
+                        <td class="text-muted-foreground">@Duration(hb.Interval)</td>
+                        <td class="text-muted-foreground">@Ago(hb.LastRunUtc)</td>
+                        <td>
+                            @if (hb.LastError != null)
+                            {
+                                <span class="badge bg-destructive/10 text-destructive" title="@hb.LastError">Failing</span>
+                            }
+                            else if (hb.IsStale)
+                            {
+                                <span class="badge bg-warning/10 text-warning">Overdue</span>
+                            }
+                            else if (hb.LastRunUtc == null)
+                            {
+                                <span class="badge bg-muted text-muted-foreground">Starting</span>
+                            }
+                            else
+                            {
+                                <span class="badge bg-success/10 text-success">Healthy</span>
+                            }
+                        </td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+        </div>
+        @{ var failing = Model.Heartbeats.FirstOrDefault(h => h.LastError != null); }
+        @if (failing != null)
+        {
+            <p class="text-sm text-destructive mt-3"><strong>@failing.Name:</strong> @failing.LastError</p>
+        }
+    </section>
+
+    <!-- Integrations ---------------------------------------------------------------------- -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+        <section class="card-surface p-6 space-y-4">
+            <h2 class="font-semibold flex items-center gap-2"><i class="ri-mail-line"></i> E-mail (SMTP)</h2>
+            <dl class="text-sm space-y-1">
+                <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Server</dt><dd class="font-mono">@Model.SmtpHost:@Model.SmtpPort</dd></div>
+                <div class="flex justify-between gap-4"><dt class="text-muted-foreground">From</dt><dd class="font-mono">@Model.SmtpFrom</dd></div>
+                <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Authentication</dt><dd>@(Model.SmtpAuthenticated ? "username + password" : "none")</dd></div>
+            </dl>
+            <p class="form-hint">Password resets, e-mail-change confirmations and e-mail MFA codes all depend on this.</p>
+            <form asp-action="TestEmail" method="post">
+                @Html.AntiForgeryToken()
+                <button type="submit" class="btn-secondary"><i class="ri-send-plane-line"></i> Send a test message to me</button>
+            </form>
+        </section>
+
+        <section class="card-surface p-6 space-y-4">
+            <h2 class="font-semibold flex items-center gap-2"><i class="ri-fingerprint-line"></i> Identity federation</h2>
+            @if (!Model.OidcEnabled)
+            {
+                <p class="text-sm text-muted-foreground">
+                    Disabled — ZeroVDI accounts only. See
+                    <a href="/admin/docs/features/identity-federation" class="link">Identity federation</a>.
+                </p>
+            }
+            else
+            {
+                <dl class="text-sm space-y-1">
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Authority</dt><dd class="font-mono break-all text-right">@Model.OidcAuthority</dd></div>
+                    <div class="flex justify-between gap-4">
+                        <dt class="text-muted-foreground">Status</dt>
+                        <dd>
+                            @if (Model.OidcConfigured)
+                            {
+                                <span class="badge bg-success/10 text-success">Active</span>
+                            }
+                            else
+                            {
+                                <span class="badge bg-destructive/10 text-destructive">Incomplete</span>
+                            }
+                        </dd>
+                    </div>
+                </dl>
+                @if (Model.OidcProblem != null)
+                {
+                    <p class="text-sm text-destructive">@Model.OidcProblem</p>
+                }
+                <form asp-action="TestOidc" method="post">
+                    @Html.AntiForgeryToken()
+                    <button type="submit" class="btn-secondary"><i class="ri-links-line"></i> Test discovery</button>
+                </form>
+            }
+        </section>
+
+        <section class="card-surface p-6 space-y-4">
+            <h2 class="font-semibold flex items-center gap-2"><i class="ri-database-2-line"></i> Database &amp; secrets</h2>
+            @if (Model.DatabaseError != null)
+            {
+                <p class="text-sm text-destructive">@Model.DatabaseError</p>
+            }
+            <dl class="text-sm space-y-1">
+                <div class="flex justify-between gap-4"><dt class="text-muted-foreground">File</dt><dd class="font-mono break-all text-right">@Model.DatabasePath</dd></div>
+                <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Size</dt><dd>@Bytes(Model.DatabaseBytes)</dd></div>
+                <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Audit events</dt><dd>@Model.AuditEventCount.ToString("N0")</dd></div>
+                <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Keyring</dt><dd>@Model.KeyringKeyCount key(s)</dd></div>
+            </dl>
+            @if (Model.PendingMigrations.Count > 0)
+            {
+                <p class="text-sm text-warning">
+                    <i class="ri-error-warning-line"></i>
+                    @Model.PendingMigrations.Count migration(s) pending — restart to apply:
+                    <span class="font-mono">@string.Join(", ", Model.PendingMigrations)</span>
+                </p>
+            }
+            @if (!Model.KeyringPassphraseSet)
+            {
+                <p class="text-sm text-warning">
+                    <i class="ri-error-warning-line"></i>
+                    <strong>DataProtection:MasterKeyPassphrase is not set.</strong> Stored VM credentials
+                    are protected by a development fallback; set it before production use.
+                </p>
+            }
+            <p class="form-hint">
+                Back up <span class="font-mono">@Model.KeyringDir</span> together with the database — without
+                those keys every stored credential and encrypted recording is unrecoverable.
+            </p>
+        </section>
+
+        <section class="card-surface p-6 space-y-4">
+            <h2 class="font-semibold flex items-center gap-2"><i class="ri-hard-drive-2-line"></i> Storage</h2>
+            <dl class="text-sm space-y-1">
+                <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Recordings</dt><dd>@Model.RecordingCount.ToString("N0") · @Bytes(Model.RecordingBytes)</dd></div>
+                <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Free on that volume</dt><dd>@Bytes(Model.FreeDiskBytes)</dd></div>
+                <div class="flex justify-between gap-4"><dt class="text-muted-foreground">Encrypted at rest</dt><dd>@(Model.RecordingsEncrypted ? "yes" : "no")</dd></div>
+                <div class="flex justify-between gap-4">
+                    <dt class="text-muted-foreground">Retention</dt>
+                    <dd>
+                        @(Model.RetentionDays == 0 ? "keep forever" : $"{Model.RetentionDays} days")@(Model.MaxRecordingGb > 0 ? $", cap {Model.MaxRecordingGb} GB" : "")
+                    </dd>
+                </div>
+            </dl>
+            @if (Model.RetentionDays == 0 && Model.MaxRecordingGb == 0 && Model.RecordingCount > 0)
+            {
+                <p class="text-sm text-warning">
+                    <i class="ri-error-warning-line"></i> No retention rule is set, so recordings grow until
+                    the volume is full. See <a href="/admin/docs/features/recordings" class="link">Recordings</a>.
+                </p>
+            }
+        </section>
+
+        <section class="card-surface p-6 space-y-4 lg:col-span-2">
+            <h2 class="font-semibold flex items-center gap-2"><i class="ri-server-line"></i> Virtualization backends</h2>
+            <p class="form-hint">
+                Probes every configured Proxmox cluster with the stored API token — the same call the VDI
+                broker makes when it clones a desktop.
+            </p>
+            <form asp-action="TestBackends" method="post">
+                @Html.AntiForgeryToken()
+                <button type="submit" class="btn-secondary"><i class="ri-pulse-line"></i> Test @Model.BackendCount backend(s)</button>
+            </form>
+        </section>
+    </div>
+</div>

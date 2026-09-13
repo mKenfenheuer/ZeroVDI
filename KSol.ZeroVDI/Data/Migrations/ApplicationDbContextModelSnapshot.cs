@@ -90,9 +90,6 @@ namespace KSol.ZeroVDI.Data.Migrations
                         .HasMaxLength(256)
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("NtHash")
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("PasswordHash")
                         .HasColumnType("TEXT");
 
@@ -582,6 +579,9 @@ namespace KSol.ZeroVDI.Data.Migrations
                     b.Property<string>("GroupId")
                         .IsRequired()
                         .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsExternal")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("UserId")
                         .IsRequired()

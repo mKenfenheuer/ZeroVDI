@@ -6,8 +6,8 @@ namespace KSol.ZeroVDI.Data;
 
 /// <summary>
 /// One-time, idempotent backfill that encrypts previously-plaintext sensitive columns
-/// (<c>AspNetUsers.NtHash</c>, <c>ProxmoxBackends.ApiTokenSecret</c>) now that those columns are
-/// transparently encrypted at rest via <see cref="EncryptedStringConverter"/>.
+/// (<c>ProxmoxBackends.ApiTokenSecret</c>) now that those columns are transparently encrypted at rest
+/// via <see cref="EncryptedStringConverter"/>.
 ///
 /// It reads each column's RAW stored value (bypassing the EF converter), and if that value is NOT
 /// decryptable by the current keyring — i.e. it is still plaintext from before encryption was enabled —
@@ -39,12 +39,9 @@ public sealed class SecretEncryptionMigrator
         }
         try
         {
-            var users = BackfillColumn(connection, "AspNetUsers", "Id", "NtHash");
             var backends = BackfillColumn(connection, "ProxmoxBackends", "Id", "ApiTokenSecret");
-            if (users + backends > 0)
-                _logger.LogWarning(
-                    "Encrypted {Users} plaintext NtHash value(s) and {Backends} plaintext Proxmox API secret(s) at rest.",
-                    users, backends);
+            if (backends > 0)
+                _logger.LogWarning("Encrypted {Backends} plaintext Proxmox API secret(s) at rest.", backends);
         }
         finally
         {

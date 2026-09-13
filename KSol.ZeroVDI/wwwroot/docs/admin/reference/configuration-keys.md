@@ -24,6 +24,40 @@ form uses `__` for nesting, e.g. `Mfa__RequireForAll=true`.
 | `Mfa:RequireForAll` | bool | `false` | Require MFA for every user. |
 | `Mfa:RequiredRoles` | string[] | `["Admin"]` | Roles for which MFA is required (when not requiring all). |
 
+## Oidc
+
+Identity federation ([guide](../features/identity-federation)). Nothing is registered unless
+`Oidc:Enabled` is true **and** `Authority` and `ClientId` are set.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `Oidc:Enabled` | bool | `false` | Turn on OpenID Connect sign-in. |
+| `Oidc:Authority` | string | — | Issuer URL; its discovery document must be reachable from the gateway. |
+| `Oidc:ClientId` | string | — | Client id registered at the provider. |
+| `Oidc:ClientSecret` | string | — | Client secret (confidential client, authorization code + PKCE). |
+| `Oidc:DisplayName` | string | `Single sign-on` | Label on the sign-in button. |
+| `Oidc:Scopes` | string[] | `["profile","email"]` | Scopes requested in addition to `openid`. |
+| `Oidc:CallbackPath` | string | `/signin-oidc` | Redirect path; must match the provider's registration. |
+| `Oidc:GroupsClaim` | string | `groups` | Claim carrying the user's groups. |
+| `Oidc:AutoProvision` | bool | `true` | Create a ZeroVDI account on first sign-in. |
+| `Oidc:RequireMappedGroup` | bool | `false` | Refuse sign-in unless a provider group matches a ZeroVDI group. |
+| `Oidc:AdminGroups` | string[] | `[]` | Provider groups granted the Admin role (empty = never touch the role). |
+| `Oidc:AuditorGroups` | string[] | `[]` | Provider groups granted the Auditor role. |
+| `Oidc:SatisfiesMfa` | bool | `true` | Treat a federated sign-in as already multi-factor. |
+
+## Redirection
+
+Rules for following an RDP **Server Redirection** to a different host — what a session broker or load
+balancer in front of a desktop farm sends to name the machine that should serve the user.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `Redirection:FollowTargetHost` | bool | `true` | Follow a redirect that names a different host. Off = stay on the resource's own host (the pre-0.6.42 behaviour). |
+| `Redirection:AllowedTargetHosts` | string[] | `[]` | When non-empty, the target must match one of these: a host name, an IP address, or a domain suffix written with a leading dot (`.rds.example.com`). |
+
+Loopback, link-local (including the `169.254.169.254` cloud metadata address), multicast and
+unspecified addresses are **always** refused, whatever the allow-list says.
+
 ## Sessions
 
 | Key | Type | Default | Description |

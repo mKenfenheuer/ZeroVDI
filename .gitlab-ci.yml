@@ -2,12 +2,41 @@ before_script:
   - export CI_ENVIRONMENT_HOST=$(echo $CI_ENVIRONMENT_URL | sed 's~http[s]*://~~g')
 
 stages:
+ - test
  - build
  - deploy
+
+# Compile the solution and run the unit tests before anything is packaged. An image that is built and
+# deployed without this gate can only be discovered to be broken by the people trying to reach their
+# desktops. Runs in the SDK image so the shell runners need no .NET installed.
+test:
+  stage: test
+  image: mcr.microsoft.com/dotnet/sdk:9.0
+  rules:
+    - changes:
+        - KSol.ZeroVDI/**/*
+        - KSol.ZeroVDI.Tests/**/*
+        - KSol.ZeroVDI.sln
+  tags:
+    - docker
+  script:
+    # The runner has no node_modules; the compiled Tailwind bundle is committed, so skip that target.
+    - dotnet test KSol.ZeroVDI.sln -c Release -p:SkipTailwindBuild=true
+    # A known-vulnerable dependency in a gateway holding every user's desktop credentials fails the
+    # pipeline rather than waiting to be noticed.
+    - |
+      output=$(dotnet list KSol.ZeroVDI.sln package --vulnerable --include-transitive)
+      echo "$output"
+      if echo "$output" | grep -qiE '\b(Critical|High|Moderate|Low)\b'; then
+        echo "Vulnerable NuGet packages found — see the listing above."
+        exit 1
+      fi
 
 build_amd64_image:
   stage: build
   needs:
+    - job: test
+      optional: true
     - job: build_desktop_windows_linux
       optional: true
     - job: build_desktop_macos

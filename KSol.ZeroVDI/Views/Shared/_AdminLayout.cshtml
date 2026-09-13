@@ -86,6 +86,9 @@
                 <a asp-area="" asp-controller="Appearance" asp-action="Index" class="@ItemClass("Appearance")">
                     <i class="ri-palette-line text-lg"></i><span>Appearance</span>
                 </a>
+                <a asp-area="" asp-controller="Operations" asp-action="Index" class="@ItemClass("Operations")">
+                    <i class="ri-heart-pulse-line text-lg"></i><span>Operations</span>
+                </a>
             }
 
             @if (User.IsInRole("Admin") || User.IsInRole("Auditor"))
@@ -157,6 +160,7 @@
     <partial name="_Toasts" />
     <partial name="_ConfirmModal" />
     <script src="~/js/theme.js" asp-append-version="true"></script>
+    <script src="~/js/site.js" asp-append-version="true"></script>
     @await RenderSectionAsync("Scripts", required: false)
 </body>
 </html>

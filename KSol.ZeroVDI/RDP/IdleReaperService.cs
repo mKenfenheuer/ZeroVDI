@@ -24,6 +24,9 @@ public class IdleReaperService : BackgroundService
     private readonly ProxmoxBackendProvider _backends;
     private readonly SessionTracker _sessions;
     private readonly ResourceShutdownService _shutdown;
+    /// <summary>Name this worker reports liveness under on the operations page.</summary>
+    private const string HeartbeatName = "Idle reaper";
+    private readonly ServiceHeartbeats _heartbeats;
     private readonly ILogger<IdleReaperService> _logger;
 
     public IdleReaperService(
@@ -32,6 +35,7 @@ public class IdleReaperService : BackgroundService
         ProxmoxBackendProvider backends,
         SessionTracker sessions,
         ResourceShutdownService shutdown,
+        ServiceHeartbeats heartbeats,
         ILogger<IdleReaperService> logger)
     {
         _scopeFactory = scopeFactory;
@@ -39,7 +43,9 @@ public class IdleReaperService : BackgroundService
         _backends = backends;
         _sessions = sessions;
         _shutdown = shutdown;
+        _heartbeats = heartbeats;
         _logger = logger;
+        _heartbeats.Register(HeartbeatName, ScanInterval);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -52,10 +58,12 @@ public class IdleReaperService : BackgroundService
             try
             {
                 await ScanOnceAsync(stoppingToken);
+                _heartbeats.Success(HeartbeatName, ScanInterval);
             }
             catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
             {
                 _logger.LogError(ex, "Idle reaper scan failed");
+                _heartbeats.Failure(HeartbeatName, ScanInterval, ex.Message);
             }
 
             try { await Task.Delay(ScanInterval, stoppingToken); }

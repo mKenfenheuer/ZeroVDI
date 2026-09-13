@@ -154,9 +154,9 @@ public class HomeController : Controller
         // SSO: when VM credentials are stored for this (user, resource), the console auto-connects
         // without the login overlay. NO stored credential (username, password or domain) is EVER sent
         // to the browser. The gateway injects the real credentials entirely server-side for both the
-        // client-facing NLA and the host logon (see RdpWebSocketController.presuppliedCreds and
-        // MitmRdpStream._hostCreds; the client's delegated creds are terminated at the gateway and
-        // discarded). The browser uses harmless placeholders so its handshake frames are well-formed;
+        // client-facing NLA and the host logon (see RdpWebSocketController.presuppliedCreds; the
+        // client's delegated creds are terminated at the gateway and discarded). The browser uses
+        // harmless placeholders so its handshake frames are well-formed;
         // those placeholders never reach the host.
         if (authorization?.HasStoredCredentials == true)
         {

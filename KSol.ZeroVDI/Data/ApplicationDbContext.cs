@@ -7,7 +7,7 @@ namespace KSol.ZeroVDI.Data;
 
 public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
 {
-    // Encrypts sensitive string columns at rest (NtHash, Proxmox API secret). Null at design time
+    // Encrypts sensitive string columns at rest (Proxmox API secret, connector token). Null at design time
     // (migrations/scaffolding), where no encryption is needed because no data is read or written.
     private readonly CredentialProtector? _protector;
 
@@ -137,14 +137,13 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
             .OnDelete(DeleteBehavior.SetNull);
 
         // Encrypt sensitive columns at rest. These hold secrets that must never be plaintext in the DB:
-        //  - ApplicationUser.NtHash: unsalted MD4 of the gateway password (offline-crackable / PtH if leaked).
         //  - ProxmoxBackend.ApiTokenSecret: full API credential for the Proxmox cluster.
+        //  - Connector.RegistrationToken: enrols a new connector against this gateway.
         // The Protected* columns on RDPResource/RDPResourceUserAuthorization are already encrypted by the
         // CredentialProtector at the call sites, so they are NOT double-wrapped here.
         if (_protector != null)
         {
             var encrypt = new EncryptedStringConverter(_protector);
-            builder.Entity<ApplicationUser>().Property(u => u.NtHash).HasConversion(encrypt);
             builder.Entity<ProxmoxBackend>().Property(b => b.ApiTokenSecret).HasConversion(encrypt);
             builder.Entity<Connector>().Property(c => c.RegistrationToken).HasConversion(encrypt);
         }

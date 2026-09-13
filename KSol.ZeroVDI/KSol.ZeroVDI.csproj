@@ -6,27 +6,35 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <UserSecretsId>aspnet-KSol.ZeroVDI.-250bca5b-7027-4c51-90d4-0bba1f01bd40</UserSecretsId>
+    <!-- Keep in step with package.json's version; the operations page reports it. -->
+    <Version>0.6.44</Version>
   </PropertyGroup>
 
   <ItemGroup>
     <None Update="app.db" CopyToOutputDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 
+  <!-- The protocol decoders (ZGFX, MPPC) are internal implementation detail of the relay, but they are
+       exactly the code that must be tested against hostile input. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="KSol.ZeroVDI.Tests" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Kerberos.NET" Version="4.6.146" />
     <PackageReference Include="MailKit" Version="4.17.0" />
     <PackageReference Include="Markdig" Version="0.42.0" />
-    <PackageReference Include="Microsoft.AspNetCore.Diagnostics.EntityFrameworkCore" Version="9.0.0" />
-    <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="9.0.0" />
-    <PackageReference Include="Microsoft.AspNetCore.Identity.UI" Version="9.0.0" />
-    <PackageReference Include="Microsoft.AspNetCore.Mvc.Razor.RuntimeCompilation" Version="9.0.17" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.0.0" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="9.0.0">
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.OpenIdConnect" Version="9.0.20" />
+    <PackageReference Include="Microsoft.AspNetCore.Diagnostics.EntityFrameworkCore" Version="9.0.20" />
+    <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="9.0.20" />
+    <PackageReference Include="Microsoft.AspNetCore.Identity.UI" Version="9.0.20" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Razor.RuntimeCompilation" Version="9.0.20" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="9.0.20" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="9.0.20">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.VisualStudio.Web.CodeGeneration.Design" Version="9.0.0" />
-    <PackageReference Include="SSH.NET" Version="2025.1.0" />
+    <PackageReference Include="SSH.NET" Version="2026.0.0" />
   </ItemGroup>
 
   <!-- node_modules and the Tailwind input sources are not part of the web content payload. -->

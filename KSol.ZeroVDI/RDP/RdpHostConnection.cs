@@ -8,12 +8,11 @@ namespace KSol.ZeroVDI.RDP;
 /// Opens the gateway's <i>host-side</i> half of an RDP connection: TCP connect, X.224
 /// <c>PROTOCOL_HYBRID</c> negotiation, TLS termination, and the CredSSP (NLA) client handshake with the
 /// VM credentials. On success it yields the decrypted <see cref="SslStream"/> positioned at the start of
-/// the (NLA-pre-authenticated) RDP connection sequence — the same point both the browser console relay
-/// (<see cref="RdpRelaySession"/>) and the native MITM relay (<see cref="MitmRdpStream"/>) take over and
-/// relay the opaque RDP byte stream.
+/// the (NLA-pre-authenticated) RDP connection sequence — the point at which the browser console relay
+/// (<see cref="RdpRelaySession"/>) takes over and relays the opaque RDP byte stream.
 ///
-/// This was lifted verbatim out of <see cref="RdpRelaySession"/> so the two relay paths share one
-/// host-connect implementation; the X.224 framing details live here.
+/// This lives apart from <see cref="RdpRelaySession"/> so the host-connect sequence stays readable on
+/// its own; the X.224 framing details live here.
 /// </summary>
 public sealed class RdpHostConnection
 {

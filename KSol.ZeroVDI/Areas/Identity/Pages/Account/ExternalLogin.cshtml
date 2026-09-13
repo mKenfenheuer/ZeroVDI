@@ -1,0 +1,18 @@
+@page
+@model ExternalLoginModel
+@{
+    ViewData["Title"] = "Single sign-on";
+}
+
+<h2 class="text-xl font-semibold text-center mb-1">Single sign-on</h2>
+<p class="text-sm text-muted-foreground text-center mb-6">We couldn't complete your sign-in.</p>
+
+<div class="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm text-foreground">
+    @Model.ErrorMessage
+</div>
+
+<div class="mt-6">
+    <a asp-page="./Login" class="block w-full text-center px-4 py-2.5 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 transition-opacity">
+        Back to sign in
+    </a>
+</div>

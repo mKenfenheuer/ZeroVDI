@@ -2,8 +2,7 @@ namespace KSol.ZeroVDI.RDP;
 
 /// <summary>
 /// Live structural decode + recording of a decrypted RDP byte stream via the shared RdpWire engine.
-/// Shared by both relay paths (the browser console <see cref="RdpRelaySession"/> and the native MITM
-/// <see cref="MitmRdpStream"/>): each feeds both directions of its decrypted stream here.
+/// <see cref="RdpRelaySession"/> feeds both directions of its decrypted stream here.
 ///
 /// When <c>RDPGW_DUMP_DIR</c> is set it also writes a diagnostic PDU log (pdus.log/pdus.jsonl) and
 /// meta.txt (per-chunk dir+ts+len, so an offline <c>rdpmitm --replay</c> reconstructs true wire order).
@@ -50,13 +49,29 @@ internal sealed class RdpStreamRecorder : IDisposable
     }
 
     /// <summary>
-    /// Create a recorder if either diagnostics (RDPGW_DUMP_DIR) or real recording (a media sink) is
-    /// requested. Returns null when neither is active (no decode overhead for ordinary sessions).
+    /// Whether the <c>RDPGW_DUMP_DIR</c> raw-stream dump may run at all. Set once at startup from the
+    /// hosting environment (development only). The dump writes the DECRYPTED stream — keystrokes,
+    /// screen contents and the connection-sequence PDUs — to unencrypted files outside the recording
+    /// pipeline, with none of its retention, encryption-at-rest or tamper-evidence. An environment
+    /// variable on its own must therefore not be able to switch it on in production.
+    /// </summary>
+    public static bool StreamDumpAllowed { get; set; }
+
+    /// <summary>
+    /// Create a recorder if either diagnostics (RDPGW_DUMP_DIR, development only) or real recording
+    /// (a media sink) is requested. Returns null when neither is active (no decode overhead for
+    /// ordinary sessions).
     /// </summary>
     public static RdpStreamRecorder? TryCreate(ILogger logger, IRdpMediaSink? media)
     {
         var dir = Environment.GetEnvironmentVariable("RDPGW_DUMP_DIR");
         bool wantDump = !string.IsNullOrEmpty(dir);
+        if (wantDump && !StreamDumpAllowed)
+        {
+            logger.LogWarning("RDPGW_DUMP_DIR is set but raw stream dumps are only available in the " +
+                "Development environment; ignoring it.");
+            wantDump = false;
+        }
         if (!wantDump && media == null) return null;
         try
         {

@@ -21,16 +21,29 @@ namespace KSol.ZeroVDI.Controllers
         private readonly ApplicationDbContext _context;
         private readonly ResourceAccessService _access;
         private readonly KSol.ZeroVDI.RDP.IAuditLogger _audit;
+        private readonly AdminAccountSafety _safety;
+        private readonly SessionTracker _sessions;
+        private readonly Microsoft.AspNetCore.Identity.UI.Services.IEmailSender _email;
+        private readonly PublicUrl _publicUrl;
 
         public UsersController(UserManager<ApplicationUser> userManager, RoleManager<IdentityRole> roleManager,
-            ApplicationDbContext context, ResourceAccessService access, KSol.ZeroVDI.RDP.IAuditLogger audit)
+            ApplicationDbContext context, ResourceAccessService access, KSol.ZeroVDI.RDP.IAuditLogger audit,
+            AdminAccountSafety safety, SessionTracker sessions,
+            Microsoft.AspNetCore.Identity.UI.Services.IEmailSender email, PublicUrl publicUrl)
         {
             _userManager = userManager;
             _roleManager = roleManager;
             _context = context;
             _access = access;
             _audit = audit;
+            _safety = safety;
+            _sessions = sessions;
+            _email = email;
+            _publicUrl = publicUrl;
         }
+
+        /// <summary>The signed-in administrator's user id, used by the self-protection guards.</summary>
+        private string? ActorId => _userManager.GetUserId(User);
 
         // GET: /admin/users
         [HttpGet("")]
@@ -102,6 +115,10 @@ namespace KSol.ZeroVDI.Controllers
             return new UserManageViewModel
             {
                 User = user,
+                IsDisabled = AdminAccountSafety.IsDisabled(user),
+                IsLockedOut = AdminAccountSafety.IsLockedOut(user),
+                IsSelf = user.Id == ActorId,
+                HasExternalLogins = (await _userManager.GetLoginsAsync(user)).Count > 0,
                 AllRoles = allRoles,
                 UserRoles = userRoles.ToList(),
                 Memberships = memberships,
@@ -230,6 +247,16 @@ namespace KSol.ZeroVDI.Controllers
             var user = await _userManager.FindByIdAsync(id);
             if (user != null)
             {
+                if (await _safety.CheckDeleteAsync(user, ActorId) is { } refusal)
+                {
+                    TempData["Error"] = refusal;
+                    return RedirectToAction(nameof(Manage), new { id });
+                }
+
+                // Their desktops are open right now; deleting the account must not leave those tunnels
+                // running under an identity that no longer exists.
+                DisconnectSessionsFor(user, "user deleted");
+
                 var result = await _userManager.DeleteAsync(user);
                 if (!result.Succeeded)
                 {
@@ -261,8 +288,17 @@ namespace KSol.ZeroVDI.Controllers
             }
 
             var userRoles = await _userManager.GetRolesAsync(user);
-            var rolesToRemove = userRoles.Except(selectedRoles ?? new string[] { }).ToList();
-            var rolesToAdd = (selectedRoles ?? new string[] { }).Except(userRoles).ToList();
+            var requested = selectedRoles ?? Array.Empty<string>();
+
+            // Never let an administrator strip the last Admin role (or their own).
+            if (await _safety.CheckRoleChangeAsync(user, ActorId, userRoles, requested) is { } refusal)
+            {
+                TempData["Error"] = refusal;
+                return RedirectToAction(nameof(Manage), new { id = user.Id });
+            }
+
+            var rolesToRemove = userRoles.Except(requested).ToList();
+            var rolesToAdd = requested.Except(userRoles).ToList();
 
             try
             {
@@ -278,6 +314,10 @@ namespace KSol.ZeroVDI.Controllers
 
                 if (rolesToAdd.Any() || rolesToRemove.Any())
                 {
+                    // Roles live in the auth cookie. Without rotating the stamp, a revoked administrator
+                    // keeps their admin rights for the whole validation interval — and a promotion
+                    // wouldn't take effect until then either.
+                    await _userManager.UpdateSecurityStampAsync(user);
                     await _audit.LogAsync(KSol.ZeroVDI.Models.AuditCategory.Authorization, "RolesChanged",
                         targetType: "User", targetId: user.Id, targetName: user.UserName,
                         detail: new { added = rolesToAdd, removed = rolesToRemove });
@@ -291,6 +331,170 @@ namespace KSol.ZeroVDI.Controllers
                 ModelState.AddModelError("", $"Error assigning roles: {ex.Message}");
                 return View(nameof(Manage), await BuildManageViewModelAsync(user));
             }
+        }
+
+        // --- Account security: the operations an administrator needs when a person calls the help
+        // desk. Everything here is guarded by AdminAccountSafety so none of it can lock the last
+        // administrator out, and everything is audited. ---
+
+        /// <summary>Aborts every live console session belonging to a user.</summary>
+        private int DisconnectSessionsFor(ApplicationUser user, string reason)
+        {
+            var count = 0;
+            foreach (var session in _sessions.All().Where(s => s.UserId == user.Id).ToList())
+            {
+                if (_sessions.ForceDisconnect(session.SessionId) != null) count++;
+            }
+            if (count > 0)
+            {
+                _audit.LogAsync(AuditCategory.Session, "SessionForceDisconnected",
+                    targetType: "User", targetId: user.Id, targetName: user.UserName,
+                    detail: new { sessions = count, reason }).GetAwaiter().GetResult();
+            }
+            return count;
+        }
+
+        // POST: /admin/users/{id}/password — set a new password directly (help-desk reset).
+        [HttpPost("{id}/password")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> SetPassword(string id, string newPassword, bool signOutEverywhere = true)
+        {
+            var user = await _userManager.FindByIdAsync(id);
+            if (user == null) return NotFound();
+
+            if (string.IsNullOrWhiteSpace(newPassword))
+            {
+                TempData["Error"] = "Enter a new password.";
+                return RedirectToAction(nameof(Manage), new { id });
+            }
+
+            // Reset via a token rather than by writing a hash: this is the only path that runs the
+            // configured password validators and clears any stale lockout counter.
+            var token = await _userManager.GeneratePasswordResetTokenAsync(user);
+            var result = await _userManager.ResetPasswordAsync(user, token, newPassword);
+            if (!result.Succeeded)
+            {
+                TempData["Error"] = string.Join(" ", result.Errors.Select(e => e.Description));
+                return RedirectToAction(nameof(Manage), new { id });
+            }
+
+            if (signOutEverywhere)
+            {
+                await _userManager.UpdateSecurityStampAsync(user);
+                DisconnectSessionsFor(user, "password reset by administrator");
+            }
+
+            await _audit.LogAsync(AuditCategory.User, "PasswordResetByAdmin",
+                targetType: "User", targetId: user.Id, targetName: user.UserName,
+                detail: new { signOutEverywhere });
+            TempData["Status"] = "Password set." + (signOutEverywhere ? " Existing sessions were signed out." : "");
+            return RedirectToAction(nameof(Manage), new { id });
+        }
+
+        // POST: /admin/users/{id}/password/email — e-mail the user a reset link instead.
+        [HttpPost("{id}/password/email")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> SendPasswordReset(string id)
+        {
+            var user = await _userManager.FindByIdAsync(id);
+            if (user == null) return NotFound();
+            if (string.IsNullOrWhiteSpace(user.Email))
+            {
+                TempData["Error"] = "This account has no e-mail address.";
+                return RedirectToAction(nameof(Manage), new { id });
+            }
+
+            var code = await _userManager.GeneratePasswordResetTokenAsync(user);
+            code = Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(
+                System.Text.Encoding.UTF8.GetBytes(code));
+            // Built from App:PublicBaseUrl, never the request host — see PublicUrl.
+            var callbackUrl = _publicUrl.Absolute(
+                Url.Page("/Account/ResetPassword", pageHandler: null, values: new { area = "Identity", code }),
+                Request);
+
+            try
+            {
+                await _email.SendEmailAsync(user.Email, "Reset your ZeroVDI password",
+                    $"An administrator started a password reset for your account. " +
+                    $"<a href='{System.Text.Encodings.Web.HtmlEncoder.Default.Encode(callbackUrl)}'>Choose a new password</a>.");
+            }
+            catch (Exception ex)
+            {
+                TempData["Error"] = "Could not send the e-mail: " + ex.Message;
+                return RedirectToAction(nameof(Manage), new { id });
+            }
+
+            await _audit.LogAsync(AuditCategory.User, "PasswordResetLinkSent",
+                targetType: "User", targetId: user.Id, targetName: user.UserName);
+            TempData["Status"] = $"Reset link sent to {user.Email}.";
+            return RedirectToAction(nameof(Manage), new { id });
+        }
+
+        // POST: /admin/users/{id}/unlock — clear a brute-force lockout.
+        [HttpPost("{id}/unlock")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> Unlock(string id)
+        {
+            var user = await _userManager.FindByIdAsync(id);
+            if (user == null) return NotFound();
+
+            await _userManager.SetLockoutEndDateAsync(user, null);
+            await _userManager.ResetAccessFailedCountAsync(user);
+            await _audit.LogAsync(AuditCategory.User, "UserUnlocked",
+                targetType: "User", targetId: user.Id, targetName: user.UserName);
+            TempData["Status"] = "Account unlocked.";
+            return RedirectToAction(nameof(Manage), new { id });
+        }
+
+        // POST: /admin/users/{id}/enabled — disable or re-enable sign-in for the account.
+        [HttpPost("{id}/enabled")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> SetEnabled(string id, bool enabled)
+        {
+            var user = await _userManager.FindByIdAsync(id);
+            if (user == null) return NotFound();
+
+            if (!enabled && await _safety.CheckDisableAsync(user, ActorId) is { } refusal)
+            {
+                TempData["Error"] = refusal;
+                return RedirectToAction(nameof(Manage), new { id });
+            }
+
+            // Identity has no "enabled" flag; a far-future lockout is the standard way to express it and
+            // is honoured by every sign-in path, including the external/federated one.
+            await _userManager.SetLockoutEnabledAsync(user, true);
+            await _userManager.SetLockoutEndDateAsync(user, enabled ? null : AdminAccountSafety.DisabledUntil);
+
+            if (!enabled)
+            {
+                // A cookie already issued outlives the lockout unless the stamp changes.
+                await _userManager.UpdateSecurityStampAsync(user);
+                DisconnectSessionsFor(user, "account disabled");
+            }
+
+            await _audit.LogAsync(AuditCategory.User, enabled ? "UserEnabled" : "UserDisabled",
+                targetType: "User", targetId: user.Id, targetName: user.UserName);
+            TempData["Status"] = enabled ? "Account enabled." : "Account disabled and signed out.";
+            return RedirectToAction(nameof(Manage), new { id });
+        }
+
+        // POST: /admin/users/{id}/signout — invalidate every issued cookie and drop live sessions.
+        [HttpPost("{id}/signout")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> SignOutEverywhere(string id)
+        {
+            var user = await _userManager.FindByIdAsync(id);
+            if (user == null) return NotFound();
+
+            await _userManager.UpdateSecurityStampAsync(user);
+            var dropped = DisconnectSessionsFor(user, "signed out by administrator");
+            await _audit.LogAsync(AuditCategory.User, "UserSignedOutEverywhere",
+                targetType: "User", targetId: user.Id, targetName: user.UserName,
+                detail: new { sessions = dropped });
+            TempData["Status"] = dropped > 0
+                ? $"Signed out everywhere; {dropped} console session(s) disconnected."
+                : "Signed out everywhere.";
+            return RedirectToAction(nameof(Manage), new { id });
         }
 
         // --- Group membership (mirrors UserGroupsController; here keyed by the user) ---
@@ -459,6 +663,14 @@ namespace KSol.ZeroVDI.Controllers
     public class UserManageViewModel
     {
         public ApplicationUser User { get; set; } = null!;
+        /// <summary>Sign-in deliberately switched off by an administrator (far-future lockout).</summary>
+        public bool IsDisabled { get; set; }
+        /// <summary>Temporarily locked out by failed sign-in attempts.</summary>
+        public bool IsLockedOut { get; set; }
+        /// <summary>The administrator viewing the page is this user — the self-protection guards apply.</summary>
+        public bool IsSelf { get; set; }
+        /// <summary>The account signs in through an identity provider, so a local password may not exist.</summary>
+        public bool HasExternalLogins { get; set; }
         public List<IdentityRole> AllRoles { get; set; } = new();
         public List<string> UserRoles { get; set; } = new();
         public List<UserGroupMembership> Memberships { get; set; } = new();

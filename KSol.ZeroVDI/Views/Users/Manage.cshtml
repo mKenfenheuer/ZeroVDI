@@ -17,6 +17,14 @@
 
 @section PageActions {
     <div class="flex items-center gap-2">
+        @if (Model.IsDisabled)
+        {
+            <span class="badge bg-destructive/10 text-destructive"><i class="ri-forbid-line"></i> Disabled</span>
+        }
+        else if (Model.IsLockedOut)
+        {
+            <span class="badge bg-warning/10 text-warning"><i class="ri-lock-line"></i> Locked out</span>
+        }
         @if (u.TwoFactorEnabled)
         {
             <span class="badge bg-success/10 text-success"><i class="ri-shield-check-line"></i> MFA</span>
@@ -83,6 +91,86 @@
                 <button type="submit" class="btn-primary">Save changes</button>
             </div>
         </form>
+
+        <div class="card-surface p-6 max-w-lg space-y-5">
+            <div>
+                <h3 class="font-semibold">Account security</h3>
+                <p class="form-hint mt-1">
+                    Help-desk actions for this account. Every one of them is recorded in the
+                    <a asp-controller="Audit" asp-action="Index" class="link">audit log</a>.
+                </p>
+            </div>
+
+            @if (Model.HasExternalLogins)
+            {
+                <p class="text-sm text-muted-foreground">
+                    <i class="ri-links-line"></i>
+                    This account signs in through an identity provider. Setting a password here adds a
+                    local sign-in alongside it; it does not change anything at the provider.
+                </p>
+            }
+
+            <form asp-action="SetPassword" asp-route-id="@u.Id" method="post" class="space-y-3">
+                @Html.AntiForgeryToken()
+                <div>
+                    <label class="form-label" for="newPassword">Set a new password</label>
+                    <input class="form-input" id="newPassword" name="newPassword" type="password"
+                           autocomplete="new-password" placeholder="New password" />
+                </div>
+                <label class="flex items-center gap-2 text-sm cursor-pointer">
+                    <input class="form-check" type="checkbox" name="signOutEverywhere" value="true" checked />
+                    <span>Sign the user out everywhere and drop their open desktops</span>
+                </label>
+                <button type="submit" class="btn-secondary"><i class="ri-key-2-line"></i> Set password</button>
+            </form>
+
+            <div class="flex flex-wrap items-center gap-2 pt-4 border-t border-border">
+                <form asp-action="SendPasswordReset" asp-route-id="@u.Id" method="post">
+                    @Html.AntiForgeryToken()
+                    <button type="submit" class="btn-outline"><i class="ri-mail-send-line"></i> E-mail a reset link</button>
+                </form>
+
+                <form asp-action="SignOutEverywhere" asp-route-id="@u.Id" method="post">
+                    @Html.AntiForgeryToken()
+                    <button type="submit" class="btn-outline"><i class="ri-logout-circle-line"></i> Sign out everywhere</button>
+                </form>
+
+                @if (Model.IsLockedOut)
+                {
+                    <form asp-action="Unlock" asp-route-id="@u.Id" method="post">
+                        @Html.AntiForgeryToken()
+                        <button type="submit" class="btn-outline"><i class="ri-lock-unlock-line"></i> Unlock</button>
+                    </form>
+                }
+            </div>
+
+            <div class="pt-4 border-t border-border">
+                @if (Model.IsDisabled)
+                {
+                    <form asp-action="SetEnabled" asp-route-id="@u.Id" method="post" class="flex items-center gap-3">
+                        @Html.AntiForgeryToken()
+                        <input type="hidden" name="enabled" value="true" />
+                        <button type="submit" class="btn-primary"><i class="ri-user-follow-line"></i> Enable account</button>
+                        <span class="form-hint">Sign-in is currently blocked for this account.</span>
+                    </form>
+                }
+                else if (Model.IsSelf)
+                {
+                    <p class="form-hint"><i class="ri-information-line"></i> You cannot disable or delete your own account.</p>
+                }
+                else
+                {
+                    <form asp-action="SetEnabled" asp-route-id="@u.Id" method="post" class="flex items-center gap-3">
+                        @Html.AntiForgeryToken()
+                        <input type="hidden" name="enabled" value="false" />
+                        <button type="submit" class="btn-outline text-destructive border-destructive/40 hover:bg-destructive/10">
+                            <i class="ri-forbid-line"></i> Disable account
+                        </button>
+                        <span class="form-hint">Blocks sign-in and ends open sessions; keeps the account and its grants.</span>
+                    </form>
+                }
+            </div>
+        </div>
     </section>
 
     <!-- Roles -->
@@ -91,6 +179,10 @@
             @Html.AntiForgeryToken()
             <input type="hidden" name="id" value="@u.Id" />
             <p class="text-sm text-muted-foreground">A user with no admin role can still connect to the resources granted to them.</p>
+            @if (Model.IsSelf)
+            {
+                <p class="form-hint"><i class="ri-information-line"></i> You cannot remove your own administrator role.</p>
+            }
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 @foreach (var role in Model.AllRoles)
                 {

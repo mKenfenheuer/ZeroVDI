@@ -20,11 +20,14 @@ public sealed class MfaEnforcementMiddleware
 
     private readonly RequestDelegate _next;
     private readonly MfaPolicy _policy;
+    private readonly ExternalIdentityOptions _external;
 
-    public MfaEnforcementMiddleware(RequestDelegate next, MfaPolicy policy)
+    public MfaEnforcementMiddleware(RequestDelegate next, MfaPolicy policy,
+        ExternalIdentityOptions external)
     {
         _next = next;
         _policy = policy;
+        _external = external;
     }
 
     public async Task InvokeAsync(HttpContext context, UserManager<ApplicationUser> userManager,
@@ -33,7 +36,8 @@ public sealed class MfaEnforcementMiddleware
         if (!_policy.Enabled
             || context.User?.Identity?.IsAuthenticated != true
             || IsExempt(context.Request.Path)
-            || !_policy.IsRequiredFor(context.User))
+            || !_policy.IsRequiredFor(context.User)
+            || IsFederatedAndAccepted(context.User))
         {
             await _next(context);
             return;
@@ -55,6 +59,14 @@ public sealed class MfaEnforcementMiddleware
         var returnUrl = context.Request.Path + context.Request.QueryString;
         context.Response.Redirect($"{SetupPath}?returnUrl={Uri.EscapeDataString(returnUrl)}&mfaRequired=1");
     }
+
+    /// <summary>
+    /// A session established through the identity provider, where the provider is trusted to have done
+    /// the second factor (<c>Oidc:SatisfiesMfa</c>, on by default — enforcing MFA at the provider is
+    /// the usual reason to federate). Turning it off demands a ZeroVDI second factor on top.
+    /// </summary>
+    private bool IsFederatedAndAccepted(System.Security.Claims.ClaimsPrincipal user)
+        => _external.SatisfiesMfa && user.HasClaim("amr", ExternalIdentityOptions.Scheme);
 
     /// <summary>
     /// Paths the enforcement gate must never block: the 2FA setup/management flow itself, sign-out,

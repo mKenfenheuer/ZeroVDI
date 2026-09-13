@@ -16,4 +16,11 @@ public class UserGroupMembership
     public string UserId { get; set; } = "";
     [ForeignKey(nameof(UserId))]
     public ApplicationUser? User { get; set; }
+
+    /// <summary>
+    /// True when the membership was created by identity federation from the provider's group claim
+    /// (<c>ExternalIdentityService</c>). Only these are withdrawn when the directory stops asserting
+    /// the group — a membership an administrator added by hand is never removed by a sign-in.
+    /// </summary>
+    public bool IsExternal { get; set; }
 }

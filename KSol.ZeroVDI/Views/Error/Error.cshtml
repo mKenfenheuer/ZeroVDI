@@ -38,7 +38,7 @@
                 <a href="/" class="btn-primary">
                     <i class="ri-home-4-line"></i><span>Go home</span>
                 </a>
-                <button type="button" onclick="history.back()" class="btn-secondary">
+                <button type="button" id="go-back" class="btn-secondary">
                     <i class="ri-arrow-left-line"></i><span>Go back</span>
                 </button>
             </div>
@@ -48,5 +48,11 @@
     </div>
 
     <script src="~/js/theme.js" asp-append-version="true"></script>
+    @* Content-Security-Policy forbids inline event handlers, which a nonce cannot cover — they are
+       attributes, not elements. The behaviour lives in this nonce-carrying script instead. *@
+    <script>
+        document.getElementById('go-back')?.addEventListener('click', function () { history.back(); });
+    </script>
 </body>
 </html>
+

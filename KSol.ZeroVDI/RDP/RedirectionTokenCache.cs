@@ -20,8 +20,13 @@ public sealed class RedirectionTokenCache(ILogger<RedirectionTokenCache> logger)
     /// initial → greeter → logged-in session) record into ONE recording instead of three. Each leg writes
     /// to <c>{BaseDir}/leg{Leg}</c>; the muxer concatenates them in order.
     /// </summary>
+    /// <param name="TargetHost">
+    /// Host the broker named in the redirect ([MS-RDPBCGR] 2.2.13.1 TargetNetAddress / TargetFQDN), or
+    /// null when it handed the session off on the same machine. Validated by
+    /// <see cref="RedirectionTargetPolicy"/> before the next leg connects to it.
+    /// </param>
     public sealed record Pending(byte[] Token, string? Username, string? Domain, string? Password,
-        string? RecordingId = null, string? BaseDir = null, int Leg = 0);
+        string? RecordingId = null, string? BaseDir = null, int Leg = 0, string? TargetHost = null);
 
     private static readonly TimeSpan Ttl = TimeSpan.FromSeconds(30);
     private readonly ConcurrentDictionary<string, (Pending Pending, DateTime Expires)> _entries = new();
@@ -31,8 +36,8 @@ public sealed class RedirectionTokenCache(ILogger<RedirectionTokenCache> logger)
     public void Store(string userId, string resourceId, Pending pending)
     {
         _entries[Key(userId, resourceId)] = (pending, DateTime.UtcNow + Ttl);
-        logger.LogInformation("RedirectionTokenCache: stored {Len}B token (creds={HasCreds}) for '{Key}'",
-            pending.Token.Length, pending.Username != null, Key(userId, resourceId));
+        logger.LogInformation("RedirectionTokenCache: stored {Len}B token (creds={HasCreds}, target={Target}) for '{Key}'",
+            pending.Token.Length, pending.Username != null, pending.TargetHost ?? "same host", Key(userId, resourceId));
     }
 
     /// <summary>Removes and returns the pending redirection state for (user, resource), or null if none/expired.</summary>

@@ -1,0 +1,59 @@
+name: Build & test
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore
+        run: dotnet restore KSol.ZeroVDI.sln
+
+      # The agent has no node_modules, so the Tailwind target skips itself; the compiled bundle is
+      # committed. Saying so explicitly keeps the build from depending on that inference.
+      - name: Build
+        run: dotnet build KSol.ZeroVDI.sln -c Release --no-restore -p:SkipTailwindBuild=true
+
+      - name: Test
+        run: dotnet test KSol.ZeroVDI.sln -c Release --no-build --verbosity normal
+
+  # A known-vulnerable dependency is worth failing the build over: this gateway holds every user's
+  # desktop credentials. Runs separately so a new advisory published against an unchanged tree is
+  # reported as its own failure rather than looking like a broken build.
+  audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Fail on vulnerable NuGet packages
+        run: |
+          dotnet restore KSol.ZeroVDI.sln
+          output=$(dotnet list KSol.ZeroVDI.sln package --vulnerable --include-transitive)
+          echo "$output"
+          if echo "$output" | grep -qiE '\b(Critical|High|Moderate|Low)\b'; then
+            echo "::error::Vulnerable NuGet packages found — see the listing above."
+            exit 1
+          fi

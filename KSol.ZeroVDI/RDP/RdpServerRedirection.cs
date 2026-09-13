@@ -50,8 +50,15 @@ public sealed class RdpServerRedirection
     /// GNOME "Remote Login" post-auth handover, where the host disconnects instead of sending a redirect
     /// PDU and the client must reconnect with the same token).
     /// </summary>
-    public static RdpServerRedirection FromToken(byte[] loadBalanceInfo, string? username, string? domain, string? password) =>
-        new() { LoadBalanceInfo = loadBalanceInfo, Username = username, Domain = domain, Password = password };
+    public static RdpServerRedirection FromToken(byte[] loadBalanceInfo, string? username, string? domain,
+        string? password, string? targetHost = null) =>
+        new()
+        {
+            LoadBalanceInfo = loadBalanceInfo, Username = username, Domain = domain, Password = password,
+            // The leg being re-armed is already on the right machine; carrying it forward keeps a chain
+            // that began with a cross-host redirect from falling back to the resource's own host.
+            TargetHost = targetHost,
+        };
 
     /// <summary>
     /// Scans a decrypted host→client buffer for a Server Redirection PDU and parses it. Returns null if

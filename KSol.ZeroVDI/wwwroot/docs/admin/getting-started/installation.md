@@ -16,12 +16,19 @@ own hosting standards (reverse proxy, TLS termination, service supervision).
 
 ```bash
 # from the repository root
-dotnet build KSol.ZeroVDI. -c Release
-dotnet run  --project KSol.ZeroVDI. -c Release
+dotnet build KSol.ZeroVDI.sln -c Release
+dotnet test  KSol.ZeroVDI.sln -c Release
+dotnet run   --project KSol.ZeroVDI -c Release
 ```
 
 The Tailwind CSS bundle is rebuilt automatically when Node is present; the compiled
-`wwwroot/css/app.css` is committed, so hosts without Node still work (the build target is skipped).
+`wwwroot/css/app.css` is committed, so hosts without Node still work (the build target skips itself,
+and `-p:SkipTailwindBuild=true` says so explicitly on a build agent).
+
+Unit tests live in `KSol.ZeroVDI.Tests` and cover the code where a mistake is expensive and a manual
+check is impractical: the protocol decoders against hostile input, the redirect-target rules, the
+device-policy channel guard, and the account-lockout predicates. CI runs them, plus a NuGet
+vulnerability audit, before any image is built.
 
 ## First run
 
@@ -32,6 +39,29 @@ The Tailwind CSS bundle is rebuilt automatically when Node is present; the compi
    immediately enrol MFA if your policy requires it.
 4. Add a [backend](../administration/backends), publish a [resource](../features/resources) or define
    a [VDI pool](../features/vdi-pools), and grant [access](../features/access-control).
+
+## Running in a container
+
+The published image runs as the **unprivileged user 1654** and listens on **8080**. That matters for
+an existing deployment: a host bind mount carries its own ownership, so chown it once before
+upgrading, or the app cannot write its database, keyring or recordings.
+
+```bash
+chown -R 1654:1654 /mnt/data/rdpgw
+```
+
+The bundled `docker-compose.yml` additionally drops every Linux capability except `NET_RAW` — which
+the resource status probe needs for ICMP — sets `no-new-privileges`, caps the log files, and health-
+checks the container against `/healthz`.
+
+`/healthz` is anonymous and deliberately shallow: it answers *is this process serving requests?*, not
+*is Proxmox reachable?* A probe that failed on a backend hiccup would have the orchestrator restart a
+healthy gateway and drop everyone's desktops. Dependency health belongs on the
+[operations page](../administration/operations).
+
+Everything that must survive a restart lives under `/app/Data`: the SQLite database, the
+DataProtection keyring and the recordings. **Back up that whole volume** — without the keyring, every
+stored VM credential and every encrypted recording is unrecoverable.
 
 ## Reverse proxy notes
 

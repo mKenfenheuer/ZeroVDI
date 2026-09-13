@@ -66,13 +66,32 @@ mismatches but allow the connection; useful while rolling out), `Off` (accept an
 Proxmox backends verify the cluster's TLS certificate by default (**Verify TLS certificate** on the
 backend form); turn it off only for a self-signed lab cluster.
 
+## Browser security headers
+
+Every response carries a **Content-Security-Policy** whose `script-src` names a fresh, unguessable
+nonce for this one response instead of `'unsafe-inline'`. Scripts ZeroVDI renders are stamped with it
+automatically; a script injected into a page — the payload of every reflected and stored XSS — has no
+nonce and does not execute. Alongside it: `frame-ancestors 'none'` and `X-Frame-Options: DENY` (the
+console drives keyboard and mouse into a real desktop and must never be framed by another site),
+`X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, and a
+`Permissions-Policy` granting camera and microphone to this origin only.
+
+`style-src` still allows inline styles — the views use style attributes throughout, and a nonce covers
+`<style>` elements, not attributes.
+
 ## Secrets at rest
 
 - Stored VM credentials and VDI identity secrets are encrypted with an AES-GCM keyring derived from
   the `DataProtection:MasterKeyPassphrase`.
 - Stored credentials are **never** rendered into the browser; the gateway injects them server-side.
 - Recordings can be [encrypted at rest](recordings).
+- The **portal sign-in password is stored only as ASP.NET Identity's salted hash.** Nothing reversible
+  and nothing NTLM-usable is kept: the gateway authenticates to RDP hosts with the per-resource
+  credentials, never with the portal password.
+- **Raw stream dumps** (`RDPGW_DUMP_DIR`) write the decrypted session to disk outside the recording
+  pipeline — no encryption, retention or tamper-evidence. They are a development-only tool and the
+  variable is ignored outside the Development environment.
 
 ## Related
 
-- [Device policy](device-policy) · [Audit](audit) · [Rate limiting](../administration/rate-limiting)
+- [Device policy](device-policy) · [Identity federation](identity-federation) · [Audit](audit) · [Rate limiting](../administration/rate-limiting)

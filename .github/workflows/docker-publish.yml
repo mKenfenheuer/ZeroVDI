@@ -19,8 +19,22 @@ env:
 
 
 jobs:
+  # Gate the images on a green build and test run: an image that is published and signed but does not
+  # compile cleanly is worse than no image, because the signature says someone vouched for it.
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - run: dotnet test KSol.ZeroVDI.sln -c Release -p:SkipTailwindBuild=true
+
   build:
 
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -96,6 +110,7 @@ jobs:
   # Build and push the ZeroVDI connector agent image (published as <repo>/connector).
   connector:
 
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read

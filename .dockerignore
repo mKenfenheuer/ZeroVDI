@@ -1,0 +1,30 @@
+# Build output and caches — COPY . . otherwise ships hundreds of MB of bin/obj into the build context
+# and bakes the .git history into an image layer.
+**/bin/
+**/obj/
+**/node_modules/
+**/.vs/
+**/.vscode/
+.git/
+.github/
+.gitlab-ci.yml
+**/.DS_Store
+
+# Local state and secrets that must never reach an image. Note these are deliberately specific: the
+# repository's Data folders also hold EF migrations (source code), and wwwroot/docs holds the
+# documentation the app itself serves — neither may be excluded.
+**/appsettings.Development.json
+**/appsettings.Local.json
+**/*.user
+**/app_db.sqlite
+**/app_db.sqlite-shm
+**/app_db.sqlite-wal
+**/dp-keys/
+**/Data/recordings/
+capture/
+
+# Reference material that is not part of the runtime payload.
+Spec/
+docs/
+Readme.md
+CHANGELOG.md

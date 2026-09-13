@@ -4,21 +4,15 @@ using System.Text;
 namespace KSol.ZeroVDI.RDP;
 
 /// <summary>
-/// Cryptographic helpers for the gateway's NTLM/CredSSP authentication: the NTLM primitives
-/// (MD4 NT-hash, HMAC-MD5 based NTLMv2). MD4 is not provided by the .NET BCL, so a compact
-/// implementation is included here.
+/// Cryptographic helpers for the gateway's outbound NTLM/CredSSP authentication to RDP hosts: the
+/// NTLM primitives (MD4 NT-hash, HMAC-MD5 based NTLMv2). MD4 is not provided by the .NET BCL, so a
+/// compact implementation is included here. The NT hash is derived on the fly from the per-resource
+/// credential at connect time and never stored.
 /// </summary>
 public static class AuthCrypto
 {
     /// <summary>The NTLM realm advertised by this gateway.</summary>
     public const string Realm = "KSol.IT ZeroVDI";
-
-    /// <summary>Computes the NTLM NT hash = MD4(UTF-16LE(password)), hex (lowercase).</summary>
-    public static string NtHash(string password)
-    {
-        var bytes = MD4(Encoding.Unicode.GetBytes(password));
-        return Convert.ToHexStringLower(bytes);
-    }
 
     /// <summary>Computes the raw NTLM NT hash bytes = MD4(UTF-16LE(password)).</summary>
     public static byte[] NtHashBytes(string password) => MD4(Encoding.Unicode.GetBytes(password));

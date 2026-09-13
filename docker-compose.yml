@@ -1,28 +1,51 @@
 services:
   ksol-zerovdi-app:
     container_name: "ksol-zerovdi-app"
+    image: ${APP_IMAGE}
     environment:
       - "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-      - "APP_UID=1654"
       # With network_mode: host the container binds directly on the host, so listen
-      # on the published port (8084) rather than 80.
+      # on the published port (8084) rather than the image's default 8080.
       - "ASPNETCORE_HTTP_PORTS=8084"
       - "DOTNET_RUNNING_IN_CONTAINER=true"
-      - "DOTNET_VERSION=9.0.3"
-      - "ASPNET_VERSION=9.0.3"
       - "ASPNETCORE_ENVIRONMENT=Production"
-      # Encrypts the credential keyring at rest (stored VM/IPMI/SSH secrets + the NTLM NtHash). Sourced
-      # from the DataProtection__MasterKeyPassphrase GitLab CI/CD variable, exported by the deploy job.
+      # Encrypts the credential keyring at rest (stored VM/IPMI/SSH secrets). Sourced from the
+      # DataProtection__MasterKeyPassphrase GitLab CI/CD variable, exported by the deploy job.
       # The app refuses to start in Production if this is empty.
       - "DataProtection__MasterKeyPassphrase=${DataProtection__MasterKeyPassphrase}"
-    image: ${APP_IMAGE}
+      # The public address users reach ZeroVDI on. Password-reset / e-mail-change links and the
+      # OpenID Connect redirect URI are built from it instead of the request's Host header, which a
+      # forged request could otherwise point at an attacker's site.
+      - "App__PublicBaseUrl=${App__PublicBaseUrl}"
     # Host networking so the Wake-on-LAN magic packet broadcast (255.255.255.255)
     # reaches the physical LAN. In a bridged network the broadcast is trapped in the
     # container's isolated subnet and never hits the target machine.
     network_mode: "host"
     restart: "always"
+    # Runs as UID 1654 (set in the image). The bind mount below must be owned by it:
+    #   chown -R 1654:1654 /mnt/data/rdpgw
     volumes:
       - "/mnt/data/rdpgw:/app/Data"
+    security_opt:
+      # A compromised process must not be able to gain privileges through a setuid binary.
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    cap_add:
+      # The resource status probe pings hosts, and ICMP from .NET needs a raw socket. Everything else
+      # the gateway does is ordinary TCP/UDP.
+      - NET_RAW
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8084/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   ksol-zerovdi-connector:
     container_name: "ksol-zerovdi-connector"
@@ -38,3 +61,10 @@ services:
     restart: "always"
     volumes:
       - "/mnt/data/rdpgw-connector:/data"
+    security_opt:
+      - "no-new-privileges:true"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"

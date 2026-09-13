@@ -17,14 +17,16 @@ security policy centrally, and keep a complete, tamper-evident audit trail of wh
 | Hand out auto-provisioned desktops | [VDI pools](features/vdi-pools.md) |
 | Reach an isolated / NAT'd network | [Connectors](features/connectors.md) |
 | Lock down what users can do | [Device policy](features/device-policy.md) · [Security & MFA](features/security.md) |
+| Sign users in with your own directory | [Identity federation](features/identity-federation.md) |
 | Brand the interface | [Appearance & branding](features/appearance.md) |
 | Prove compliance | [Audit log](features/audit.md) · [Recordings](features/recordings.md) |
+| Check that everything still works | [Operations](administration/operations.md) |
 | See what changed between versions | [Changelog](changelog.md) |
 
 ## Documentation map
 
 - **Getting started** — [architecture](getting-started/architecture.md), [installation](getting-started/installation.md), [configuration](getting-started/configuration.md)
-- **Features** — [resources](features/resources.md), [VDI pools](features/vdi-pools.md), [connectors](features/connectors.md), [access control](features/access-control.md), [device policy](features/device-policy.md), [security & MFA](features/security.md), [appearance & branding](features/appearance.md), [sessions](features/sessions.md), [audit](features/audit.md), [recordings](features/recordings.md)
-- **Administration** — [users & groups](administration/users-and-groups.md), [backends](administration/backends.md), [rate limiting](administration/rate-limiting.md)
+- **Features** — [resources](features/resources.md), [VDI pools](features/vdi-pools.md), [connectors](features/connectors.md), [access control](features/access-control.md), [device policy](features/device-policy.md), [security & MFA](features/security.md), [identity federation](features/identity-federation.md), [appearance & branding](features/appearance.md), [sessions](features/sessions.md), [audit](features/audit.md), [recordings](features/recordings.md)
+- **Administration** — [users & groups](administration/users-and-groups.md), [backends](administration/backends.md), [operations](administration/operations.md), [rate limiting](administration/rate-limiting.md)
 - **Reference** — [configuration keys](reference/configuration-keys.md), [roles](reference/roles.md)
 - **Maintenance** — [changelog](changelog.md)

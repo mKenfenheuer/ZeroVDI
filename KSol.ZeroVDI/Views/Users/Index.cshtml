@@ -58,7 +58,15 @@ else
                     <td class="font-medium">@item.UserName</td>
                     <td class="text-muted-foreground">@item.Email</td>
                     <td>
-                        @if (item.EmailConfirmed)
+                        @if (KSol.ZeroVDI.RDP.AdminAccountSafety.IsDisabled(item))
+                        {
+                            <span class="badge bg-destructive/10 text-destructive"><i class="ri-forbid-line"></i> Disabled</span>
+                        }
+                        else if (KSol.ZeroVDI.RDP.AdminAccountSafety.IsLockedOut(item))
+                        {
+                            <span class="badge bg-warning/10 text-warning"><i class="ri-lock-line"></i> Locked out</span>
+                        }
+                        else if (item.EmailConfirmed)
                         {
                             <span class="badge bg-success/10 text-success">Confirmed</span>
                         }

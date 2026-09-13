@@ -13,12 +13,18 @@ public sealed class VdiReconcileService : BackgroundService
     private static readonly TimeSpan Interval = TimeSpan.FromMinutes(2);
 
     private readonly VdiProvisioningService _provisioning;
+    /// <summary>Name this worker reports liveness under on the operations page.</summary>
+    private const string HeartbeatName = "VDI reconciler";
+    private readonly ServiceHeartbeats _heartbeats;
     private readonly ILogger<VdiReconcileService> _logger;
 
-    public VdiReconcileService(VdiProvisioningService provisioning, ILogger<VdiReconcileService> logger)
+    public VdiReconcileService(VdiProvisioningService provisioning, ServiceHeartbeats heartbeats,
+        ILogger<VdiReconcileService> logger)
     {
         _provisioning = provisioning;
+        _heartbeats = heartbeats;
         _logger = logger;
+        _heartbeats.Register(HeartbeatName, Interval);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -30,11 +36,13 @@ public sealed class VdiReconcileService : BackgroundService
             try
             {
                 await _provisioning.ReconcileAsync(stoppingToken);
+                _heartbeats.Success(HeartbeatName, Interval);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "VDI reconcile pass failed");
+                _heartbeats.Failure(HeartbeatName, Interval, ex.Message);
             }
 
             try { await Task.Delay(Interval, stoppingToken); }

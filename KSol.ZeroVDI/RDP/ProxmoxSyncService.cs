@@ -26,18 +26,24 @@ public class ProxmoxSyncService : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ProxmoxClient _proxmox;
     private readonly ProxmoxBackendProvider _backends;
+    /// <summary>Name this worker reports liveness under on the operations page.</summary>
+    private const string HeartbeatName = "Proxmox sync";
+    private readonly ServiceHeartbeats _heartbeats;
     private readonly ILogger<ProxmoxSyncService> _logger;
 
     public ProxmoxSyncService(
         IServiceScopeFactory scopeFactory,
         ProxmoxClient proxmox,
         ProxmoxBackendProvider backends,
+        ServiceHeartbeats heartbeats,
         ILogger<ProxmoxSyncService> logger)
     {
         _scopeFactory = scopeFactory;
         _proxmox = proxmox;
         _backends = backends;
+        _heartbeats = heartbeats;
         _logger = logger;
+        _heartbeats.Register(HeartbeatName, SyncInterval);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -47,10 +53,15 @@ public class ProxmoxSyncService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            try { await SyncAllAsync(stoppingToken); }
+            try
+            {
+                await SyncAllAsync(stoppingToken);
+                _heartbeats.Success(HeartbeatName, SyncInterval);
+            }
             catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
             {
                 _logger.LogError(ex, "Proxmox sync failed");
+                _heartbeats.Failure(HeartbeatName, SyncInterval, ex.Message);
             }
 
             try { await Task.Delay(SyncInterval, stoppingToken); }
