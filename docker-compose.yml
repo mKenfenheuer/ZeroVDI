@@ -11,7 +11,7 @@
 services:
   ksol-zerovdi-app:
     container_name: "ksol-zerovdi-app"
-    image: ${APP_IMAGE:-ghcr.io/mkenfenheuer/ksol-zerovdi:latest}
+    image: ${APP_IMAGE:-ghcr.io/mkenfenheuer/zerovdi:latest}
     restart: "unless-stopped"
     ports:
       - "${ZEROVDI_PORT:-8080}:8080"
@@ -73,7 +73,7 @@ services:
   # service entirely if every desktop is directly reachable.
   ksol-zerovdi-connector:
     container_name: "ksol-zerovdi-connector"
-    image: ${CONNECTOR_IMAGE:-ghcr.io/mkenfenheuer/ksol-zerovdi/connector:latest}
+    image: ${CONNECTOR_IMAGE:-ghcr.io/mkenfenheuer/zerovdi/connector:latest}
     restart: "unless-stopped"
     profiles: ["connector"]
     environment:

@@ -11,9 +11,9 @@
 #
 # Examples:
 #   docker run --rm -e ZEROVDI_URL=https://gw.example.com -e ZEROVDI_AUTH_TOKEN=… \
-#     ghcr.io/mkenfenheuer/ksol-zerovdi/connector:latest
+#     ghcr.io/mkenfenheuer/zerovdi/connector:latest
 #   docker run -v zerovdi-connector:/data -e ZEROVDI_URL=… -e ZEROVDI_REGISTRATION_TOKEN=… \
-#     ghcr.io/mkenfenheuer/ksol-zerovdi/connector:latest
+#     ghcr.io/mkenfenheuer/zerovdi/connector:latest
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src

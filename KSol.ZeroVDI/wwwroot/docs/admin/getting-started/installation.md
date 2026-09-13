@@ -64,12 +64,13 @@ docker compose logs ksol-zerovdi-app | grep "Bootstrapped initial admin"
 Images are published to the GitHub Container Registry and signed with
 [cosign](https://docs.sigstore.dev/):
 
-- `ghcr.io/mkenfenheuer/ksol-zerovdi` — the gateway
-- `ghcr.io/mkenfenheuer/ksol-zerovdi/connector` — the [connector agent](../features/connectors)
+- `ghcr.io/mkenfenheuer/zerovdi` — the gateway
+- `ghcr.io/mkenfenheuer/zerovdi/connector` — the [connector agent](../features/connectors)
   (start it with `docker compose --profile connector up -d`)
 
-Pin a version tag rather than `latest` if you want reproducible rollbacks (`APP_IMAGE` and
-`CONNECTOR_IMAGE` in `.env`).
+`latest` and `main` follow the main branch. A tagged release also publishes its version (`0.6.46`)
+and minor line (`0.6`); pin one of those rather than `latest` if you want reproducible rollbacks
+(`APP_IMAGE` and `CONNECTOR_IMAGE` in `.env`).
 
 Both images run as the **unprivileged user 1654**, and the gateway listens on **8080**. That matters
 if you use a host bind mount instead of the named volume: the mount carries its own ownership, so

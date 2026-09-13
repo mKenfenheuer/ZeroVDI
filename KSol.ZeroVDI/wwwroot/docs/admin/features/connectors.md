@@ -46,7 +46,7 @@ working until it re-registers.
 
 ## Deploying the agent
 
-The agent ships as a container image, `ghcr.io/mkenfenheuer/ksol-zerovdi/connector`. The reference
+The agent ships as a container image, `ghcr.io/mkenfenheuer/zerovdi/connector`. The reference
 `docker-compose.yml` in the repository root carries it as the `ksol-zerovdi-connector` service behind
 a profile, so it stays out of the way of deployments that do not need one:
 

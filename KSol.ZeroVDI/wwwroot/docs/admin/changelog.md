@@ -23,6 +23,11 @@ All notable changes to ZeroVDI are recorded here. The format is based on
   version 6, and GNOME Remote Desktop 50 closes the audio channel for anything below 8
   (`Client protocol version (6) is too old`). The client now announces version 8, which also lets a
   server use the single-PDU wave format the client already handled.
+- **The quick start pulled images that do not exist.** `docker-compose.yml`, `.env.example`, the
+  installation and connector pages, and the README badge named `ghcr.io/mkenfenheuer/ksol-zerovdi`;
+  the workflow publishes under the repository name, `ghcr.io/mkenfenheuer/zerovdi` and
+  `ghcr.io/mkenfenheuer/zerovdi/connector`. Every reference now uses those. The `.env.example` pin
+  example also named a version tag that had never been published.
 
 ---
 
