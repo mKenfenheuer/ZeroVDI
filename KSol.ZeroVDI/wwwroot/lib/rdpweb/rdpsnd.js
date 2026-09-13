@@ -157,7 +157,10 @@ RdpSnd.prototype._onServerFormats = function (body) {
     w.u16(0x0000);           // wDGramPort (TCP only — no UDP)
     w.u16(this.formats.length); // wNumberOfFormats
     w.u8(0);                 // cLastBlockConfirmed
-    w.u16(0x0006);           // wVersion 6
+    // wVersion 8. GNOME Remote Desktop 50 terminates audio for anything lower ("Client protocol version
+    // (6) is too old") — silent sessions on Ubuntu 26.04. Version 8 lets a server stream SNDC_WAVE2,
+    // which _onWave2 handles.
+    w.u16(0x0008);
     w.u8(0);                 // bPad
     w.bytes(fmtArr);
     this._sendPdu(SNDC_FORMATS, w.arr());

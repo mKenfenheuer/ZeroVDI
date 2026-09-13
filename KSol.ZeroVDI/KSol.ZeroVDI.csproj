@@ -7,7 +7,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <UserSecretsId>aspnet-KSol.ZeroVDI.-250bca5b-7027-4c51-90d4-0bba1f01bd40</UserSecretsId>
     <!-- Keep in step with package.json's version; the operations page reports it. -->
-    <Version>0.6.45</Version>
+    <Version>0.6.46</Version>
   </PropertyGroup>
 
   <ItemGroup>

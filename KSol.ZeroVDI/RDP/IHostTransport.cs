@@ -15,8 +15,9 @@ public interface IHostTransport
     /// <summary>
     /// Measures the current round-trip time to host:port over this transport's path (a timed TCP
     /// connect — RDP has no client-initiated in-band RTT probe, so a throwaway connect is the only
-    /// portable measure). Returns null when the host is unreachable or the probe timed out. Used by
-    /// the relay's connection-quality sampler to report the gateway→host leg to the browser.
+    /// portable measure; it goes through <see cref="RdpPortProbe"/>, never a bare connect-and-close).
+    /// Returns null when the host is unreachable or the probe timed out. Used by the relay's
+    /// connection-quality sampler to report the gateway→host leg to the browser.
     /// </summary>
     Task<TimeSpan?> ProbeRttAsync(string host, int port, CancellationToken ct);
 }
@@ -55,20 +56,8 @@ public sealed class DirectTcpTransport : IHostTransport
         return new NetworkStream(tcp.Client, ownsSocket: true);
     }
 
-    public async Task<TimeSpan?> ProbeRttAsync(string host, int port, CancellationToken ct)
-    {
-        try
-        {
-            using var tcp = new TcpClient();
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(TimeSpan.FromSeconds(2));
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            await tcp.ConnectAsync(host, port, cts.Token);
-            sw.Stop();
-            return tcp.Connected ? sw.Elapsed : null;
-        }
-        catch { return null; }
-    }
+    public Task<TimeSpan?> ProbeRttAsync(string host, int port, CancellationToken ct)
+        => RdpPortProbe.ProbeAsync(host, port, TimeSpan.FromSeconds(2), ct);
 }
 
 /// <summary>Tunnels the host stream through a connector's WebSocket data channel.</summary>

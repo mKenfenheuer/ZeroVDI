@@ -20,6 +20,8 @@ WORKDIR /src
 COPY KSol.ZeroVDI.Connector/KSol.ZeroVDI.Connector.csproj KSol.ZeroVDI.Connector/
 RUN dotnet restore "KSol.ZeroVDI.Connector/KSol.ZeroVDI.Connector.csproj"
 COPY KSol.ZeroVDI.Connector/ KSol.ZeroVDI.Connector/
+# The one gateway source file the connector links (see the csproj).
+COPY KSol.ZeroVDI/RDP/RdpPortProbe.cs KSol.ZeroVDI/RDP/
 RUN dotnet publish "KSol.ZeroVDI.Connector/KSol.ZeroVDI.Connector.csproj" -c Release -o /app/publish
 
 FROM mcr.microsoft.com/dotnet/runtime:10.0 AS final

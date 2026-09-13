@@ -141,21 +141,11 @@ public sealed class Agent
     private async Task HandleProbeAsync(ClientWebSocket control, SemaphoreSlim sendLock, ConnectorMessage msg, CancellationToken ct)
     {
         var ack = new ConnectorMessage { Type = ConnectorMessageType.Ack, Id = msg.Id };
-        try
-        {
-            using var tcp = new TcpClient();
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(TimeSpan.FromSeconds(2));
-            var sw = Stopwatch.StartNew();
-            await tcp.ConnectAsync(msg.Host!, msg.Port, cts.Token);
-            sw.Stop();
-            ack.Ok = tcp.Connected;
-            ack.RttMs = sw.Elapsed.TotalMilliseconds;
-        }
-        catch
-        {
-            ack.Ok = false;
-        }
+        // The gateway's probe, linked into this project: a bare connect-and-close locks GNOME Remote
+        // Desktop 50.0 hosts out of this connector's address (see RdpPortProbe).
+        var rtt = await KSol.ZeroVDI.RDP.RdpPortProbe.ProbeAsync(msg.Host!, msg.Port, TimeSpan.FromSeconds(2), ct);
+        ack.Ok = rtt != null;
+        if (rtt is { } r) ack.RttMs = r.TotalMilliseconds;
         await SendAsync(control, sendLock, ack, ct);
     }
 

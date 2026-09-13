@@ -43,6 +43,18 @@ user — ZeroVDI reconnects to that machine, carrying the broker's routing token
 credentials it handed back. GNOME Remote Desktop's "Remote Login" uses the same mechanism to hand a
 session off on the *same* machine, which needs no special handling.
 
+### GNOME Remote Desktop hosts (Ubuntu 26.04)
+
+GNOME Remote Desktop 50.0 throttles connections per source address and, because of an upstream bug
+(fixed in 50.2), never releases the slot of a connection that closes without sending anything. Five of
+those and it silently refuses that address until the service restarts. ZeroVDI's status and latency
+probes therefore always send an RDP Connection Request before closing. If a host was locked out by an
+older gateway or connector, or by another monitoring tool that only checks whether port 3389 is open,
+connects fail with "RDP negotiation failed" and the host journal shows repeated
+`Failed to peek routing token: Cancelled`. Restart the service once
+(`sudo systemctl restart gnome-remote-desktop`), and point any port monitors elsewhere or upgrade the
+host to 50.2 or later.
+
 Because the target name arrives from the host rather than from your configuration, it is followed
 under rules: loopback, link-local (including the cloud metadata address), multicast and unspecified
 addresses are always refused, and `Redirection:AllowedTargetHosts` narrows it to a list of names,

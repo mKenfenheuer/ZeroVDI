@@ -22,8 +22,11 @@ WebSocket open. No inbound firewall rule is needed on the connector's side.
   asks the agent to dial the target `host:port`. The agent opens a per-request data channel
   (`wss://<gateway>/agent/data/<id>`) and bidirectionally pumps TCP ↔ WebSocket. RDP traffic
   runs with Nagle disabled to keep the session responsive.
-- **Reachability probes.** The gateway can ask a connector to TCP-probe a host and report
-  round-trip time, so it can pick the best connector for a given target.
+- **Reachability probes.** The gateway can ask a connector to probe a host's RDP port and report
+  round-trip time, so it can pick the best connector for a given target. The probe opens a TCP
+  connection and sends an RDP Connection Request before closing — never a bare connect-and-close,
+  which locks GNOME Remote Desktop 50 hosts out of the prober's address. Keep connector agents on the
+  same release as the gateway for this reason.
 
 All connector transport is **TLS only** — the gateway URL must be `https://` (the agent
 refuses a plaintext URL and connects over `wss://`).

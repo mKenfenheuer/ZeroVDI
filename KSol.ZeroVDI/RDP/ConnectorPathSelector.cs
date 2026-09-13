@@ -119,17 +119,8 @@ public sealed class ConnectorPathSelector
 
     private static async Task<Path?> ProbeDirectAsync(string host, int port, CancellationToken ct)
     {
-        try
-        {
-            using var client = new TcpClient();
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(ProbeTimeout);
-            var sw = Stopwatch.StartNew();
-            await client.ConnectAsync(host, port, cts.Token);
-            sw.Stop();
-            return client.Connected ? new Path(null, sw.Elapsed) : null;
-        }
-        catch { return null; }
+        var rtt = await RdpPortProbe.ProbeAsync(host, port, ProbeTimeout, ct);
+        return rtt is { } r ? new Path(null, r) : null;
     }
 
     private async Task<Path?> ProbeConnectorAsync(string connectorId, string host, int port, CancellationToken ct)

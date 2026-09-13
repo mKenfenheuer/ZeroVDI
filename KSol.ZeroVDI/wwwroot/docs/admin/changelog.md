@@ -3,7 +3,26 @@
 All notable changes to ZeroVDI are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/). Dates are `YYYY-MM-DD`.
 
-## [Unreleased]
+## [0.6.46] — 2026-09-13 — GNOME Remote Desktop 50 fixes
+
+### Fixed
+- **Ubuntu 26.04 desktops stopped accepting the gateway about a minute after it started.** Every
+  connect then failed with "RDP negotiation failed" (connection reset), and the host logged nothing
+  useful. The gateway checked RDP ports with a bare TCP connect-and-close — the resource status sweep
+  every 15 s, the path probe before each connect, the in-session latency sampler, and the connector's
+  reachability probe. GNOME Remote Desktop 50.0, the version Ubuntu 26.04 ships, never frees the
+  throttler slot of a connection that closes before sending anything (upstream issue #332, fixed in
+  50.2); after five from one address it queues and then refuses every later connection from it until
+  the service restarts. The host journal shows the leaks as `Failed to peek routing token: Cancelled`.
+  Every probe now sends an X.224 Connection Request and reads the reply before closing, which the host
+  handles normally. The connector carries the same fix, so update connector agents too.
+  - A host that is already locked out needs `sudo systemctl restart gnome-remote-desktop` once.
+  - Each probe now appears in the GNOME Remote Desktop journal as a short aborted TLS handshake (a few
+    FreeRDP error lines per probe). That is expected and harmless.
+- **No sound from GNOME Remote Desktop 50 hosts.** The browser client announced audio protocol
+  version 6, and GNOME Remote Desktop 50 closes the audio channel for anything below 8
+  (`Client protocol version (6) is too old`). The client now announces version 8, which also lets a
+  server use the single-PDU wave format the client already handled.
 
 ---
 

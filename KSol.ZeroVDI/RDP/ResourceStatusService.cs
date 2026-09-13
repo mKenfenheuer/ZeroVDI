@@ -148,15 +148,8 @@ public class ResourceStatusService : BackgroundService
         catch { return false; }
     }
 
+    // Never a bare connect: this runs every 15 s against every host, and a connect-and-close is exactly
+    // what locks a GNOME Remote Desktop 50.0 host out of the gateway (see RdpPortProbe).
     private static async Task<bool> IsPortOpenAsync(string host, ushort port)
-    {
-        try
-        {
-            using var client = new TcpClient();
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-            await client.ConnectAsync(host, port, cts.Token);
-            return client.Connected;
-        }
-        catch { return false; }
-    }
+        => await RdpPortProbe.ProbeAsync(host, port, TimeSpan.FromSeconds(2)) != null;
 }
