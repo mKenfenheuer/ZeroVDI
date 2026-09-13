@@ -92,16 +92,29 @@ public sealed class CredSspClient
         if (challengeReq.NegoToken == null)
             return new CredSspResult(false, "CredSSP: server did not return an NTLM challenge");
 
+        // The protocol version in effect is the lower of ours and the server's ([MS-CSSP] 3.1.5.1): it
+        // decides the shape of the public-key binding below (v5+ nonce hash vs the v2-4 raw key).
+        int negotiated = Math.Min(CredSspVersion, challengeReq.Version > 0 ? challengeReq.Version : 2);
+
         // 2) AUTHENTICATE + pubKeyAuth. The NTLM AUTHENTICATE carries its own MIC; the pubKeyAuth is
         // the first sealed message (sequence 0), and the TSCredentials are sealed next (sequence 1).
         var authenticate = ntlm.ProcessChallenge(challengeReq.NegoToken);
 
-        // pubKeyAuth: CredSSP v6 binds the TLS server key via SHA256(magic || nonce || pubKey), sealed
-        // with the NTLM confidentiality context (consumes seq 0).
-        var clientNonce = new byte[32];
-        RandomNumberGenerator.Fill(clientNonce);
-        var clientPubKeyHash = HashMagic("CredSSP Client-To-Server Binding Hash\0", clientNonce, _serverPublicKey);
-        var (sealedPubKey, pubKeySig) = ntlm.SealAndSign(clientPubKeyHash);
+        // pubKeyAuth: CredSSP v5+ binds the TLS server key via SHA256(magic || nonce || pubKey)
+        // (CVE-2018-0886); v2-4 sends the raw public key. Sealed with the NTLM context (consumes seq 0).
+        byte[]? clientNonce = null;
+        byte[] clientPubKeyPlain;
+        if (negotiated >= 5)
+        {
+            clientNonce = new byte[32];
+            RandomNumberGenerator.Fill(clientNonce);
+            clientPubKeyPlain = HashMagic("CredSSP Client-To-Server Binding Hash\0", clientNonce, _serverPublicKey);
+        }
+        else
+        {
+            clientPubKeyPlain = _serverPublicKey;
+        }
+        var (sealedPubKey, pubKeySig) = ntlm.SealAndSign(clientPubKeyPlain);
         var pubKeyAuth = Concat(pubKeySig, sealedPubKey);
 
         await WriteTsRequestAsync(new TsRequest
@@ -114,11 +127,25 @@ public sealed class CredSspClient
         // Server confirms with its own pubKeyAuth (the bound key, transformed).
         var serverResp = await ReadTsRequestAsync(ct);
         if (serverResp.ErrorCode is { } ec && ec != 0)
-            return new CredSspResult(false, $"CredSSP: server error 0x{ec:X8} (bad credentials or NLA refused)");
+            return new CredSspResult(false, DescribeServerError(ec));
         if (serverResp.PubKeyAuth == null)
             return new CredSspResult(false, "CredSSP: server did not confirm the public key (auth rejected)");
 
-        // 3) Send sealed TSCredentials (consumes seq 2).
+        // VERIFY the server's confirmation ([MS-CSSP] 3.1.5 step 5). This is the check that makes it safe
+        // to accept the host's (self-signed) TLS certificate: an active man-in-the-middle can forward the
+        // NTLM exchange, but it cannot seal the Server-To-Client binding of the key WE saw without the
+        // session key, and the session key requires the password. Until 0.6.34 only the presence of the
+        // field was checked, so that protection was not actually in place.
+        var serverPlain = ntlm.UnsealAndVerify(serverResp.PubKeyAuth);
+        if (serverPlain == null)
+            return new CredSspResult(false, "CredSSP: the server's public-key confirmation failed verification (possible man-in-the-middle)");
+        var expected = negotiated >= 5
+            ? HashMagic("CredSSP Server-To-Client Binding Hash\0", clientNonce!, _serverPublicKey)
+            : PublicKeyPlusOne(_serverPublicKey);
+        if (!CryptographicOperations.FixedTimeEquals(serverPlain, expected))
+            return new CredSspResult(false, "CredSSP: the server's public-key confirmation does not match its TLS certificate (possible man-in-the-middle)");
+
+        // 3) Send sealed TSCredentials (consumes seq 1).
         var tsCreds = EncodeTsPasswordCredentials(_domain, _user, _password);
         var (sealedCreds, credsSig) = ntlm.SealAndSign(tsCreds);
         await WriteTsRequestAsync(new TsRequest { AuthInfo = Concat(credsSig, sealedCreds) }, ct);
@@ -134,10 +161,46 @@ public sealed class CredSspClient
         return SHA256.HashData(Concat(magic, nonce, pubKey));
     }
 
+    // CredSSP v2-4 server confirmation: the public key with its first byte incremented ([MS-CSSP] 3.1.5).
+    private static byte[] PublicKeyPlusOne(byte[] pubKey)
+    {
+        var r = (byte[])pubKey.Clone();
+        if (r.Length > 0) r[0]++;
+        return r;
+    }
+
+    /// <summary>
+    /// Turn the TSRequest <c>errorCode</c> (an NTSTATUS / SEC_E_* code, [MS-CSSP] 2.2.1) into something a
+    /// user can act on. Every failure used to read "bad credentials or NLA refused", so a locked-out,
+    /// expired or disabled account was indistinguishable from a typo.
+    /// </summary>
+    private static string DescribeServerError(uint code) => code switch
+    {
+        0xC000006D => "Sign-in failed: wrong username or password.",
+        0xC000006A => "Sign-in failed: wrong password.",
+        0xC0000064 => "Sign-in failed: the account does not exist on this desktop.",
+        0xC0000234 => "Sign-in failed: the account is locked out. Wait or ask an administrator to unlock it.",
+        0xC0000071 => "Sign-in failed: the password has expired and must be changed.",
+        0xC0000224 => "Sign-in failed: the password must be changed before the first sign-in.",
+        0xC0000072 => "Sign-in failed: the account is disabled.",
+        0xC0000193 => "Sign-in failed: the account has expired.",
+        0xC000006E => "Sign-in failed: an account restriction (e.g. blank password not allowed) prevents this sign-in.",
+        0xC000006F => "Sign-in failed: sign-in is not permitted at this time of day.",
+        0xC0000070 => "Sign-in failed: this account may not sign in from this computer.",
+        0xC000015B => "Sign-in failed: the account is not allowed to sign in remotely (Remote Desktop Users membership or the 'Allow log on through Remote Desktop Services' right is missing).",
+        0xC0000133 => "Sign-in failed: the clock difference between the gateway and the domain is too large.",
+        0xC000018B or 0xC000018C or 0xC000018D => "Sign-in failed: the desktop could not reach its domain controller to validate the account.",
+        0x80090308 => "NLA rejected the authentication token (SEC_E_INVALID_TOKEN).",
+        0x8009030E => "NLA rejected the credentials (SEC_E_NO_CREDENTIALS).",
+        0x80090302 => "The desktop does not support the authentication method the gateway offered (NTLM may be disabled — Kerberos is not yet supported).",
+        _ => $"NLA authentication failed (server error 0x{code:X8}).",
+    };
+
     // ---- TSRequest (ASN.1 DER) ----
 
     private sealed class TsRequest
     {
+        public int Version;
         public byte[]? NegoToken;
         public byte[]? AuthInfo;
         public byte[]? PubKeyAuth;
@@ -193,9 +256,9 @@ public sealed class CredSspClient
         var outer = new AsnReader(der, AsnEncodingRules.DER);
         var seq = outer.ReadSequence();
 
-        // [0] version (required) — read and discard.
+        // [0] version (required). The server's version decides the public-key binding form.
         var v = seq.ReadSequence(new Asn1Tag(TagClass.ContextSpecific, 0));
-        v.ReadInteger();
+        if (v.TryReadInt32(out int version)) req.Version = version; else v.ReadInteger();
 
         while (seq.HasData)
         {

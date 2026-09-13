@@ -282,6 +282,28 @@ namespace KSol.ZeroVDI.Controllers
             return RedirectToAction(nameof(Edit), new { id });
         }
 
+        // POST: /admin/resources/{id}/forget-cert — drop the pinned host TLS certificate (trust-on-first-use
+        // reset) after a legitimate change on the host (reinstall, renewed certificate). The next successful
+        // connection pins whatever certificate the host presents then. Audited.
+        [HttpPost("{id}/forget-cert")]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> ForgetCertificate(string id)
+        {
+            var res = await _context.RDPResources.FirstOrDefaultAsync(r => r.Id == id);
+            if (res == null) return NotFound();
+
+            var previous = res.HostCertFingerprint;
+            res.HostCertFingerprint = null;
+            res.HostCertSubject = null;
+            res.HostCertPinnedUtc = null;
+            await _context.SaveChangesAsync();
+            await _audit.LogAsync(AuditCategory.Resource, "HostCertificateReset",
+                targetType: nameof(RDPResource), targetId: id, targetName: res.Name,
+                detail: new { previous });
+            TempData["Status"] = "Pinned host certificate forgotten — the next successful connection pins the new one.";
+            return RedirectToAction(nameof(Edit), new { id });
+        }
+
         // --- Assigned users + authorizations (folded into the resource editor) ---
 
         // POST: /admin/resources/{id}/grant — authorize a user for this resource.

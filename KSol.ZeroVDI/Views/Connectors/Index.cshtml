@@ -1,10 +1,12 @@
 @model IEnumerable<KSol.ZeroVDI.Models.Connector>
+@inject KSol.ZeroVDI.RDP.PublicUrl PublicUrl
 @{
     ViewData["Title"] = "Connectors";
     ViewData["Subtitle"] = "Remote proxy agents that tunnel RDP and HTTP over an outbound WebSocket.";
     var onlineIds = ViewBag.OnlineIds as IReadOnlySet<string> ?? new HashSet<string>();
     var newToken = TempData["NewRegistrationToken"] as string;
-    var baseUrl = $"{Context.Request.Scheme}://{Context.Request.Host}";
+    // The address the agent must dial: the configured public URL when set, else this request's origin.
+    var baseUrl = PublicUrl.Origin(Context.Request);
 }
 
 @section PageActions {

@@ -78,8 +78,10 @@ public class IdleReaperService : BackgroundService
         if (backends.Count == 0) return;
         var byId = backends.ToDictionary(b => b.Id);
 
+        // Discovered Proxmox VMs AND VDI pool clones: both are Proxmox-backed and both burn host resources
+        // while idle. (Clones were left out until 0.6.35 and ran forever once started.)
         var candidates = await db.RDPResources
-            .Where(r => r.Source == ResourceSource.Proxmox
+            .Where(r => (r.Source == ResourceSource.Proxmox || r.Source == ResourceSource.VdiClone)
                         && r.ProxmoxBackendId != null && r.ProxmoxNode != null && r.ProxmoxVmId != null
                         && r.PowerState == ResourcePowerState.Running)
             .ToListAsync(ct);
@@ -94,17 +96,21 @@ public class IdleReaperService : BackgroundService
             var idle = TimeSpan.FromHours(Math.Max(1, backend.IdleTimeoutHours));
             if (!IsReapable(res.LastActivityUtc, idle)) continue;
 
-            var notes = await _proxmox.GetNotesAsync(backend, res.ProxmoxNode!, res.ProxmoxVmId!.Value, ct);
-            if (ProxmoxNotes.ReadExcluded(notes))
+            if (res.Source == ResourceSource.Proxmox)
             {
-                var auths = await db.RDPResourceUserAuthorizations
-                    .Where(a => a.RDPResourceId == res.Id).ToListAsync(ct);
-                db.RDPResourceUserAuthorizations.RemoveRange(auths);
-                db.RDPResources.Remove(res);
-                await db.SaveChangesAsync(ct);
-                _logger.LogInformation("Idle reaper: skipping excluded VM {Node}/{VmId}; removed stale row",
-                    res.ProxmoxNode, res.ProxmoxVmId);
-                continue;
+                // Discovery owns the exclude marker; a clone's notes carry the gateway binding instead.
+                var notes = await _proxmox.GetNotesAsync(backend, res.ProxmoxNode!, res.ProxmoxVmId!.Value, ct);
+                if (ProxmoxNotes.ReadExcluded(notes))
+                {
+                    var auths = await db.RDPResourceUserAuthorizations
+                        .Where(a => a.RDPResourceId == res.Id).ToListAsync(ct);
+                    db.RDPResourceUserAuthorizations.RemoveRange(auths);
+                    db.RDPResources.Remove(res);
+                    await db.SaveChangesAsync(ct);
+                    _logger.LogInformation("Idle reaper: skipping excluded VM {Node}/{VmId}; removed stale row",
+                        res.ProxmoxNode, res.ProxmoxVmId);
+                    continue;
+                }
             }
 
             _logger.LogInformation("Idle reaper: pausing {Name} ({Backend}:{Node}/{VmId}) via {Action}",

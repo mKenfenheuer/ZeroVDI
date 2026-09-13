@@ -383,6 +383,34 @@ public sealed class NtlmClient
     /// </summary>
     public byte[] Sign(byte[] plaintext) => SignInternal(plaintext, seal: false).Signature;
 
+    private uint _serverSeqNum;
+
+    /// <summary>
+    /// Unseals and verifies an inbound (server→client) NTLM-sealed message ([MS-NLMP] 3.4.4.1 with extended
+    /// session security): <c>signature(16) || ciphertext</c>. Returns the plaintext, or null when the
+    /// signature (or its sequence number) does not verify. Used by CredSSP to check the server's
+    /// <c>pubKeyAuth</c> — the step that turns "accept any TLS certificate" into an actual
+    /// man-in-the-middle check: only a server that completed NTLM with the real password can seal it.
+    /// </summary>
+    public byte[]? UnsealAndVerify(byte[] signatureAndSealed)
+    {
+        if (ServerSealing == null || ServerSigningKey == null)
+            throw new InvalidOperationException("sign/seal keys not derived");
+        if (signatureAndSealed.Length < 16) return null;
+        var sig = signatureAndSealed.AsSpan(0, 16);
+        if (BinaryPrimitives.ReadUInt32LittleEndian(sig.Slice(0, 4)) != 1) return null;
+        uint seq = BinaryPrimitives.ReadUInt32LittleEndian(sig.Slice(12, 4));
+        uint expectedSeq = _serverSeqNum++;
+        // Same keystream order as the sender: the message first, then the 8-byte checksum.
+        var plaintext = ServerSealing.Transform(signatureAndSealed.AsSpan(16).ToArray());
+        var checksum = ServerSealing.Transform(sig.Slice(4, 8).ToArray());
+        var seqBytes = new byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(seqBytes, seq);
+        var hmac = AuthCrypto.HmacMd5(ServerSigningKey, Concat(seqBytes, plaintext));
+        if (seq != expectedSeq) return null;
+        return CryptographicOperations.FixedTimeEquals(hmac.AsSpan(0, 8), checksum) ? plaintext : null;
+    }
+
     private (byte[] Sealed, byte[] Signature) SignInternal(byte[] plaintext, bool seal)
     {
         if (ClientSealing == null || ClientSigningKey == null)

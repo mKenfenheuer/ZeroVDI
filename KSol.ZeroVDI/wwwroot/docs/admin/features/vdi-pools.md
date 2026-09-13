@@ -10,31 +10,58 @@ machine, you define a pool once and ZeroVDI clones desktops on demand. Pools are
 | Kind | Behavior |
 |---|---|
 | **Dedicated** | Each assigned user gets their *own* persistent desktop, cloned on first connect and reused thereafter. |
-| **Floating** | Users lease a desktop from a shared free pool; on disconnect it is **destroyed and re-cloned** so the next user gets a pristine machine. |
+| **Floating** | *Not yet available.* Planned: users lease a desktop from a shared free pool; on disconnect it is destroyed and re-cloned so the next user gets a pristine machine. The option is shown but cannot be saved. |
 
-Both kinds are configurable per pool. Cloning can be **Full** or **Linked**, also per pool.
+Cloning can be **Full** or **Linked**, per pool. A linked clone needs shared storage when the target
+node differs from the template's node.
 
 ## Lifecycle (lazy provisioning)
 
 Desktops are provisioned **on first connect**, surfaced through the normal readiness UI with a
-`Provisioning` phase before `Starting`:
+*Creating your desktop…* step before *Starting*:
 
-1. User opens the pool → `VdiProvisioningService` allocates a VMID and clones the template.
-2. ZeroVDI waits for the Proxmox clone task to finish, then applies identity (below).
+1. User opens the pool → `VdiProvisioningService` allocates a VMID (serialised across pools, skipping
+   ids already claimed by in-flight or failed clones) and starts the clone task. The task id is stored
+   on the instance.
+2. ZeroVDI waits for the Proxmox clone task to finish, stamps the gateway binding id into the VM notes,
+   then applies identity (below).
 3. A backing resource + instance record is created and the desktop boots.
 4. The existing start/IP/RDP flow connects the user.
 
-Floating leases are returned on disconnect; the VM is destroyed and a reconcile loop refills the
-free pool.
+Provisioned desktops take part in the same **idle policy** as discovered VMs: with *Auto-suspend idle
+VMs* enabled on the backend, a clone with no session for the backend's idle timeout is suspended,
+stopped or hibernated per the backend's pause action, and its power state is refreshed by the status
+service like any other resource.
+
+## Reconciliation
+
+A background loop (`VdiReconcileService`, every 2 minutes) keeps instance records and Proxmox in step
+when the connect-time path could not finish the job — a gateway restart mid-clone, an unreachable
+backend, a clone task that outlived its wait, a VM deleted in the Proxmox UI:
+
+- **Interrupted provisioning** — if the clone task finished, provisioning is completed (notes stamp,
+  identity, Ready); if it failed or is unknown, the instance is marked *Failed* with the reason.
+- **Failed / deprovisioning instances** — the VM is destroyed through the notes-verified path (never
+  by VMID alone), then the rows are removed. A clone that finished after its wait is stamped first so
+  it can be verified, so a slow clone no longer leaks a VM.
+- **Ready instances whose VM vanished** — marked *Failed* with the reason; the user gets a fresh
+  desktop on the next connect.
+- **Missing notes stamp** — retried, because an unstamped clone cannot be destroyed safely.
+
+Every action is audited as `VdiInstanceReconciled` (with `action` = `resumed-provisioning`,
+`marked-failed`, `removed` or `vm-missing`). The pool page shows each instance's state and last error.
+Deprovisioning a desktop or deleting a pool is refused while a session is active on it.
 
 ## Identity & customization
 
 Each pool chooses how the clone gets its identity (`IdentityMode`):
 
-- **CloudInit** — inject `ciuser` / `cipassword` / hostname / SSH keys before first boot. On Windows
-  this is applied by **cloudbase-init** in the template.
-- **GuestAgent** — (fallback) rename / domain-join via the Proxmox guest agent.
-- **None** — no customization.
+- **CloudInit** — inject `ciuser` / `cipassword` / SSH keys before first boot. On Windows this is
+  applied by **cloudbase-init** in the template. The clone's hostname is its VM name (from the name
+  pattern).
+- **None** — no customization; the template generalises itself.
+- **GuestAgent** — *not yet implemented* (rename / domain join through the QEMU guest agent). The
+  option and the domain-join fields are present but cannot be saved.
 
 ### Generated credentials
 
@@ -57,7 +84,10 @@ access flows through the pool assignment and ownership.
 ## Proxmox requirements
 
 The API token used by the backend needs clone-related permissions: `VM.Clone`, `VM.Allocate`,
-`VM.Config.*`, and `Datastore.AllocateSpace`. The template VM must exist on the chosen backend.
+`VM.Config.*` (including `VM.Config.Options` for the notes stamp), `VM.PowerMgmt`, `VM.Monitor` and
+`VM.Audit` (guest-agent queries), and `Datastore.AllocateSpace`. The template VM must exist on the
+chosen backend and have the QEMU guest agent installed and enabled — the readiness flow discovers the
+clone's IP through it.
 
 ## Related
 

@@ -97,7 +97,7 @@ public class ResourceStatusService : BackgroundService
         // Proxmox-reported status: distinguishes suspended/hibernated, and lets a booting VM that
         // hasn't opened RDP yet show as Starting even before its IP pings.
         string? vmStatus = null;
-        if (res.Source == ResourceSource.Proxmox && res.ProxmoxBackendId != null
+        if ((res.Source == ResourceSource.Proxmox || res.Source == ResourceSource.VdiClone) && res.ProxmoxBackendId != null
             && res.ProxmoxNode != null && res.ProxmoxVmId != null)
         {
             var backend = await _backends.GetAsync(res.ProxmoxBackendId.Value);

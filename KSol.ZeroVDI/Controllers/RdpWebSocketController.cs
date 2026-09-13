@@ -32,6 +32,9 @@ public class RdpWebSocketController : Controller
     private readonly ResourceAccessService _access;
     private readonly ConnectorPathSelector _paths;
     private readonly IRdpResolver _resolverImpl;
+    private readonly DevicePolicyService _devicePolicy;
+    private readonly HostCertificatePolicy _hostCerts;
+    private readonly ConnectionReadinessService _readiness;
     private readonly ILogger<RdpWebSocketController> _logger;
 
     public RdpWebSocketController(
@@ -49,6 +52,9 @@ public class RdpWebSocketController : Controller
         ResourceAccessService access,
         ConnectorPathSelector paths,
         IRdpResolver resolverImpl,
+        DevicePolicyService devicePolicy,
+        HostCertificatePolicy hostCerts,
+        ConnectionReadinessService readiness,
         ILogger<RdpWebSocketController> logger)
     {
         _context = context;
@@ -65,6 +71,9 @@ public class RdpWebSocketController : Controller
         _access = access;
         _paths = paths;
         _resolverImpl = resolverImpl;
+        _devicePolicy = devicePolicy;
+        _hostCerts = hostCerts;
+        _readiness = readiness;
         _logger = logger;
     }
 
@@ -100,7 +109,14 @@ public class RdpWebSocketController : Controller
         // Resolve the resource to a live host/port — starts/resumes a Proxmox VM and waits for it. When
         // `id` is a VDI pool entry point this also provisions/reuses the user's clone and returns its
         // concrete resource id, which we use below for the SSO lookup (the pool id has no per-user row).
-        var resolved = await _resolver.ResolveAsync(userId, id, requestedPort);
+        // The console's preflight just ran this exact readiness sequence (and the user watched it finish).
+        // Reuse its Ready result when it is fresh instead of re-running VM lookup, guest-agent/IP polls and
+        // the RDP probe a second time — that doubled the Proxmox calls per connect and re-entered the
+        // probe loops' worst-case timeouts. Anything older, or a direct WS connect, resolves normally.
+        (string Host, ushort Port, string ResourceId)? resolved = null;
+        if (_readiness.TryGetRecentReady(userId, id, TimeSpan.FromSeconds(90)) is { Host: { } readyHost } ready)
+            resolved = (readyHost, ready.Port, ready.ResourceId ?? id);
+        resolved ??= await _resolver.ResolveAsync(userId, id, requestedPort);
         if (resolved == null)
         {
             // Could not start/reach the backing machine. Accept the socket only to report the error.
@@ -220,6 +236,13 @@ public class RdpWebSocketController : Controller
         // no connector wins or none is configured, so directly-reachable hosts are unaffected.
         var hostTransport = await _paths.ResolveTransportAsync(host, port, resource.ForcedConnectorId, HttpContext.RequestAborted);
 
+        // Device policy, protocol half: the console clamps the UI and the save endpoint clamps persisted
+        // preferences, but only the relay can stop a modified client from joining a channel a Disabled
+        // feature needs. The guard refuses the session on the first blocked channel request/accept.
+        var policyGuard = ChannelPolicyGuard.ForPolicy(_devicePolicy.Get(), _logger);
+        // Host certificate pinning (trust on first use) for the concrete resource this leg connects to.
+        var hostCertCheck = _hostCerts.CheckFor(id, resource.Name, _audit);
+
         var session = new RdpRelaySession(socket, host, port, kerberos, _logger, presupplied, recorder,
             pending?.Token, redirectCreds,
             redir =>
@@ -230,7 +253,9 @@ public class RdpWebSocketController : Controller
                         recId, baseDir, leg + 1));
             },
             hostTransport,
-            _resolverImpl);
+            _resolverImpl,
+            policyGuard,
+            hostCertCheck);
 
         await _resolver.OnConnectedAsync(userId, id);
         var sessionStartUtc = DateTime.UtcNow;
@@ -267,6 +292,14 @@ public class RdpWebSocketController : Controller
             await _audit.LogAsync(AuditCategory.Session, "SessionDisconnected",
                 targetType: nameof(RDPResource), targetId: id, targetName: resource.Name,
                 detail: new { durationSeconds = (int)(DateTime.UtcNow - sessionStartUtc).TotalSeconds, forced });
+            if (session.PolicyViolation is { } violation)
+            {
+                // A client tried to use a channel the tenant device policy disables — the stock browser
+                // client never does this, so it is worth an explicit, failed audit event.
+                await _audit.LogAsync(AuditCategory.Session, "SessionRejectedPolicy", success: false,
+                    targetType: nameof(RDPResource), targetId: id, targetName: resource.Name,
+                    detail: new { violation.Feature, violation.Channel });
+            }
 
             // Close this leg's raw streams (Dispose writes the leg's manifest.json). Only FINALIZE the
             // recording (hand off to the mux job) when no continuation was armed — i.e. this is the last

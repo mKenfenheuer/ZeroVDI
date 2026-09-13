@@ -20,15 +20,18 @@ namespace KSol.ZeroVDI.Areas.Identity.Pages.Account.Manage
         private readonly UserManager<ApplicationUser> _userManager;
         private readonly SignInManager<ApplicationUser> _signInManager;
         private readonly IEmailSender _emailSender;
+        private readonly KSol.ZeroVDI.RDP.PublicUrl _publicUrl;
 
         public EmailModel(
             UserManager<ApplicationUser> userManager,
             SignInManager<ApplicationUser> signInManager,
-            IEmailSender emailSender)
+            IEmailSender emailSender,
+            KSol.ZeroVDI.RDP.PublicUrl publicUrl)
         {
             _userManager = userManager;
             _signInManager = signInManager;
             _emailSender = emailSender;
+            _publicUrl = publicUrl;
         }
 
         /// <summary>
@@ -118,11 +121,11 @@ namespace KSol.ZeroVDI.Areas.Identity.Pages.Account.Manage
                 var userId = await _userManager.GetUserIdAsync(user);
                 var code = await _userManager.GenerateChangeEmailTokenAsync(user, Input.NewEmail);
                 code = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(code));
-                var callbackUrl = Url.Page(
-                    "/Account/ConfirmEmailChange",
-                    pageHandler: null,
-                    values: new { area = "Identity", userId = userId, email = Input.NewEmail, code = code },
-                    protocol: Request.Scheme);
+                // Public address, not the request Host header (host-header poisoning) — see PublicUrl.
+                var callbackUrl = _publicUrl.Absolute(
+                    Url.Page("/Account/ConfirmEmailChange", pageHandler: null,
+                        values: new { area = "Identity", userId = userId, email = Input.NewEmail, code = code }),
+                    Request);
                 await _emailSender.SendEmailAsync(
                     Input.NewEmail,
                     "Confirm your email",
@@ -154,11 +157,9 @@ namespace KSol.ZeroVDI.Areas.Identity.Pages.Account.Manage
             var email = await _userManager.GetEmailAsync(user);
             var code = await _userManager.GenerateEmailConfirmationTokenAsync(user);
             code = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(code));
-            var callbackUrl = Url.Page(
-                "/Account/ConfirmEmail",
-                pageHandler: null,
-                values: new { area = "Identity", userId = userId, code = code },
-                protocol: Request.Scheme);
+            var callbackUrl = _publicUrl.Absolute(
+                Url.Page("/Account/ConfirmEmail", pageHandler: null, values: new { area = "Identity", userId = userId, code = code }),
+                Request);
             await _emailSender.SendEmailAsync(
                 email,
                 "Confirm your email",

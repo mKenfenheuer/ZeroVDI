@@ -39,6 +39,12 @@ The Tailwind CSS bundle is rebuilt automatically when Node is present; the compi
 - Forward the real client IP (`X-Forwarded-For`) — it is recorded in the [audit log](../features/audit)
   and used by [rate limiting](../administration/rate-limiting).
 - Keep idle/read timeouts generous on the WebSocket path; console sessions are long-lived.
+- Set `App__PublicBaseUrl` to the address users type (e.g. `https://vdi.example.com`) and restrict
+  `AllowedHosts` to that name, so password-reset links can never be poisoned through a forged `Host`
+  header. List the proxy in `ForwardedHeaders__KnownProxies` so rate limiting and the audit log see
+  real client addresses.
+- The app sends a Content-Security-Policy and `X-Frame-Options: DENY`; do not embed the console in an
+  iframe on another site.
 
 ## Next steps
 

@@ -30,19 +30,26 @@ public sealed class RdpHostConnection
     private readonly KerberosAuth? _kerberos;
     private readonly ILogger _logger;
     private readonly IHostTransport _transport;
+    private readonly Func<X509Certificate2, CancellationToken, Task<string?>>? _certCheck;
 
     /// <param name="transport">
     /// How to obtain the raw byte stream to the host. Defaults to <see cref="DirectTcpTransport"/> (a plain
     /// TCP connect); pass a <see cref="ConnectorTcpTransport"/> to tunnel through a connector.
     /// </param>
+    /// <param name="certCheck">
+    /// Host certificate policy (see <see cref="HostCertificatePolicy"/>): invoked with the certificate the
+    /// host presented, after the TLS handshake and before any credential is sent; a non-null result is a
+    /// user-facing refusal reason. Null = accept any certificate.
+    /// </param>
     public RdpHostConnection(string host, int port, KerberosAuth? kerberos, ILogger logger,
-        IHostTransport? transport = null)
+        IHostTransport? transport = null, Func<X509Certificate2, CancellationToken, Task<string?>>? certCheck = null)
     {
         _host = host;
         _port = port;
         _kerberos = kerberos;
         _logger = logger;
         _transport = transport ?? new DirectTcpTransport(logger);
+        _certCheck = certCheck;
     }
 
     /// <summary>
@@ -121,8 +128,11 @@ public sealed class RdpHostConnection
             throw new ConnectException("RDP negotiation failed");
         }
 
-        // TLS terminate. Accept the host cert (self-signed VMs are normal; CredSSP's public-key binding
-        // still detects MITM on the inner auth).
+        // TLS terminate. The handshake accepts whatever certificate the host presents (self-signed VMs are
+        // the norm, so CA validation is impossible); the certificate is captured and then judged by the
+        // pinning policy below (trust on first use, HostCertificatePolicy) BEFORE any credential is sent,
+        // and CredSSP additionally verifies the server's sealed public-key confirmation, which an active
+        // man-in-the-middle cannot produce without the password.
         X509Certificate2? serverCert = null;
         var ssl = new SslStream(netStream, leaveInnerStreamOpen: false,
             userCertificateValidationCallback: (_, cert, _, _) =>
@@ -149,6 +159,26 @@ public sealed class RdpHostConnection
             netStream.Dispose();
             _logger.LogWarning(ex, "RDP host: TLS handshake failed");
             throw new ConnectException("TLS handshake failed");
+        }
+
+        // Host certificate policy (pinning): refuse BEFORE CredSSP sends anything, and before a TLS-only
+        // (xrdp) session starts relaying the in-band login screen to the user. A policy-hook failure is
+        // fail-closed — the message says so, and the policy has an explicit Off mode.
+        if (serverCert != null && _certCheck != null)
+        {
+            string? refusal;
+            try { refusal = await _certCheck(serverCert, ct); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { netStream.Dispose(); throw; }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "RDP host: certificate policy check failed for {Host}:{Port}", _host, _port);
+                refusal = "the host certificate could not be checked against the pinning policy";
+            }
+            if (refusal != null)
+            {
+                netStream.Dispose();
+                throw new ConnectException(refusal);
+            }
         }
 
         // CredSSP (NLA) when the host selected HYBRID or HYBRID_EX; if it (unusually) selected plain SSL

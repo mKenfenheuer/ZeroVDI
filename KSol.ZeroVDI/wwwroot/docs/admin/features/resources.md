@@ -13,6 +13,13 @@ it may be any reachable RDP host. Resources are managed at **Admin → Resources
   connect time so the user is signed straight into Windows. These are encrypted at rest and are
   **never** rendered into the browser.
 
+## Host certificate
+
+The host's TLS certificate is pinned on the first successful connection (trust on first use) and shown
+on the resource's **Backend & VM** tab with its SHA-256 fingerprint. A later connection that presents a
+different certificate is refused until an administrator clicks **Forget pinned certificate** there. See
+[Security](security#host-certificate-pinning-trust-on-first-use).
+
 ## Power management
 
 ZeroVDI can start a stopped VM on connect and shut it down on idle:

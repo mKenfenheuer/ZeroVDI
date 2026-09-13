@@ -239,6 +239,10 @@ internal sealed class Zgfx
             int o = 1;
             int segmentCount = data[o] | (data[o + 1] << 8); o += 2;
             uint uncompressedSize = (uint)(data[o] | (data[o + 1] << 8) | (data[o + 2] << 16) | (data[o + 3] << 24)); o += 4;
+            // Bound the allocation by what the segments can possibly produce ([MS-RDPEGFX] 2.2.5.1: each
+            // segment inflates to at most 65,536 bytes) — this value comes straight off the wire, and a
+            // hostile or corrupt stream could otherwise ask for a 4 GB buffer.
+            if (segmentCount <= 0 || uncompressedSize > (ulong)segmentCount * 65536UL) return null;
             var outBuf = new byte[uncompressedSize];
             int used = 0;
             for (int i = 0; i < segmentCount; i++)

@@ -45,7 +45,10 @@
                 </div>
                 <div>
                     <label class="form-label" asp-for="Kind">Kind</label>
-                    <select class="form-input" asp-for="Kind" asp-items="Html.GetEnumSelectList<VdiPoolKind>()"></select>
+                    <select class="form-input" asp-for="Kind">
+                        <option value="0">Dedicated — one persistent desktop per user</option>
+                        <option value="1" disabled>Floating — shared desktops (not yet available)</option>
+                    </select>
                 </div>
                 <div>
                     <label class="form-label" asp-for="CloneMode">Clone mode</label>
@@ -98,8 +101,12 @@
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                         <label class="form-label" asp-for="IdentityMode">Identity mode</label>
-                        <select class="form-input" asp-for="IdentityMode" asp-items="Html.GetEnumSelectList<VdiIdentityMode>()"></select>
-                        <p class="form-hint">None = template self-customizes. CloudInit = Linux/cloudbase-init. GuestAgent = Windows rename/join.</p>
+                        <select class="form-input" asp-for="IdentityMode">
+                            <option value="0">None — the template customizes itself on first boot</option>
+                            <option value="1">CloudInit — cloud-init (Linux) / cloudbase-init (Windows)</option>
+                            <option value="2" disabled>GuestAgent — rename / domain join (not yet implemented)</option>
+                        </select>
+                        <p class="form-hint">The clone's hostname is its VM name (from the name pattern); the hostname pattern and the domain-join fields below are stored for the guest-agent mode and are not applied yet.</p>
                     </div>
                     <div>
                         <label class="form-label" asp-for="HostnamePattern">Hostname pattern</label>
@@ -236,8 +243,18 @@
                         <tr>
                             <td class="font-medium">@i.ProxmoxVmId</td>
                             <td class="text-muted-foreground">@(i.OwnerUser?.UserName ?? (i.OwnerUserId == null ? "— free —" : i.OwnerUserId))</td>
-                            <td><span class="badge bg-muted text-muted-foreground">@i.State</span></td>
-                            <td class="text-muted-foreground">@i.CreatedUtc.ToLocalTime().ToString("g")</td>
+                            <td>
+                                <span class="badge @(i.State == VdiInstanceState.Ready ? "bg-success/10 text-success" : i.State == VdiInstanceState.Failed ? "bg-destructive/10 text-destructive" : i.State == VdiInstanceState.Provisioning ? "bg-info/10 text-info" : "bg-muted text-muted-foreground")">@i.State</span>
+                                @if (!string.IsNullOrEmpty(i.LastError))
+                                {
+                                    <div class="text-xs text-destructive mt-1 max-w-[30rem]">@i.LastError</div>
+                                }
+                                else if (!i.NotesStamped && i.State == VdiInstanceState.Ready)
+                                {
+                                    <div class="text-xs text-warning mt-1">VM notes not stamped yet (retrying)</div>
+                                }
+                            </td>
+                            <td class="text-muted-foreground" title="Updated @i.UpdatedUtc.ToString("u")">@i.CreatedUtc.ToLocalTime().ToString("g")</td>
                             <td class="text-right">
                                 <form asp-action="Deprovision" asp-route-id="@Model.Id" method="post" class="inline"
                                       data-confirm="Destroy desktop #@i.ProxmoxVmId? The VM and its disks are deleted.">

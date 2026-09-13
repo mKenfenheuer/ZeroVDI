@@ -21,11 +21,14 @@ namespace KSol.ZeroVDI.Areas.Identity.Pages.Account
     {
         private readonly UserManager<ApplicationUser> _userManager;
         private readonly IEmailSender _emailSender;
+        private readonly KSol.ZeroVDI.RDP.PublicUrl _publicUrl;
 
-        public ForgotPasswordModel(UserManager<ApplicationUser> userManager, IEmailSender emailSender)
+        public ForgotPasswordModel(UserManager<ApplicationUser> userManager, IEmailSender emailSender,
+            KSol.ZeroVDI.RDP.PublicUrl publicUrl)
         {
             _userManager = userManager;
             _emailSender = emailSender;
+            _publicUrl = publicUrl;
         }
 
         /// <summary>
@@ -65,11 +68,11 @@ namespace KSol.ZeroVDI.Areas.Identity.Pages.Account
                 // visit https://go.microsoft.com/fwlink/?LinkID=532713
                 var code = await _userManager.GeneratePasswordResetTokenAsync(user);
                 code = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(code));
-                var callbackUrl = Url.Page(
-                    "/Account/ResetPassword",
-                    pageHandler: null,
-                    values: new { area = "Identity", code },
-                    protocol: Request.Scheme);
+                // Built from the configured public address (App:PublicBaseUrl), never from the request's
+                // Host header, which an attacker can forge to make this e-mail carry a link to their site.
+                var callbackUrl = _publicUrl.Absolute(
+                    Url.Page("/Account/ResetPassword", pageHandler: null, values: new { area = "Identity", code }),
+                    Request);
 
                 await _emailSender.SendEmailAsync(
                     Input.Email,

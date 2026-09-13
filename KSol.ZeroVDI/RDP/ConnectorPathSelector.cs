@@ -52,7 +52,11 @@ public sealed class ConnectorPathSelector
             return cached.Path;
 
         var path = await RaceAsync(host, port, ct);
-        _cache[key] = new CacheEntry(path, DateTime.UtcNow.Add(CacheTtl));
+        // Cache only POSITIVE results. A negative result was cached for the full TTL too, which made the
+        // readiness probe loops (2-3 s cadence) see "unreachable" for a whole minute after the first miss
+        // on a VM that was still booting — adding up to 60 s to every cold start.
+        if (path != null) _cache[key] = new CacheEntry(path, DateTime.UtcNow.Add(CacheTtl));
+        else _cache.TryRemove(key, out _);
         return path;
     }
 

@@ -7,6 +7,215 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.36] — 2026-09-13 — Security headers, public base URL, recorder direction fix (audit findings 5 and 7)
+
+### Security
+- **Security headers on every response**: a Content-Security-Policy (scripts from this origin only —
+  inline still permitted for the Razor views, a nonce migration is the follow-up; styles/fonts from
+  this origin plus the two CDNs the layout uses; `frame-ancestors 'none'`, `object-src 'none'`,
+  `base-uri 'self'`, `form-action 'self'`), `X-Frame-Options: DENY`, `X-Content-Type-Options:
+  nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, and a `Permissions-Policy` that grants
+  camera and microphone to this origin only. The console drives keyboard and mouse into a remote
+  desktop, so it must never be framed by another site.
+- **Password-reset and e-mail-change links no longer trust the `Host` header.** New `App:PublicBaseUrl`
+  (e.g. `https://vdi.example.com`) is used for every link that leaves the browser (`PublicUrl` helper);
+  with `AllowedHosts` at `*` an attacker could previously request a reset for a victim with a forged
+  Host header and the victim's e-mail carried a link to the attacker's domain. Without the setting the
+  request host is still used (after the trusted forwarded headers) and a startup warning asks for it
+  in production. The connector enrolment command shows the same public address.
+- **ZGFX multipart allocation is bounded** by `segmentCount × 65536` ([MS-RDPEGFX] 2.2.5.1); the size
+  came straight off the wire and a hostile host could request a 4 GB buffer from the recorder.
+
+### Fixed
+- **Recorder: per-channel stream state is keyed by direction** (`RdpSession`/`RdpChannels`). DVC
+  reassembly, static-channel reassembly, MPPC contexts and both ZGFX contexts were keyed by channel id
+  alone while both directions feed one session in wire order; the browser's per-frame FRAME_ACK/QOE
+  PDUs on the Graphics channel landed inside a pending server frame's accumulator and its raw ZGFX
+  segments polluted the host-direction history, corrupting every later cross-PDU match from Windows
+  hosts. Recordings of Windows RDS sessions are usable again.
+- **Recorder: a framing error no longer makes the decoder retain the rest of the stream in memory.** An
+  invalid unit length used to leave the receive buffer unconsumed and growing for the whole session; it
+  now emits a `raw.desync` event, forwards the bytes untouched and drops the buffer (bounded at 4 MB).
+- **Opening a recording is audited** (`RecordingViewed`), as the audit docs had claimed all along.
+
+### Changed
+- Docs: configuration keys gained `App:PublicBaseUrl` / `AllowedHosts`; installation notes cover the
+  public URL, host filtering, forwarded headers and the no-framing rule; the audit page lists the new
+  events (`RecordingViewed`, `HostCertificate*`, `SessionRejectedPolicy`, `VdiInstanceReconciled`).
+
+---
+
+## [0.6.35] — 2026-09-13 — VDI broker reconciler and clone lifecycle (audit finding 4)
+
+The clone-on-connect broker had no second half: anything the connect-time path could not finish
+stayed that way forever. This release adds the reconcile loop, brings clones under the idle policy,
+and removes the stubs an administrator could configure without effect.
+
+### Added
+- **`VdiReconcileService`** (every 2 min) driving `VdiProvisioningService.ReconcileAsync`:
+  - a *Provisioning* instance nobody is working on is **resumed** if its clone task finished (notes
+    stamp, identity, Ready) or **marked Failed** with the reason if the task failed, is unknown, or ran
+    past a 2-hour cap — previously such a row was stuck forever and the unique (pool, owner) index made
+    every later connect for that user fail with a database error;
+  - *Failed* / *Deprovisioning* instances have their VM **destroyed through the notes-verified path**
+    and their rows removed; a clone that finished after its wait is stamped first so it can be verified —
+    a slow clone no longer leaks a VM that discovery later adopts as a plain resource;
+  - a *Ready* instance whose VM was deleted in Proxmox is marked Failed (the dashboard stopped
+    advertising a ghost desktop; the user gets a fresh one next connect);
+  - a missing notes stamp is retried (an unstamped clone can never be destroyed safely).
+  Every action is audited as `VdiInstanceReconciled`.
+- `VdiInstance` gained `CloneUpid`, `NotesStamped`, `LastError` and `UpdatedUtc` (migration
+  `AddVdiInstanceLifecycle`); the pool page shows state colours and the last error per desktop.
+- `ProxmoxClient.GetTaskStatusAsync` (single probe, node taken from the UPID).
+- Kerberos realm / KDC host are now editable on the backend form (they were consumed by the relay but
+  could only be set by editing the database).
+
+### Fixed
+- **VDI clones are idle-managed and status-polled** like discovered VMs: the idle reaper and the status
+  service filtered on `Source == Proxmox` and skipped `VdiClone`, so a clone ran forever once started.
+- **Connect-time cleanup destroys the previous failed clone's VM** (notes-verified) instead of
+  abandoning it, and refuses with a clear message while a previous clone task is still running.
+- **VMID allocation is serialised** across pools and skips ids already claimed by in-flight or failed
+  rows; two users provisioning at once could previously pick the same id and the second clone failed.
+- **The connector path selector no longer caches "unreachable" for 60 s.** The readiness probe loops
+  (2–3 s cadence) saw a stale negative result for a whole minute after the first miss on a booting VM,
+  adding up to 60 s to every cold start.
+- **The WebSocket relay reuses the preflight's Ready result** (≤ 90 s old) instead of re-running the
+  whole readiness sequence, halving the Proxmox calls per connect.
+- **A VM that started but reported no IP/RDP in time is recorded as Starting, not Stopped.**
+- **Deprovisioning a desktop or deleting a pool is refused while a session is active on it** (the VM
+  was hard-stopped under the user).
+- **Deleting a backend that still backs VDI pools** explains instead of failing with a 500.
+- **Pool Update validates** template, port, VMID range order and max desktops.
+
+### Changed
+- **Floating pools and guest-agent identity cannot be saved** until they exist: both were selectable
+  and documented as shipped while the provisioner refused floating pools at connect time and never
+  applied guest-agent rename/domain join. The options are shown disabled and the docs say so; the
+  hostname pattern is documented as not applied yet (the clone's hostname is its VM name).
+- Docs: the VDI pools page describes the actual lifecycle, the reconciler, the idle policy for clones
+  and the full set of Proxmox token permissions (incl. `VM.Config.Options`, `VM.PowerMgmt`,
+  `VM.Monitor`, `VM.Audit`).
+
+---
+
+## [0.6.34] — 2026-09-13 — Host identity: CredSSP binding verified, certificate pinning, readable NLA errors (audit finding 3)
+
+The gateway accepted any TLS certificate from an RDP host on the strength of "CredSSP's public-key
+binding detects a man-in-the-middle" — but that binding was never actually verified, so the protection
+did not exist. Both halves are fixed.
+
+### Security
+- **CredSSP server public-key confirmation is verified** ([MS-CSSP] 3.1.5 step 5). The client now
+  unseals the server's `pubKeyAuth` with the NTLM server-to-client keys, checks its signature and
+  sequence number, and compares it with the expected Server-To-Client binding hash of the certificate
+  the gateway saw. An active interceptor can forward the NTLM exchange but cannot seal that
+  confirmation without the account password, so the handshake now fails before the credentials are
+  delegated. Previously only the presence of the field was checked (`NtlmClient.UnsealAndVerify`,
+  `CredSspClient`). The v2–4 form (raw public key, first byte incremented) is handled for old servers,
+  and the client now sends the matching v2–4 form to them instead of a nonce hash they cannot verify.
+- **Host certificate pinning (trust on first use).** The SHA-256 fingerprint of the certificate a
+  resource presents on its first successful connection is stored on the resource; every later
+  connection must present the same certificate or it is refused *before any credential is sent* (this
+  also protects the TLS-only xrdp path, which has no CredSSP at all). Audited as
+  `HostCertificatePinned`, failed `HostCertificateMismatch`, and `HostCertificateReset` when an
+  administrator forgets the pin from the resource's **Backend & VM** tab (new **Host certificate**
+  card with subject, fingerprint, pin date and a confirmed *Forget* action). `HostCertificates:Mode`
+  = `Tofu` (default) / `Audit` (log only, for rollout) / `Off`. New `HostCertificatePolicy` service;
+  `RdpResolveRequest`/`RdpHostConnection` gained a certificate-check hook. Migration
+  `AddHostCertPinning` adds `HostCertFingerprint`, `HostCertSubject`, `HostCertPinnedUtc` to
+  `RDPResources`.
+- **Proxmox `Verify TLS certificate` defaults to on** for new backends (existing rows keep their
+  saved value). The API token that manages every VM travels over that connection.
+
+### Fixed
+- **NLA failures say what went wrong.** The CredSSP `errorCode` NTSTATUS is mapped to a plain
+  message: wrong password, account locked out / disabled / expired, password expired or must be
+  changed, not allowed to sign in remotely, domain controller unreachable, NTLM disabled on the host.
+  Every case used to read "bad credentials or NLA refused".
+- User troubleshooting docs gained entries for the certificate-changed and desktop-sign-in-rejected
+  messages; admin docs (security, resources, configuration keys) describe pinning and the new key.
+
+---
+
+## [0.6.33] — 2026-09-13 — Device policy enforced in the relay (audit finding 2)
+
+### Security
+- **Device policy is now enforced at the protocol level.** A feature set to *Disabled* (clipboard,
+  remote audio, microphone, camera) was only clamped in the console UI and the settings save endpoint;
+  the WebSocket relay was a transparent byte tunnel, so a modified client could still join
+  `cliprdr`/`rdpsnd` or accept the `AUDIO_INPUT` / camera dynamic channels. Code comments claimed the
+  relay clamped — it did not. A new `ChannelPolicyGuard` inspects the relayed RDP stream: it parses the
+  client's MCS Connect Initial (CS_NET) and refuses a session that requests a blocked static channel,
+  learns dynamic-channel names from the host's DYNVC_CREATE PDUs on `drdynvc`, and ends the session the
+  moment the client *accepts* a blocked dynamic channel (creation status 0) — before any channel data
+  can flow. The user sees "… redirection is disabled by your administrator's device policy"; the event
+  is audited as a failed `SessionRejectedPolicy` (category Session) with the feature and channel name.
+  The stock browser client never trips it: it already omits blocked static channels and rejects blocked
+  DVC creates. Static-channel bulk compression (MPPC 8K/64K) on `drdynvc` is inflated so the check
+  cannot be dodged by compressing the CREATE exchange. The guard is fail-open on a framing error
+  (logged) rather than dropping healthy sessions, its buffers are bounded, and it is not instantiated
+  at all when no feature is Disabled. *Forced* has no protocol-level meaning and stays UI-only.
+
+### Changed
+- Docs: the device-policy page's "limitation" paragraph is gone; it now documents the four enforcement
+  points including the relay guard, the disconnect behaviour and the new audit event.
+
+---
+
+## [0.6.32] — 2026-09-13 — Web client render path rebuilt (Safari usable, real frame pacing, H.264 probe)
+
+The browser client was very slow in Safari/WebKit and could accumulate seconds of lag in every browser
+under load. Both traced to the same rendering decisions, fixed here. This is the first slice of the
+2026-09-12 audit (`docs/zerovdi-audit.html`, finding 1 plus the preflight fix from finding 5).
+
+### Fixed
+- **Output compositing is coalesced.** Surface writes now only mark a per-surface dirty rectangle; ONE
+  blit per surface goes to the visible canvas at END_FRAME (and at the next animation frame for
+  updates that land outside a frame, such as H.264 output). Previously EVERY 64×64 RemoteFX
+  Progressive tile, every ClearCodec rect, every SOLIDFILL rect and every cache blit was drawn straight
+  to the output canvas — hundreds of `drawImage` calls per PDU. On WebKit each such draw materialises a
+  native image of the whole surface and the next `putImageData` copies the whole backing store, so one
+  progressive PDU cost gigabytes of memcpy. That was the Safari slowness.
+- **GFX surfaces are GPU-backed again** (the `willReadFrequently` hint from 0.6.31 is gone). With it,
+  every decoded H.264 `VideoFrame` was read back to CPU and colour-converted, and every blit to the
+  output re-uploaded the surface. The two readback consumers changed instead: the black-cache scan on
+  SURFACE_TO_CACHE now runs only with `RDP_GFX_DIAG` set, and the ClearCodec glyph snapshot reads the
+  canvas only when the decoded glyph has uncovered pixels (rare, ≤1024 px).
+- **H.264 frames copy only their region rects** into the surface ([MS-RDPEGFX] 2.2.4.4) instead of the
+  whole coded frame, and only those rects are blitted to the output.
+- **FRAME_ACKNOWLEDGE is truthful.** The ack (and QOE ack) for a frame is sent once the frame's content
+  has landed — every async decode submitted before END_FRAME settled and every accepted H.264 chunk
+  produced its output frame — with `queueDepth` = codec bytes still in flight and a real `timeDiffEDR`.
+  Acking at parse time with depth 0 told the host we were keeping up while the decode backlog grew
+  without bound ([MS-RDPEGFX] 3.2.1.2 bounds unacknowledged frames; that IS the throttle). A 300 ms
+  safety timer force-acks a frame whose decoder output is being held back (a decoder that keeps one
+  frame in its pipeline releases it only when the next chunk arrives), so the ack loop can never stall
+  the host.
+- **H.264 support is probed before capabilities are advertised.** `VideoDecoder.isConfigSupported`
+  (High and Main profile) runs at script load; a browser without a usable decoder now negotiates
+  RemoteFX Progressive instead of AVC. If the decoder still fails at runtime the session ends with
+  "This browser cannot decode H.264 video…" and the next connect uses Progressive — previously the
+  worker silently dropped every frame and the user saw a frozen or black desktop.
+- **`requestKeyframe` was undefined** at both call sites; it now sends a refresh-rect for the whole
+  desktop so a rebuilt H.264 decoder gets a fresh keyframe instead of staying black.
+- **Mouse moves are coalesced to one per animation frame** (they were one WebSocket send plus a layout
+  query per pointer report, 120+/s on ProMotion displays); the canvas rectangle is cached for moves and
+  invalidated on resize, scroll and fit.
+- **Held keys are released on window blur** (Alt+Tab / Cmd+Tab / a dialog stealing focus left the host
+  with a stuck Ctrl/Alt/Shift).
+- **HiDPI is capped** at a 200 % scale factor and 3840×2160 — a 5K Retina panel at 2× requested a
+  5120×2880 desktop, four times the decode work of 1440p.
+- **Preflight shows the clone step.** The readiness API reports a `provisioning` phase during the first
+  connect to a VDI pool, but the console's step list did not include it, so the progress bar sat on
+  "Checking resource… Step 1 of 6" for the whole clone. It now shows "Creating your desktop…".
+
+### Changed
+- `totalFramesDecoded` in FRAME_ACKNOWLEDGE counts frames whose content landed, not END_FRAMEs parsed.
+- User docs: connection settings now describe the automatic H.264 → Progressive fallback and the HiDPI cap.
+
+---
+
 ## [0.6.31] — 2026-07-19 — GFX black content areas fixed (decode barrier could wedge)
 
 Large regions of the desktop rendered permanently black over GFX (ClearCodec / RemoteFX Progressive) —

@@ -23,10 +23,11 @@ public class VdiPoolsController : Controller
     private readonly ProxmoxBackendProvider _backends;
     private readonly CredentialProtector _credentials;
     private readonly VdiProvisioningService _provisioning;
+    private readonly SessionTracker _sessions;
 
     public VdiPoolsController(ApplicationDbContext context, IAuditLogger audit,
         ProxmoxClient proxmox, ProxmoxBackendProvider backends, CredentialProtector credentials,
-        VdiProvisioningService provisioning)
+        VdiProvisioningService provisioning, SessionTracker sessions)
     {
         _context = context;
         _audit = audit;
@@ -34,6 +35,17 @@ public class VdiPoolsController : Controller
         _backends = backends;
         _credentials = credentials;
         _provisioning = provisioning;
+        _sessions = sessions;
+    }
+
+    // Floating pools and guest-agent identity are data-model stubs today: the provisioner refuses a
+    // Floating pool at connect time and never applies GuestAgent identity or domain join. Until they are
+    // built, refuse to SAVE them so an administrator cannot configure something that silently does nothing.
+    private static string? ValidateSupported(VdiPool p)
+    {
+        if (p.Kind == VdiPoolKind.Floating) return "Floating pools are not available yet — choose Dedicated.";
+        if (p.IdentityMode == VdiIdentityMode.GuestAgent) return "Guest-agent identity (rename / domain join) is not implemented yet — choose None or CloudInit.";
+        return null;
     }
 
     [HttpGet("")]
@@ -74,6 +86,8 @@ public class VdiPoolsController : Controller
             ModelState.AddModelError(nameof(pool.ProxmoxBackendId), "Choose a backend.");
         if (pool.TemplateVmId <= 0)
             ModelState.AddModelError(nameof(pool.TemplateVmId), "Choose a template.");
+        if (ValidateSupported(pool) is { } unsupported)
+            ModelState.AddModelError(nameof(pool.Kind), unsupported);
 
         if (!ModelState.IsValid)
         {
@@ -137,6 +151,18 @@ public class VdiPoolsController : Controller
             TempData["Error"] = "Another pool already has that name.";
             return RedirectToAction(nameof(Manage), new { id });
         }
+        if (ValidateSupported(form) is { } unsupported)
+        {
+            TempData["Error"] = unsupported;
+            return RedirectToAction(nameof(Manage), new { id });
+        }
+        if (form.TemplateVmId <= 0 || form.Port is <= 0 or > 65535
+            || (form.VmidRangeStart is { } vs && form.VmidRangeEnd is { } ve && ve < vs)
+            || form.MaxSize < 0)
+        {
+            TempData["Error"] = "Check the template, RDP port, VMID range (from ≤ to) and max desktops values.";
+            return RedirectToAction(nameof(Manage), new { id });
+        }
 
         pool.Name = form.Name;
         pool.Description = form.Description;
@@ -182,6 +208,14 @@ public class VdiPoolsController : Controller
     {
         var pool = await _context.VdiPools.Include(p => p.Instances).FirstOrDefaultAsync(p => p.Id == id);
         if (pool == null) return NotFound();
+
+        // Never pull a desktop out from under a user: refuse while any of the pool's clones has a live session.
+        var inUse = pool.Instances.Count(i => i.RDPResourceId != null && _sessions.HasActiveSessions(i.RDPResourceId));
+        if (inUse > 0)
+        {
+            TempData["Error"] = $"{inUse} desktop(s) in this pool are in use right now. Disconnect those sessions (Active sessions) first, then delete the pool.";
+            return RedirectToAction(nameof(Manage), new { id });
+        }
 
         // Deleting a pool cascades to its provisioned desktops: each instance's Proxmox VM is destroyed
         // ONLY after verifying it is really that clone (VMIDs get recycled / nodes drift), and its clone
@@ -293,6 +327,12 @@ public class VdiPoolsController : Controller
         if (pool == null) return NotFound();
         var instance = await _context.VdiInstances.FirstOrDefaultAsync(i => i.Id == instanceId && i.PoolId == id);
         if (instance == null) return RedirectToAction(nameof(Manage), new { id });
+
+        if (instance.RDPResourceId != null && _sessions.HasActiveSessions(instance.RDPResourceId))
+        {
+            TempData["Error"] = $"Desktop #{instance.ProxmoxVmId} is in use right now. Disconnect the session (Active sessions) first.";
+            return RedirectToAction(nameof(Manage), new { id });
+        }
 
         var priorState = instance.State;
         instance.State = VdiInstanceState.Deprovisioning;

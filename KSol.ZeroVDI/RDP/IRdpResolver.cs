@@ -1,3 +1,5 @@
+using System.Security.Cryptography.X509Certificates;
+
 namespace KSol.ZeroVDI.RDP;
 
 /// <summary>
@@ -33,4 +35,8 @@ public sealed record RdpResolveRequest(
     KerberosAuth? Kerberos,
     uint RequestedProtocols,
     byte[]? RoutingToken,
-    ILogger Logger);
+    ILogger Logger,
+    // Host TLS certificate policy hook (see HostCertificatePolicy): called with the certificate the host
+    // presented, after the TLS handshake and BEFORE any credential is sent. Returns null to accept, or a
+    // user-facing reason to refuse. Null hook = accept any certificate (legacy behaviour).
+    Func<X509Certificate2, CancellationToken, Task<string?>>? CertificateCheck = null);

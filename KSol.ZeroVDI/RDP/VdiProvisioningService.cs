@@ -30,6 +30,10 @@ public class VdiProvisioningService
 
     // One lock per (pool, user) so concurrent connect attempts don't double-provision.
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
+    // Serialises VMID allocation + clone start across ALL pools: Proxmox's cluster/nextid does not know
+    // about a clone whose task has not registered its VMID yet, so two provisions racing through
+    // "nextid → clone" could both pick the same id (the second clone then fails "already exists").
+    private static readonly SemaphoreSlim _vmidGate = new(1, 1);
 
     public VdiProvisioningService(
         IServiceScopeFactory scopeFactory,
@@ -114,16 +118,16 @@ public class VdiProvisioningService
     {
         report?.Invoke(new ReadinessProgress(ReadinessPhase.Provisioning, "Provisioning your desktop…"));
 
-        // A prior attempt may have left a Failed/Deprovisioning row for this (pool, user). The
-        // fast-path/re-check queries skip those states, but the unique (PoolId, OwnerUserId) index
-        // does not — so without clearing it first, the INSERT below collides and the user can never
-        // reconnect after a single failed provision. Drop the stale row (and any orphaned resource it
-        // pointed at) before creating fresh tracking rows.
-        await ClearStaleInstanceAsync(db, pool.Id, userId, ct);
-
         var backend = await _backends.GetAsync(pool.ProxmoxBackendId, ct);
         if (backend == null || !backend.IsConfigured)
             return new ProvisionResult(null, "The backend for this pool is unavailable. Contact an administrator.");
+
+        // A prior attempt may have left a Failed/Deprovisioning row for this (pool, user). The
+        // fast-path/re-check queries skip those states, but the unique (PoolId, OwnerUserId) index
+        // does not — so without clearing it first, the INSERT below collides and the user can never
+        // reconnect after a single failed provision. Destroy its VM (verified by notes) and drop the
+        // rows before creating fresh tracking rows.
+        await ClearStaleInstanceAsync(db, backend, pool.Id, userId, ct);
 
         // Locate the template's current node.
         var templates = await _proxmox.ListTemplatesAsync(backend, ct);
@@ -131,70 +135,128 @@ public class VdiProvisioningService
         if (template == null)
             return new ProvisionResult(null, "The pool's template no longer exists. Contact an administrator.");
 
-        var newVmId = await _proxmox.GetNextVmIdAsync(backend, pool.VmidRangeStart, pool.VmidRangeEnd, ct);
-        if (newVmId == null)
-            return new ProvisionResult(null, "No free VM id is available for this pool. Contact an administrator.");
-
         var userName = await db.Users.Where(u => u.Id == userId).Select(u => u.UserName).FirstOrDefaultAsync(ct) ?? userId;
-        var cloneName = Sanitize(Expand(pool.NamePattern, pool.Name, userName, newVmId.Value));
         var targetNode = string.IsNullOrWhiteSpace(pool.TargetNode) ? null : pool.TargetNode;
 
-        // Create the tracking rows up front (state Provisioning) so a crash mid-clone leaves a record
-        // the reconcile loop can clean up rather than an orphaned VM with no row.
-        var resource = new RDPResource
+        RDPResource resource;
+        VdiInstance instance;
+        string cloneName;
+        string? upid;
+        // VMID allocation, tracking rows and the clone START are one critical section (see _vmidGate).
+        await _vmidGate.WaitAsync(ct);
+        try
         {
-            Source = ResourceSource.VdiClone,
-            ProxmoxBackendId = backend.Id,
-            ProxmoxNode = targetNode ?? template.Node,
-            ProxmoxVmId = newVmId.Value,
-            Name = cloneName,
-            Port = pool.Port,
-            OsType = pool.OsType,
-            PowerState = ResourcePowerState.Stopped,
-            DefaultConnectionDefaults = pool.ConnectionDefaults,
-        };
-        db.RDPResources.Add(resource);
+            var newVmId = await _proxmox.GetNextVmIdAsync(backend, pool.VmidRangeStart, pool.VmidRangeEnd, ct);
+            if (newVmId == null)
+                return new ProvisionResult(null, "No free VM id is available for this pool. Contact an administrator.");
+            // cluster/nextid ignores ids our own in-flight rows already claim (a clone that has not yet
+            // registered its VMID, or a Failed row awaiting cleanup) — step past those.
+            var claimed = (await db.VdiInstances.Select(i => i.ProxmoxVmId).ToListAsync(ct)).ToHashSet();
+            int vmid = newVmId.Value;
+            while (claimed.Contains(vmid) && (pool.VmidRangeEnd == null || vmid < pool.VmidRangeEnd)) vmid++;
+            if (claimed.Contains(vmid))
+                return new ProvisionResult(null, "No free VM id is available for this pool. Contact an administrator.");
 
-        var instance = new VdiInstance
+            cloneName = Sanitize(Expand(pool.NamePattern, pool.Name, userName, vmid));
+
+            // Create the tracking rows up front (state Provisioning) so a crash mid-clone leaves a record
+            // the reconcile loop can resume or clean up rather than an orphaned VM with no row.
+            resource = new RDPResource
+            {
+                Source = ResourceSource.VdiClone,
+                ProxmoxBackendId = backend.Id,
+                ProxmoxNode = targetNode ?? template.Node,
+                ProxmoxVmId = vmid,
+                Name = cloneName,
+                Port = pool.Port,
+                OsType = pool.OsType,
+                PowerState = ResourcePowerState.Stopped,
+                DefaultConnectionDefaults = pool.ConnectionDefaults,
+            };
+            db.RDPResources.Add(resource);
+
+            instance = new VdiInstance
+            {
+                PoolId = pool.Id,
+                RDPResourceId = resource.Id,
+                OwnerUserId = userId,
+                ProxmoxNode = resource.ProxmoxNode,
+                ProxmoxVmId = vmid,
+                State = VdiInstanceState.Provisioning,
+                UpdatedUtc = DateTime.UtcNow,
+            };
+            resource.VdiInstanceId = instance.Id;
+            db.VdiInstances.Add(instance);
+            await db.SaveChangesAsync(ct);
+
+            // Clone the template (async Proxmox task). Once the POST is accepted the VMID is registered
+            // cluster-wide, so the gate can be released while we wait for the copy.
+            upid = await _proxmox.CloneAsync(backend, template.Node, pool.TemplateVmId, vmid,
+                cloneName, full: pool.CloneMode == CloneMode.Full, targetNode: targetNode,
+                targetStorage: string.IsNullOrWhiteSpace(pool.TargetStorage) ? null : pool.TargetStorage, ct);
+        }
+        finally
         {
-            PoolId = pool.Id,
-            RDPResourceId = resource.Id,
-            OwnerUserId = userId,
-            ProxmoxNode = resource.ProxmoxNode,
-            ProxmoxVmId = newVmId.Value,
-            State = VdiInstanceState.Provisioning,
-        };
-        resource.VdiInstanceId = instance.Id;
-        db.VdiInstances.Add(instance);
-        await db.SaveChangesAsync(ct);
+            _vmidGate.Release();
+        }
 
-        // Clone the template (async Proxmox task; wait for it).
-        var upid = await _proxmox.CloneAsync(backend, template.Node, pool.TemplateVmId, newVmId.Value,
-            cloneName, full: pool.CloneMode == CloneMode.Full, targetNode: targetNode,
-            targetStorage: string.IsNullOrWhiteSpace(pool.TargetStorage) ? null : pool.TargetStorage, ct);
         if (upid == null)
             return await FailAsync(db, instance, "Failed to start cloning the desktop.", ct);
+        // Remember the task so a provision interrupted by a gateway restart can be resumed (or its VM
+        // cleaned up) by the reconcile loop instead of leaving the row stuck in Provisioning forever.
+        instance.CloneUpid = upid;
+        instance.UpdatedUtc = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
 
         var cloneTimeout = TimeSpan.FromSeconds(Math.Max(300, backend.StartTimeoutSeconds * 3));
         if (!await _proxmox.WaitForTaskAsync(backend, template.Node, upid, cloneTimeout, ct))
-            return await FailAsync(db, instance, "Cloning the desktop did not complete. Contact an administrator.", ct);
+        {
+            // The task may still be running (slow storage). The row keeps the UPID: the reconciler waits
+            // for the task to end and then destroys the finished clone (verified by notes) — no leak.
+            return await FailAsync(db, instance, "Cloning the desktop did not complete in time. Contact an administrator.", ct);
+        }
 
-        // Stamp the gateway id into the clone's notes so the binding survives migration/re-discovery,
-        // and so ProxmoxSyncService recognises it as a clone to leave alone.
-        await _proxmox.SetNotesAsync(backend, resource.ProxmoxNode!, newVmId.Value,
+        await FinishProvisioningAsync(db, backend, pool, resource, instance, userId, userName, ct);
+
+        _logger.LogInformation("VDI: provisioned {Pool} clone {VmId} ({Name}) for {User} -> resource {Res}",
+            pool.Name, instance.ProxmoxVmId, cloneName, userName, resource.Id);
+        return new ProvisionResult(resource.Id, null);
+    }
+
+    /// <summary>
+    /// The post-clone half of provisioning: stamp the gateway id into the VM notes (so the binding survives
+    /// migration/re-discovery, ProxmoxSyncService leaves the clone alone, and a later destroy can VERIFY the
+    /// VM is ours), apply the pool's identity customization while the clone is still stopped, and mark the
+    /// instance Ready. Shared by the connect-time path and the reconciler (which resumes a clone that
+    /// finished after the gateway lost track of it).
+    /// </summary>
+    private async Task FinishProvisioningAsync(
+        ApplicationDbContext db, ProxmoxBackend backend, VdiPool pool, RDPResource resource, VdiInstance instance,
+        string userId, string userName, CancellationToken ct)
+    {
+        var stamped = await _proxmox.SetNotesAsync(backend, resource.ProxmoxNode!, resource.ProxmoxVmId!.Value,
             ProxmoxNotes.WriteId(null, resource.Id), ct);
+        instance.NotesStamped = stamped;
+        if (!stamped)
+        {
+            // Not fatal — but until the stamp lands this VM cannot be destroyed safely, so the reconciler
+            // keeps retrying (see ReconcileAsync) and the pool page shows the condition.
+            instance.LastError = "Could not stamp the gateway id into the VM notes (check the API token's VM.Config.Options permission); retrying in the background.";
+            _logger.LogWarning("VDI: notes stamp failed for clone {VmId} (resource {Res}); will retry", resource.ProxmoxVmId, resource.Id);
+        }
+        else
+        {
+            instance.LastError = null;
+        }
 
-        // Per-pool identity customization (cloud-init / guest-agent rename+join). For VdiIdentityMode.None
-        // the template self-customizes on first boot. Applied while the clone is still stopped (before the
-        // resolver powers it on), so cloud-init lands on first boot.
+        // Per-pool identity customization (cloud-init). For VdiIdentityMode.None the template
+        // self-customizes on first boot. Applied while the clone is still stopped (before the resolver
+        // powers it on), so cloud-init lands on first boot.
         await ApplyIdentityAsync(db, backend, pool, resource, userId, userName, ct);
 
         instance.State = VdiInstanceState.Ready;
+        instance.UpdatedUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
-
-        _logger.LogInformation("VDI: provisioned {Pool} clone {VmId} ({Name}) for {User} -> resource {Res}",
-            pool.Name, newVmId.Value, cloneName, userName, resource.Id);
-        return new ProvisionResult(resource.Id, null);
     }
 
     /// <summary>The outcome of a guarded VM destroy.</summary>
@@ -378,35 +440,237 @@ public class VdiProvisioningService
     /// <summary>
     /// Removes any leftover dedicated instance for <paramref name="poolId"/>/<paramref name="userId"/> that the
     /// connect-time lookups treat as absent (Failed/Deprovisioning). Such a row would otherwise trip the unique
-    /// (PoolId, OwnerUserId) index on the next provision. Its orphaned <see cref="RDPResource"/> (the clone that
-    /// never came up) is removed too; the abandoned Proxmox VM, if any, is left for an administrator since we
-    /// have no record it was ever created successfully.
+    /// (PoolId, OwnerUserId) index on the next provision. Its VM is destroyed first when it can be VERIFIED as
+    /// ours (notes stamp) — a clone that never got stamped is left for the reconciler, which stamps it once its
+    /// clone task has finished and then destroys it. The orphaned <see cref="RDPResource"/> row goes too.
     /// </summary>
-    private async Task ClearStaleInstanceAsync(ApplicationDbContext db, string poolId, string userId, CancellationToken ct)
+    private async Task ClearStaleInstanceAsync(ApplicationDbContext db, ProxmoxBackend backend, string poolId, string userId, CancellationToken ct)
     {
         var stale = await db.VdiInstances
             .FirstOrDefaultAsync(i => i.PoolId == poolId && i.OwnerUserId == userId
                 && (i.State == VdiInstanceState.Failed || i.State == VdiInstanceState.Deprovisioning), ct);
         if (stale == null) return;
 
-        if (stale.RDPResourceId is { } resId)
+        // A clone task that is still running cannot be destroyed yet and must not be forgotten: leave the
+        // row for the reconciler and let this connect fail with a clear message rather than leak a VM.
+        if (stale.CloneUpid != null && !stale.NotesStamped)
         {
+            var task = await _proxmox.GetTaskStatusAsync(backend, stale.CloneUpid, ct);
+            if (task is { Stopped: false })
+                throw new InvalidOperationException("A previous desktop for you is still being cloned; please try again in a few minutes.");
+            if (task is { Stopped: true, Ok: true } && stale.RDPResourceId != null && stale.ProxmoxNode != null)
+                stale.NotesStamped = await _proxmox.SetNotesAsync(backend, stale.ProxmoxNode, stale.ProxmoxVmId,
+                    ProxmoxNotes.WriteId(null, stale.RDPResourceId), ct);
+        }
+        var outcome = await SafeDestroyInstanceVmAsync(backend, stale, ct);
+        if (outcome == DestroyOutcome.Error)
+            throw new InvalidOperationException("The backend could not be reached to clean up a previous desktop; please try again.");
+
+        await RemoveInstanceRowsAsync(db, stale, ct);
+        _logger.LogInformation("VDI: cleared stale {State} instance {Instance} for pool {Pool} / user {User} before reprovision (VM: {Outcome})",
+            stale.State, stale.Id, poolId, userId, outcome);
+    }
+
+    /// <summary>Drops an instance's tracking rows: its clone resource (+ authorizations) and the instance itself.</summary>
+    private static async Task RemoveInstanceRowsAsync(ApplicationDbContext db, VdiInstance instance, CancellationToken ct)
+    {
+        if (instance.RDPResourceId is { } resId)
+        {
+            var auths = await db.RDPResourceUserAuthorizations.Where(a => a.RDPResourceId == resId).ToListAsync(ct);
+            db.RDPResourceUserAuthorizations.RemoveRange(auths);
             var resource = await db.RDPResources.FirstOrDefaultAsync(r => r.Id == resId, ct);
             if (resource != null) db.RDPResources.Remove(resource);
         }
-        db.VdiInstances.Remove(stale);
+        db.VdiInstances.Remove(instance);
         await db.SaveChangesAsync(ct);
-
-        _logger.LogInformation("VDI: cleared stale {State} instance {Instance} for pool {Pool} / user {User} before reprovision",
-            stale.State, stale.Id, poolId, userId);
     }
 
     private async Task<ProvisionResult> FailAsync(ApplicationDbContext db, VdiInstance instance, string error, CancellationToken ct)
     {
         instance.State = VdiInstanceState.Failed;
+        instance.LastError = error;
+        instance.UpdatedUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         _logger.LogWarning("VDI: provisioning failed for instance {Instance}: {Error}", instance.Id, error);
         return new ProvisionResult(null, error);
+    }
+
+    // ==============================================================================================
+    // Reconcile loop (driven by VdiReconcileService). Everything the connect-time path cannot do on
+    // its own because the process may have died in the middle, or the backend was unreachable:
+    //   - Provisioning rows nobody is working on: resume a clone that finished (stamp notes, apply
+    //     identity, Ready) or mark it Failed so its VM gets cleaned up — previously such a row was stuck
+    //     forever and the unique (pool, owner) index blocked every later connect for that user.
+    //   - Failed / Deprovisioning rows: destroy the VM through the notes-verified path, then drop rows.
+    //   - Ready rows whose VM vanished out of band: mark Failed (the user gets a fresh clone next time).
+    //   - Ready rows whose notes stamp failed: retry the stamp so the VM can be destroyed safely later.
+    // Every action is audited as VdiInstanceReconciled.
+    // ==============================================================================================
+
+    private static readonly TimeSpan ProvisioningHardCap = TimeSpan.FromHours(2);
+
+    /// <summary>One reconcile pass over every instance that is not simply Ready-and-stamped.</summary>
+    public async Task ReconcileAsync(CancellationToken ct)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var audit = scope.ServiceProvider.GetRequiredService<IAuditLogger>();
+
+        var instances = await db.VdiInstances
+            .Include(i => i.Pool).Include(i => i.RDPResource)
+            .ToListAsync(ct);
+        if (instances.Count == 0) return;
+
+        var backends = new Dictionary<int, ProxmoxBackend?>();
+        var inventories = new Dictionary<int, HashSet<int>?>(); // backendId → live VMIDs (null = unknown/empty)
+
+        foreach (var inst in instances)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (inst.Pool == null) continue;
+            var backendId = inst.Pool.ProxmoxBackendId;
+            if (!backends.TryGetValue(backendId, out var backend))
+                backends[backendId] = backend = await _backends.GetAsync(backendId, ct);
+            if (backend == null || !backend.IsConfigured) continue;
+
+            try
+            {
+                switch (inst.State)
+                {
+                    case VdiInstanceState.Provisioning:
+                        await ReconcileProvisioningAsync(db, audit, backend, inst, ct);
+                        break;
+                    case VdiInstanceState.Failed:
+                    case VdiInstanceState.Deprovisioning:
+                    case VdiInstanceState.Returning:
+                        await ReconcileDeadAsync(db, audit, backend, inst, ct);
+                        break;
+                    case VdiInstanceState.Ready:
+                    case VdiInstanceState.Leased:
+                        if (!inventories.TryGetValue(backendId, out var live))
+                        {
+                            var vms = await _proxmox.ListVmsAsync(backend, ct);
+                            // An empty inventory is far more likely an API blip than a truly empty cluster;
+                            // never treat it as "every clone vanished" (same guard as ProxmoxSyncService).
+                            inventories[backendId] = live = vms.Count == 0 ? null : vms.Select(v => v.VmId).ToHashSet();
+                        }
+                        await ReconcileLiveAsync(db, audit, backend, inst, live, ct);
+                        break;
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "VDI reconcile: instance {Instance} (vmid {VmId}) skipped this pass", inst.Id, inst.ProxmoxVmId);
+            }
+        }
+    }
+
+    private async Task ReconcileProvisioningAsync(ApplicationDbContext db, IAuditLogger audit, ProxmoxBackend backend, VdiInstance inst, CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        // The connect-time path may still be working on it: it holds the (pool, user) gate and its clone
+        // wait is bounded by max(5 min, 3×StartTimeout). Only look at rows older than that.
+        var stuckAfter = TimeSpan.FromSeconds(Math.Max(1200, backend.StartTimeoutSeconds * 3 + 300));
+        if (now - inst.UpdatedUtc < stuckAfter) return;
+        var gate = _locks.GetOrAdd(Key(inst.PoolId, inst.OwnerUserId ?? ""), _ => new SemaphoreSlim(1, 1));
+        if (!await gate.WaitAsync(0, ct)) return; // someone is provisioning this (pool, user) right now
+        try
+        {
+            var task = inst.CloneUpid != null ? await _proxmox.GetTaskStatusAsync(backend, inst.CloneUpid, ct) : null;
+            if (task is { Stopped: false } && now - inst.UpdatedUtc < ProvisioningHardCap) return; // clone still running
+
+            if (task is { Stopped: true, Ok: true } && inst.RDPResource != null && inst.OwnerUserId != null)
+            {
+                // The clone finished after the gateway lost track of it (restart mid-provision). Nothing has
+                // booted yet, so the normal post-clone steps can simply be completed now.
+                var userName = await db.Users.Where(u => u.Id == inst.OwnerUserId).Select(u => u.UserName).FirstOrDefaultAsync(ct) ?? inst.OwnerUserId;
+                await FinishProvisioningAsync(db, backend, inst.Pool!, inst.RDPResource, inst, inst.OwnerUserId, userName, ct);
+                _logger.LogInformation("VDI reconcile: resumed interrupted provisioning of vmid {VmId} (pool {Pool}) → Ready", inst.ProxmoxVmId, inst.Pool!.Name);
+                await audit.LogAsync(AuditCategory.Resource, "VdiInstanceReconciled",
+                    targetType: nameof(VdiPool), targetId: inst.PoolId, targetName: inst.Pool!.Name,
+                    detail: new { action = "resumed-provisioning", inst.ProxmoxVmId, inst.OwnerUserId });
+                return;
+            }
+
+            // Task failed, is unknown (Proxmox forgets old tasks), or ran past the hard cap.
+            inst.State = VdiInstanceState.Failed;
+            inst.LastError = task == null
+                ? "Provisioning was interrupted (gateway restarted before the clone task was recorded or the task is no longer known); the desktop will be recreated on the next connect."
+                : task.Ok ? "Provisioning was interrupted before the clone could be finalised."
+                          : $"The clone task failed on Proxmox (exit status '{task.ExitStatus}').";
+            inst.UpdatedUtc = now;
+            await db.SaveChangesAsync(ct);
+            _logger.LogWarning("VDI reconcile: stuck Provisioning instance {Instance} (vmid {VmId}) marked Failed: {Error}", inst.Id, inst.ProxmoxVmId, inst.LastError);
+            await audit.LogAsync(AuditCategory.Resource, "VdiInstanceReconciled", success: false,
+                targetType: nameof(VdiPool), targetId: inst.PoolId, targetName: inst.Pool?.Name,
+                detail: new { action = "marked-failed", inst.ProxmoxVmId, inst.OwnerUserId, error = inst.LastError });
+        }
+        finally { gate.Release(); }
+    }
+
+    private async Task ReconcileDeadAsync(ApplicationDbContext db, IAuditLogger audit, ProxmoxBackend backend, VdiInstance inst, CancellationToken ct)
+    {
+        // Give the connect-time cleanup a moment (it handles its own stale row under the gate).
+        if (DateTime.UtcNow - inst.UpdatedUtc < TimeSpan.FromMinutes(2)) return;
+        var gate = _locks.GetOrAdd(Key(inst.PoolId, inst.OwnerUserId ?? ""), _ => new SemaphoreSlim(1, 1));
+        if (!await gate.WaitAsync(0, ct)) return;
+        try
+        {
+            // A clone whose task is still running cannot be destroyed; once it ends, stamp the notes so the
+            // destroy below can VERIFY the VM is the one this row created (the whole point of SafeDestroy).
+            if (inst.CloneUpid != null && !inst.NotesStamped)
+            {
+                var task = await _proxmox.GetTaskStatusAsync(backend, inst.CloneUpid, ct);
+                if (task is { Stopped: false } && DateTime.UtcNow - inst.UpdatedUtc < ProvisioningHardCap) return;
+                if (task is { Stopped: true, Ok: true } && inst.RDPResourceId != null && inst.ProxmoxNode != null)
+                    inst.NotesStamped = await _proxmox.SetNotesAsync(backend, inst.ProxmoxNode, inst.ProxmoxVmId,
+                        ProxmoxNotes.WriteId(null, inst.RDPResourceId), ct);
+            }
+
+            var outcome = await SafeDestroyInstanceVmAsync(backend, inst, ct);
+            if (outcome == DestroyOutcome.Error) return; // backend trouble — retry next pass, keep the rows
+
+            await RemoveInstanceRowsAsync(db, inst, ct);
+            _logger.LogInformation("VDI reconcile: cleaned up {State} instance {Instance} (vmid {VmId}, VM {Outcome})",
+                inst.State, inst.Id, inst.ProxmoxVmId, outcome);
+            await audit.LogAsync(AuditCategory.Resource, "VdiInstanceReconciled",
+                success: outcome != DestroyOutcome.IdentityMismatch,
+                targetType: nameof(VdiPool), targetId: inst.PoolId, targetName: inst.Pool?.Name,
+                detail: new { action = "removed", priorState = inst.State.ToString(), inst.ProxmoxVmId, inst.OwnerUserId, vm = outcome.ToString(), inst.LastError });
+        }
+        finally { gate.Release(); }
+    }
+
+    private async Task ReconcileLiveAsync(ApplicationDbContext db, IAuditLogger audit, ProxmoxBackend backend, VdiInstance inst, HashSet<int>? liveVmIds, CancellationToken ct)
+    {
+        // VM deleted out of band (Proxmox UI, node lost): the user would hit "VM no longer exists" at
+        // connect and be recloned then, but until that happens the dashboard advertises a ghost desktop.
+        if (liveVmIds != null && !liveVmIds.Contains(inst.ProxmoxVmId))
+        {
+            inst.State = VdiInstanceState.Failed;
+            inst.LastError = "The VM no longer exists on the backend (deleted outside ZeroVDI); a fresh desktop will be created on the next connect.";
+            inst.UpdatedUtc = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+            _logger.LogWarning("VDI reconcile: vmid {VmId} of instance {Instance} is gone from the inventory; marked Failed", inst.ProxmoxVmId, inst.Id);
+            await audit.LogAsync(AuditCategory.Resource, "VdiInstanceReconciled", success: false,
+                targetType: nameof(VdiPool), targetId: inst.PoolId, targetName: inst.Pool?.Name,
+                detail: new { action = "vm-missing", inst.ProxmoxVmId, inst.OwnerUserId });
+            return;
+        }
+
+        if (!inst.NotesStamped && inst.RDPResourceId != null && inst.ProxmoxNode != null)
+        {
+            // Retry the binding stamp (token permissions may have been fixed since). Without it the VM can
+            // never be destroyed through the verified path.
+            if (await _proxmox.SetNotesAsync(backend, inst.ProxmoxNode, inst.ProxmoxVmId, ProxmoxNotes.WriteId(null, inst.RDPResourceId), ct))
+            {
+                inst.NotesStamped = true;
+                inst.LastError = null;
+                await db.SaveChangesAsync(ct);
+                _logger.LogInformation("VDI reconcile: notes stamp succeeded on retry for vmid {VmId}", inst.ProxmoxVmId);
+            }
+        }
     }
 
     private static string Key(string poolId, string userId) => $"{poolId}|{userId}";

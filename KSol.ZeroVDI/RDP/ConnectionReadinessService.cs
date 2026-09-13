@@ -71,6 +71,19 @@ public sealed class ConnectionReadinessService
     public ReadinessProgress? Status(string userId, string resource)
         => _jobs.TryGetValue(Key(userId, resource), out var job) ? job.Progress : null;
 
+    /// <summary>
+    /// The terminal Ready result of a job that finished within <paramref name="maxAge"/>, or null. Lets the
+    /// WebSocket relay reuse the preflight's outcome instead of re-running the whole readiness sequence
+    /// (VM lookup, guest-agent and IP polls, RDP probe) a second time right after it succeeded.
+    /// </summary>
+    public ReadinessProgress? TryGetRecentReady(string userId, string resource, TimeSpan maxAge)
+    {
+        if (!_jobs.TryGetValue(Key(userId, resource), out var job)) return null;
+        if (job.FinishedUtc is not { } finished || DateTime.UtcNow - finished > maxAge) return null;
+        var p = job.Progress;
+        return p is { Phase: ReadinessPhase.Ready, Host: not null } ? p : null;
+    }
+
     private void ReapStale()
     {
         var cutoff = DateTime.UtcNow.AddMinutes(-2);

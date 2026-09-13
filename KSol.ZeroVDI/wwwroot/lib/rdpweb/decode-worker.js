@@ -216,6 +216,7 @@ H264Dec.prototype._configureFrom = function (annexb) {
     if (typeof VideoDecoder === "undefined") {
         this.unsupported = true;
         log("rdpgfx(worker): WebCodecs VideoDecoder unavailable — H.264 cannot be decoded");
+        postMessage({ cmd: "h264-unsupported", surfaceId: this.surfaceId, reason: "WebCodecs VideoDecoder unavailable" });
         return;
     }
     const nals = annexbSplit(annexb);
@@ -235,6 +236,9 @@ H264Dec.prototype._configureFrom = function (annexb) {
                 self.configured = false;
                 self._gotKey = false;
                 self._pendingRegions = [];
+                // Frames the dead decoder still owed will never come: let the main thread stop waiting
+                // for them (frame acks) and ask the host for a fresh keyframe.
+                postMessage({ cmd: "h264-need-keyframe", surfaceId: self.surfaceId });
             },
         });
     }
@@ -245,18 +249,19 @@ H264Dec.prototype._configureFrom = function (annexb) {
     } catch (e) {
         this.unsupported = true;
         log("rdpgfx(worker): VideoDecoder.configure(" + codec + ") failed: " + (e && e.message || e));
+        postMessage({ cmd: "h264-unsupported", surfaceId: this.surfaceId,
+            reason: "VideoDecoder.configure(" + codec + ") failed: " + (e && e.message || e) });
     }
 };
 
+// Returns true when a chunk was handed to the decoder (exactly one output frame will follow, in order),
+// false when the PDU was consumed without a decode (waiting for a keyframe, unsupported, error).
 H264Dec.prototype.decode = function (annexb, regions) {
     const key = this._isKeyFrame(annexb);
     if (!this.configured && key) this._configureFrom(annexb);
-    if (this.unsupported || !this.decoder || !this.configured) {
-        if (!this._gotKey && !key) return; // still waiting for the first keyframe to configure
-        return;
-    }
+    if (this.unsupported || !this.decoder || !this.configured) return false;
     // VideoDecoder must START on a key frame; drop deltas until the first keyframe arrives.
-    if (!this._gotKey && !key) return;
+    if (!this._gotKey && !key) return false;
     if (key) this._gotKey = true;
     this._pendingRegions.push(regions);
     try {
@@ -266,6 +271,7 @@ H264Dec.prototype.decode = function (annexb, regions) {
             log("rdpgfx(worker): H264 decode() #" + this._decCount + " type=" + (key ? "key" : "delta") +
                 " bytes=" + annexb.length + " state=" + this.decoder.state + " queue=" + this.decoder.decodeQueueSize);
         }
+        return true;
     } catch (e) {
         // decode() throwing means the decoder is in a bad/closed state. Reset so the next keyframe
         // rebuilds it, and ask the main thread to nudge the host for a fresh keyframe.
@@ -273,6 +279,7 @@ H264Dec.prototype.decode = function (annexb, regions) {
         try { if (this.decoder && this.decoder.state !== "closed") this.decoder.close(); } catch (_) {}
         this.decoder = null; this.configured = false; this._gotKey = false; this._pendingRegions = [];
         postMessage({ cmd: "h264-need-keyframe", surfaceId: this.surfaceId });
+        return false;
     }
 };
 
@@ -307,10 +314,11 @@ function decodeH264(msg) {
     const bitstream = data.subarray(off);
     let dec = h264[surfaceId];
     if (!dec) { dec = new H264Dec(surfaceId); h264[surfaceId] = dec; }
-    dec.decode(bitstream, rects);
+    const willOutput = dec.decode(bitstream, rects) === true;
     // Acknowledge submission so the main thread's ordered-decode barrier advances (H.264 output is async,
     // like progressive; the h264-frame reply lands later and paints, but the PDU has been consumed).
-    postMessage({ cmd: "h264-submitted", reqId: reqId, surfaceId: surfaceId });
+    // willOutput tells it whether an output frame is owed, so the frame ack can wait for that paint.
+    postMessage({ cmd: "h264-submitted", reqId: reqId, surfaceId: surfaceId, willOutput: willOutput });
 }
 
 self.onmessage = function (e) {

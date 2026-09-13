@@ -45,6 +45,27 @@ admin Users list shows an MFA-status column.
 - **Rate limiting** applies an IP fixed-window limit to the Identity/login pages — see
   [Rate limiting](../administration/rate-limiting).
 
+## Host certificate pinning (trust on first use)
+
+RDP hosts almost always present a self-signed TLS certificate, so the gateway cannot validate it
+against a CA. Instead it **pins**: the SHA-256 fingerprint of the certificate seen on a resource's
+first successful connection is stored on the resource (audited as `HostCertificatePinned`), and every
+later connection must present the same certificate. A different certificate is refused *before any
+credential is sent* and recorded as a failed `HostCertificateMismatch`; the user sees "The desktop's
+security certificate has changed since it was first trusted…". After a legitimate change (host
+reinstalled, certificate renewed), an administrator forgets the pin on the resource's **Backend & VM**
+tab (`HostCertificateReset`) and the next connection pins the new one.
+
+In addition, the CredSSP (NLA) handshake verifies the host's sealed public-key confirmation, which an
+active man-in-the-middle cannot produce without the account password — so even the very first
+connection is protected against interception of the credentials.
+
+`HostCertificates:Mode` selects the behaviour: `Tofu` (default — pin and enforce), `Audit` (pin and log
+mismatches but allow the connection; useful while rolling out), `Off` (accept any certificate).
+
+Proxmox backends verify the cluster's TLS certificate by default (**Verify TLS certificate** on the
+backend form); turn it off only for a self-signed lab cluster.
+
 ## Secrets at rest
 
 - Stored VM credentials and VDI identity secrets are encrypted with an AES-GCM keyring derived from

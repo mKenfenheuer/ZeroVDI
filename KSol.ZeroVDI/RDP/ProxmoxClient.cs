@@ -256,6 +256,38 @@ public class ProxmoxClient
         return false;
     }
 
+    /// <summary>Outcome of a single task-status probe.</summary>
+    public sealed record TaskStatus(bool Stopped, bool Ok, string? ExitStatus);
+
+    /// <summary>
+    /// Reads a task's status once (no polling). The node is taken from the UPID itself
+    /// (<c>UPID:&lt;node&gt;:…</c>), so a clone task can be re-checked after a gateway restart without knowing
+    /// which node ran it. Null when the task is unknown to Proxmox or the backend is unreachable.
+    /// </summary>
+    public async Task<TaskStatus?> GetTaskStatusAsync(ProxmoxBackend backend, string upid, CancellationToken ct = default)
+    {
+        var parts = upid.Split(':');
+        if (parts.Length < 3 || parts[0] != "UPID") return null;
+        var node = parts[1];
+        using var client = CreateClient(backend);
+        if (client == null) return null;
+        try
+        {
+            using var doc = await GetJsonAsync(client, $"nodes/{node}/tasks/{Uri.EscapeDataString(upid)}/status", ct);
+            if (doc == null) return null;
+            var data = doc.RootElement.GetProperty("data");
+            var status = data.TryGetProperty("status", out var s) ? s.GetString() : null;
+            var stopped = string.Equals(status, "stopped", StringComparison.OrdinalIgnoreCase);
+            var exit = stopped && data.TryGetProperty("exitstatus", out var e) ? e.GetString() : null;
+            return new TaskStatus(stopped, stopped && string.Equals(exit, "OK", StringComparison.OrdinalIgnoreCase), exit);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Proxmox[{Backend}]: task status {Upid} unavailable", backend.Name, upid);
+            return null;
+        }
+    }
+
     /// <summary>Deletes (destroys) a VM and its disks. Returns the task UPID, or null on failure.</summary>
     public async Task<string?> DeleteVmAsync(ProxmoxBackend backend, string node, int vmid, CancellationToken ct = default)
     {

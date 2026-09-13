@@ -74,6 +74,10 @@ public class RecordingsController : Controller
     {
         var rec = await LoadAuthorizedAsync(id);
         if (rec == null) return NotFound();
+        // Recordings are a compliance artefact; who watched what is itself auditable.
+        await _audit.LogAsync(AuditCategory.Recording, "RecordingViewed",
+            targetType: nameof(Recording), targetId: rec.Id, targetName: rec.RDPResource?.Name,
+            detail: new { rec.UserId, rec.StartedUtc });
         return View(rec);
     }
 

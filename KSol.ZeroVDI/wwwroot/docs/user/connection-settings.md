@@ -18,7 +18,8 @@ settings. Your choices are remembered for next time.
 | **Clipboard** | Lets you copy and paste text between your computer and the remote desktop. |
 | **Microphone** | Makes your microphone available inside the session (e.g. for calls). |
 | **Camera** | Makes your webcam available inside the session. |
-| **Graphics mode** | How the screen is sent to your browser. Leave on the default unless you have a reason to change it. |
+| **Graphics mode** | How the screen is sent to your browser. Leave on the default unless you have a reason to change it. If your browser cannot decode H.264 video, ZeroVDI switches to RemoteFX Progressive by itself. |
+| **HiDPI** | Renders at your screen's native pixel density (capped at 200 % and 4K). Sharper on Retina screens, but streams more data. |
 | **Performance** | Trades visual extras (like wallpaper and animations) for speed on slower connections. |
 
 Turning options **off** can make the connection faster and is more private — only enable what you

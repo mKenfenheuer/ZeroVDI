@@ -125,6 +125,14 @@ public class RDPResource
     /// <summary>Resource-wide connection defaults inherited by newly granted users.</summary>
     public ConnectionDefaults? DefaultConnectionDefaults { get; set; }
 
+    // --- Host TLS certificate pinning (trust on first use; see HostCertificatePolicy) ---
+    /// <summary>Uppercase hex SHA-256 of the host's TLS certificate seen on the first successful connection.</summary>
+    public string? HostCertFingerprint { get; set; }
+    /// <summary>Subject of the pinned certificate (display only).</summary>
+    public string? HostCertSubject { get; set; }
+    /// <summary>When the certificate was pinned (UTC).</summary>
+    public DateTime? HostCertPinnedUtc { get; set; }
+
     // --- Manual resource lifecycle (only meaningful when Source == Manual) ---
 
     public OsType OsType { get; set; } = OsType.Windows;

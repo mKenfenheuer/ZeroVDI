@@ -260,7 +260,10 @@ public class VdiResourceResolver
         if (ip == null)
         {
             _logger.LogWarning("Resolve: VM {Node}/{VmId} not reachable within timeout", node, vmid);
-            await SetPowerStateAsync(db, res, ResourcePowerState.Stopped);
+            // The VM IS running (start was accepted / it was already up) — it just has no IP or RDP yet.
+            // Recording it as Stopped misled the dashboard and the idle reaper; Starting is the truth and
+            // the status service corrects it either way on its next sweep.
+            await SetPowerStateAsync(db, res, ResourcePowerState.Starting);
             return Fail(probedRdp
                 ? "Timed out waiting for the remote desktop service (RDP service unavailable)."
                 : "Timed out waiting for the VM to report an IP address (no IP address reported).");

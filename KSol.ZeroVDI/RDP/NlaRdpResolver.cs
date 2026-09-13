@@ -53,7 +53,7 @@ public sealed class NlaRdpResolver : IRdpResolver
         attemptCts.CancelAfter(AttemptTimeout);
         try
         {
-            return await new RdpHostConnection(r.Host, r.Port, r.Kerberos, r.Logger, r.Transport)
+            return await new RdpHostConnection(r.Host, r.Port, r.Kerberos, r.Logger, r.Transport, r.CertificateCheck)
                 .ConnectAsync(r.Creds, protocols, attemptCts.Token, r.RoutingToken);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)

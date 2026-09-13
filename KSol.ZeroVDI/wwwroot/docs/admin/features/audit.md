@@ -19,7 +19,9 @@ Recorded events include (non-exhaustive):
 - **Users & access:** user create/delete, role change, direct and group access grant/revoke, group
   lifecycle and membership changes.
 - **Device policy:** policy updated.
-- **Recordings:** verified (with success flag), deleted, purged by retention.
+- **Recordings:** viewed (opening the player), verified (with success flag), deleted, purged by retention.
+- **Resources / VDI:** host certificate pinned / mismatch / reset, session refused by device policy
+  (`SessionRejectedPolicy`), VDI instance reconciled (`VdiInstanceReconciled` with an `action`).
 - **VDI:** pool created/updated/deleted, assignment granted/revoked, instance lifecycle.
 
 ## Categories

@@ -41,9 +41,13 @@ public class ProxmoxBackend
     [Display(Name = "API token secret")]
     public string? ApiTokenSecret { get; set; }
 
-    /// <summary>Whether to validate the Proxmox TLS certificate. Off for self-signed lab setups.</summary>
+    /// <summary>
+    /// Whether to validate the Proxmox TLS certificate. Secure by default (on); turn off only for a
+    /// self-signed lab cluster — the API token that manages every VM travels over this connection.
+    /// Existing backends keep the value they were saved with.
+    /// </summary>
     [Display(Name = "Verify TLS certificate")]
-    public bool VerifyTls { get; set; } = false;
+    public bool VerifyTls { get; set; } = true;
 
     /// <summary>
     /// Optional connector to tunnel the Proxmox API through, for clusters with no direct line-of-sight from

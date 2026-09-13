@@ -39,6 +39,20 @@ rejected, double-check them with whoever manages that desktop.
 Your network may have dropped. Close the console tab and click **Connect** again from the
 dashboard — your session is usually still running where you left it.
 
+## "The desktop's security certificate has changed"
+
+ZeroVDI remembers each desktop's security certificate and refuses to connect if it changes, because
+that can mean someone is intercepting the connection. It also happens legitimately when a desktop was
+reinstalled or its certificate was renewed. Tell your administrator; they can approve the new
+certificate, after which connecting works again.
+
+## Sign-in to the desktop is rejected
+
+The message tells you why: a wrong password, a locked-out, expired or disabled account, or an account
+that isn't allowed to use Remote Desktop. Passwords for the *desktop* are separate from your ZeroVDI
+sign-in — if you saved them, update the saved credentials (see
+[Saving your credentials](saving-credentials.md)).
+
 ## I can't sign in to ZeroVDI at all
 
 - Double-check your username and password.

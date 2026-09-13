@@ -78,6 +78,12 @@ function Client(websocketURL, canvasID) {
     // initial-scale sequence doesn't re-apply the scale on top of the already-scaled framebuffer (which
     // rendered the reconnected desktop at double size). Cleared once the session goes active again.
     this._preserveScaleOnReconnect = false;
+    // Keys currently held down on the remote (by e.code), released in bulk when the window loses focus.
+    this._heldKeys = new Set();
+    // Latest unsent mousemove + the animation-frame handle that will flush it (see handleMouseMove).
+    this._pendingMove = null;
+    this._moveRaf = 0;
+    this._canvasRect = null;    // cached getBoundingClientRect for mouse moves; null = re-measure
 
     // Connection-quality tracking runs entirely in quality-worker.js (own thread + own WebSocket to
     // /ws/rdp-quality/{sessionId}) so a busy main thread can't skew the RTT reading. The gateway's pongs
@@ -102,6 +108,8 @@ function Client(websocketURL, canvasID) {
     this.handleWheel = this.handleWheel.bind(this);
     this.onUpdate = this.onUpdate.bind(this);
     this.deinitialize = this.deinitialize.bind(this);
+    this.handleBlur = this.handleBlur.bind(this);
+    this._invalidateCanvasRect = this._invalidateCanvasRect.bind(this);
 }
 
 Client.prototype.setStatusCallback = function (cb) { this.statusCb = cb; };
@@ -170,11 +178,16 @@ Client.prototype.chooseDesktopSize = function (wrapEl, hiDpi) {
     // later live resizes (requestResize/maybeResize, which call without it) reuse the session's choice.
     if (hiDpi === undefined) hiDpi = !!this._hiDpi;
     this._hiDpi = !!hiDpi;
-    const dpr = hiDpi ? this.panelPixelRatio(wrapEl) : 1;
+    // HiDPI is capped at 2x and at 4K: a 5K Retina panel at its native 2x would request a 5120x2880
+    // desktop — four times the decode/composite work of 1440p per frame — for a sharpness gain no
+    // current panel shows. The scale factor is derived from the ratio actually applied (scaleForSize),
+    // so a capped resolution still gets a consistent DesktopScaleFactor.
+    const dpr = hiDpi ? Math.min(2, this.panelPixelRatio(wrapEl)) : 1;
     const cssW = Math.max(1, Math.floor(wrapEl.clientWidth));
     const cssH = Math.max(1, Math.floor(wrapEl.clientHeight));
     let w = Math.round(cssW * dpr);
     let h = Math.round(cssH * dpr);
+    if (hiDpi) { w = Math.min(w, 3840); h = Math.min(h, 2160); }
     w = Math.max(200, Math.min(8192, w - (w % 4)));
     h = Math.max(200, Math.min(8192, h - (h % 2)));
     // Remember the logical size we sized from so the DPI scale can be derived as native/logical (rather
@@ -283,6 +296,7 @@ Client.prototype._fit = function (wrapEl) {
     const scale = Math.min(availW / this.canvas.width, availH / this.canvas.height);
     this.canvas.style.width = Math.round(this.canvas.width * scale) + "px";
     this.canvas.style.height = Math.round(this.canvas.height * scale) + "px";
+    this._canvasRect = null; // layout changed: re-measure on the next mouse move
 };
 
 // creds = {user, password, domain, performanceFlags}
@@ -541,6 +555,7 @@ Client.prototype._startProtocol = function () {
         onGfxPaint: function (canvas, sx, sy, sw, sh, dx, dy) { self._onGfxPaint(canvas, sx, sy, sw, sh, dx, dy); },
         onGfxReset: function (w, h) { self._onGfxReset(w, h); },
         onGfxDirectFrame: function (frame, surfaceId, map) { self._onGfxDirectFrame(frame, surfaceId, map); },
+        onGfxFatal: function (message) { self._onGfxFatal(message); },
     });
     this.proto.start();
     // Devtools helper: window.rdpDiagScan() scans every GFX surface for black regions on demand and logs
@@ -1126,6 +1141,9 @@ Client.prototype._onActive = function () {
 
     window.addEventListener("keydown", this.handleKeyDown);
     window.addEventListener("keyup", this.handleKeyUp);
+    window.addEventListener("blur", this.handleBlur);
+    window.addEventListener("resize", this._invalidateCanvasRect);
+    window.addEventListener("scroll", this._invalidateCanvasRect, true);
     this.canvas.addEventListener("mousemove", this.handleMouseMove);
     this.canvas.addEventListener("mousedown", this.handleMouseDown);
     this.canvas.addEventListener("mouseup", this.handleMouseUp);
@@ -1141,6 +1159,12 @@ Client.prototype.deinitialize = function () {
     this._stopQualityProbe();
     window.removeEventListener("keydown", this.handleKeyDown);
     window.removeEventListener("keyup", this.handleKeyUp);
+    window.removeEventListener("blur", this.handleBlur);
+    window.removeEventListener("resize", this._invalidateCanvasRect);
+    window.removeEventListener("scroll", this._invalidateCanvasRect, true);
+    this._heldKeys.clear();
+    if (this._moveRaf) { cancelAnimationFrame(this._moveRaf); this._moveRaf = 0; }
+    this._pendingMove = null;
     this.canvas.removeEventListener("mousemove", this.handleMouseMove);
     this.canvas.removeEventListener("mousedown", this.handleMouseDown);
     this.canvas.removeEventListener("mouseup", this.handleMouseUp);
@@ -1354,6 +1378,16 @@ Client.prototype._onGfxDirectFrame = function (frame, surfaceId, map) {
     }
 };
 
+// The GFX compositor hit an unrecoverable client-side codec problem (H.264 undecodable in this browser).
+// Treat it like a gateway "error": intentional close (no auto-reconnect loop against a failure that won't
+// heal by retrying the same codec), surface the reason, drop the socket. The user's next Connect picks the
+// Progressive capset because RdpGfx.avcSupported is now false.
+Client.prototype._onGfxFatal = function (message) {
+    this._intentionalClose = true;
+    this._status("error", message || "graphics decode failed");
+    try { if (this.socket) this.socket.close(); } catch (e) { /* ignore */ }
+};
+
 // RESET_GRAPHICS announced a new desktop size. If it differs from the current canvas backing store,
 // resize the canvas (and re-fit CSS) so the GFX surfaces map 1:1 to output pixels.
 Client.prototype._onGfxReset = function (w, h) {
@@ -1513,8 +1547,17 @@ function mouseButtonMap(button) {
 // Maps a DOM mouse event's CSS coordinates to canvas *backing-store* pixels (= RDP desktop pixels).
 // Uses getBoundingClientRect so it stays correct under HiDPI CSS scaling, fullscreen letterboxing,
 // and any container offset. Coordinates are clamped to the desktop bounds.
-Client.prototype._canvasCoords = function (e) {
-    const rect = this.canvas.getBoundingClientRect();
+Client.prototype._invalidateCanvasRect = function () { this._canvasRect = null; };
+
+Client.prototype._canvasCoords = function (e, useCache) {
+    // getBoundingClientRect forces layout; at pointer report rates that adds up, so mouse moves use a
+    // cached rect that _fit / resize / scroll invalidate. Clicks and wheel measure fresh (rare, and
+    // correctness on the first event after a layout change matters more there).
+    let rect = useCache ? this._canvasRect : null;
+    if (!rect || !rect.width || !rect.height) {
+        rect = this.canvas.getBoundingClientRect();
+        this._canvasRect = rect;
+    }
     const scaleX = this.canvas.width / rect.width;
     const scaleY = this.canvas.height / rect.height;
     let x = Math.round((e.clientX - rect.left) * scaleX);
@@ -1543,21 +1586,48 @@ Client.prototype.handleKeyDown = function (e) {
     const ev = new KeyboardEventKeyDown(e.code);
     if (ev.keyCode === undefined) { e.preventDefault(); return false; }
     this._sendEvent(ev.serialize());
+    this._heldKeys.add(e.code);
     e.preventDefault();
     return false;
 };
 Client.prototype.handleKeyUp = function (e) {
     if (!this.connected || _typingInOverlay()) return;
+    this._heldKeys.delete(e.code);
     const ev = new KeyboardEventKeyUp(e.code);
     if (ev.keyCode === undefined) { e.preventDefault(); return false; }
     this._sendEvent(ev.serialize());
     e.preventDefault();
     return false;
 };
+// The OS/browser took focus away (Alt+Tab, Cmd+Tab, a dialog, the URL bar): any key still held never
+// gets its keyup here, so the host would keep it pressed — a stuck Ctrl/Alt/Shift/Win until the user
+// taps it again. Release everything we know is down.
+Client.prototype.handleBlur = function () {
+    if (!this.connected || !this._heldKeys.size) return;
+    for (const code of this._heldKeys) {
+        const ev = new KeyboardEventKeyUp(code);
+        if (ev.keyCode !== undefined) this._sendEvent(ev.serialize());
+    }
+    this._heldKeys.clear();
+};
 Client.prototype.handleMouseMove = function (e) {
     if (!this.connected) return;
-    const p = this._canvasCoords(e);
-    this._sendEvent(new MouseMoveEvent(p.x, p.y).serialize());
+    // Coalesce: browsers deliver mousemove at the pointer's report rate (120+/s on ProMotion displays
+    // and gaming mice), and each one used to cost a layout query plus a WebSocket send. Keep only the
+    // latest position and flush it once per animation frame — the host cannot act on intermediate
+    // positions faster than it renders anyway.
+    this._pendingMove = e;
+    if (!this._moveRaf) {
+        const self = this;
+        this._moveRaf = requestAnimationFrame(function () {
+            self._moveRaf = 0;
+            const ev = self._pendingMove;
+            self._pendingMove = null;
+            if (!ev || !self.connected) return;
+            const p = self._canvasCoords(ev, true);
+            self._sendEvent(new MouseMoveEvent(p.x, p.y).serialize());
+        });
+    }
     e.preventDefault();
     return false;
 };

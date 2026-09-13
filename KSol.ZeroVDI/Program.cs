@@ -124,6 +124,14 @@ public class Program
         // Cached singleton; clamps the effective console ConnectionDefaults at every enforcement point.
         builder.Services.AddSingleton<RDP.DevicePolicyService>();
 
+        // RDP host TLS certificate pinning (trust on first use). Hosts are self-signed, so the fingerprint
+        // seen on a resource's first successful connection is pinned and later connections must match.
+        builder.Services.AddSingleton<RDP.HostCertificatePolicy>();
+
+        // The public address for links that leave the browser (password reset / e-mail change) — never
+        // derived from an untrusted Host header once App:PublicBaseUrl is set.
+        builder.Services.AddSingleton<RDP.PublicUrl>();
+
         // Renders the bundled documentation (markdown under wwwroot/docs), split into an admin set
         // (docs/admin → /admin/docs) and a user set (docs/user → /docs). The factory caches one
         // DocsService per section; each holds no per-request state, just its resolved docs root path.
@@ -194,6 +202,9 @@ public class Program
         builder.Services.AddSingleton<RDP.ProxmoxSyncService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<RDP.ProxmoxSyncService>());
         builder.Services.AddHostedService<RDP.IdleReaperService>();
+        // VDI broker reconcile loop: resumes/cleans up provisions interrupted by a restart, destroys the
+        // VMs behind Failed instances (verified by notes), and flags clones deleted outside ZeroVDI.
+        builder.Services.AddHostedService<RDP.VdiReconcileService>();
 
         // Resource lifecycle: periodic power-state polling (all sources), WOL, IPMI, SSH shutdown.
         builder.Services.AddSingleton<RDP.IpmiClient>();
@@ -372,6 +383,41 @@ public class Program
         app.UseStatusCodePagesWithReExecute("/error/{0}");
 
         app.UseHttpsRedirection();
+
+        // Security headers on every response. The console drives keyboard and mouse input into a
+        // remote desktop, so clickjacking is not theoretical: frame-ancestors 'none' / X-Frame-Options
+        // DENY. The CSP restricts scripts to this origin (inline scripts are still allowed — the Razor
+        // views carry many; a nonce migration is the follow-up), styles/fonts to this origin plus the
+        // two CDNs _ThemeHead uses, and everything else (objects, base, form targets) to self.
+        // WebSocket and worker sources are allowed for the console relay and decode workers.
+        const string Csp =
+            "default-src 'self'; " +
+            "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; " +
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; " +
+            "font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net; " +
+            "img-src 'self' data: blob:; " +
+            "media-src 'self' blob:; " +
+            "connect-src 'self' ws: wss:; " +
+            "worker-src 'self' blob:; " +
+            "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'";
+        app.Use(async (ctx, next) =>
+        {
+            var h = ctx.Response.Headers;
+            h["Content-Security-Policy"] = Csp;
+            h["X-Frame-Options"] = "DENY";
+            h["X-Content-Type-Options"] = "nosniff";
+            h["Referrer-Policy"] = "strict-origin-when-cross-origin";
+            // Camera/microphone are used by the console (redirected to the remote desktop); nothing else.
+            h["Permissions-Policy"] = "camera=(self), microphone=(self), geolocation=(), payment=(), usb=(), display-capture=()";
+            await next();
+        });
+
+        if (!app.Environment.IsDevelopment() && string.IsNullOrWhiteSpace(app.Configuration["App:PublicBaseUrl"]))
+        {
+            app.Logger.LogWarning(
+                "App:PublicBaseUrl is not set. Password-reset and e-mail-change links are built from the request's Host header; " +
+                "set App__PublicBaseUrl (e.g. https://vdi.example.com) and restrict AllowedHosts so a forged Host header cannot poison those links.");
+        }
 
         // Serve runtime-uploaded assets (custom branding logos) from the persisted /app/Data volume at
         // the /uploads URL prefix. This is deliberately a separate UseStaticFiles + PhysicalFileProvider

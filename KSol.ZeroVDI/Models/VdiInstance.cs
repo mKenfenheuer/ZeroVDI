@@ -55,4 +55,14 @@ public class VdiInstance
 
     public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
     public DateTime? LastLeasedUtc { get; set; }
+
+    // --- Operational state for the reconcile loop (VdiReconcileService / VdiProvisioningService.ReconcileAsync) ---
+    /// <summary>When <see cref="State"/> last changed; the reconciler uses it to spot stuck instances.</summary>
+    public DateTime UpdatedUtc { get; set; } = DateTime.UtcNow;
+    /// <summary>The Proxmox clone task (UPID), so a provision interrupted by a gateway restart can be resumed or cleaned up.</summary>
+    public string? CloneUpid { get; set; }
+    /// <summary>Whether the clone's VM notes carry the gateway binding id (needed for a verified destroy).</summary>
+    public bool NotesStamped { get; set; }
+    /// <summary>Last provisioning/lifecycle error, shown on the pool page.</summary>
+    public string? LastError { get; set; }
 }

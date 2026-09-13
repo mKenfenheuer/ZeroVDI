@@ -1,5 +1,6 @@
 using System.Net.Security;
 using System.Net.WebSockets;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 
@@ -30,6 +31,13 @@ public sealed class RdpRelaySession
     private readonly IHostTransport? _hostTransport;
     private readonly IRdpResolver _resolver;
     private readonly ILogger _logger;
+    // Protocol-level device-policy enforcement (null when no feature is Disabled). See ChannelPolicyGuard.
+    private readonly ChannelPolicyGuard? _policyGuard;
+    // Host certificate pinning hook (null = accept any certificate). See HostCertificatePolicy.
+    private readonly Func<X509Certificate2, CancellationToken, Task<string?>>? _hostCertCheck;
+    /// <summary>Set when the session was ended because the client requested or accepted a channel the
+    /// tenant device policy disables; the controller audits it and the browser gets the message.</summary>
+    public ChannelPolicyGuard.Violation? PolicyViolation { get; private set; }
     private bool _redirected;
     // True once a token-bearing session that the HOST disconnected (GNOME "Remote Login" post-auth
     // handover: DEACTIVATE_ALL + MCS Disconnect Ultimatum, NOT a redirect PDU) has been re-armed for a
@@ -65,9 +73,12 @@ public sealed class RdpRelaySession
         VmCredentials? presuppliedCreds = null, IRdpMediaSink? mediaSink = null,
         byte[]? routingToken = null, VmCredentials? redirectCreds = null,
         Action<RdpServerRedirection>? onRedirect = null, IHostTransport? hostTransport = null,
-        IRdpResolver? resolver = null)
+        IRdpResolver? resolver = null, ChannelPolicyGuard? policyGuard = null,
+        Func<X509Certificate2, CancellationToken, Task<string?>>? hostCertCheck = null)
     {
         _ws = ws;
+        _policyGuard = policyGuard;
+        _hostCertCheck = hostCertCheck;
         _hostTransport = hostTransport;
         _resolver = resolver ?? new NlaRdpResolver();
         _host = host;
@@ -131,7 +142,7 @@ public sealed class RdpRelaySession
                 new RdpResolveRequest(_host, _port, creds,
                     _hostTransport ?? new DirectTcpTransport(_logger), _kerberos,
                     RequestedProtocols: 0x00000002 | 0x00000001 /* HYBRID | SSL */,
-                    RoutingToken: _routingToken, Logger: _logger),
+                    RoutingToken: _routingToken, Logger: _logger, CertificateCheck: _hostCertCheck),
                 ct);
             if (_routingToken != null)
                 _logger.LogInformation("RDP relay: reconnected with redirection routing token ({Len}B)", _routingToken.Length);
@@ -195,7 +206,7 @@ public sealed class RdpRelaySession
         // to reconnect with the SAME routing token to land on the handed-over (logged-in) session — this
         // is what the Windows client does. So if THIS session used a routing token and the host ended it
         // (not our own redirect), re-arm the same token + creds and signal the browser to reconnect.
-        if (!_redirected && finished == toWs && _routingToken != null && _onRedirect != null)
+        if (!_redirected && PolicyViolation == null && finished == toWs && _routingToken != null && _onRedirect != null)
         {
             _handoverContinue = true;
             _onRedirect(RdpServerRedirection.FromToken(_routingToken, _redirectCreds?.user, _redirectCreds?.domain, _redirectCreds?.password));
@@ -212,7 +223,13 @@ public sealed class RdpRelaySession
         try { await Task.WhenAll(toWs, toRdp, hostRttSampler); } catch { /* shutdown races are expected */ }
         _recorder?.Dispose();
 
-        if (!_redirected && !_handoverContinue && finished == toWs)
+        if (PolicyViolation != null)
+        {
+            // Ended by the device-policy guard: tell the user exactly why (the browser treats "error" as a
+            // hard failure and does not auto-reconnect, which is right — retrying would trip it again).
+            await SendStatusAsync("error", PolicyViolation.Message, CancellationToken.None);
+        }
+        else if (!_redirected && !_handoverContinue && finished == toWs)
         {
             _logger.LogWarning("RDP relay: target {Host}:{Port} ended the connection", _host, _port);
             await SendStatusAsync("error", "remote desktop disconnected", CancellationToken.None);
@@ -302,6 +319,12 @@ public sealed class RdpRelaySession
                     var slice = buffer.AsMemory(0, n).ToArray();
                     if (dump != null) { await dump.WriteAsync(slice, ct); await dump.FlushAsync(ct); }
                     _recorder?.Feed(RdpDir.ServerToClient, slice);
+                    if (_policyGuard != null)
+                    {
+                        // Host→client is learning only (SC_NET ids, DVC names); a violation is still honoured.
+                        var violation = _policyGuard.Feed(RdpDir.ServerToClient, slice);
+                        if (violation != null) { OnPolicyViolation(violation); break; }
+                    }
 
                     // Server Redirection: a session broker (GNOME Remote Desktop "Remote Login") sends a
                     // redirection PDU then cancels. Detect it (across read boundaries via scanBuf), stash
@@ -379,12 +402,26 @@ public sealed class RdpRelaySession
                 // may be partial; RDP framing is the browser's concern, so just forward bytes.)
                 if (dump != null) { await dump.WriteAsync(buffer.AsMemory(0, result.Count), ct); await dump.FlushAsync(ct); }
                 _recorder?.Feed(RdpDir.ClientToServer, buffer.AsSpan(0, result.Count));
+                if (_policyGuard != null)
+                {
+                    // Device policy: refuse (and do NOT forward) a Connect Initial that requests a blocked
+                    // static channel, or a DVC create response that accepts a blocked dynamic channel.
+                    var violation = _policyGuard.Feed(RdpDir.ClientToServer, buffer.AsSpan(0, result.Count));
+                    if (violation != null) { OnPolicyViolation(violation); break; }
+                }
                 await ssl.WriteAsync(buffer.AsMemory(0, result.Count), ct);
                 await ssl.FlushAsync(ct);
             }
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { _logger.LogDebug(ex, "RDP relay: ws→host pump ended"); }
+    }
+
+    private void OnPolicyViolation(ChannelPolicyGuard.Violation violation)
+    {
+        PolicyViolation ??= violation;
+        _logger.LogWarning("RDP relay: session to {Host}:{Port} refused by device policy ({Feature} via '{Channel}')",
+            _host, _port, violation.Feature, violation.Channel);
     }
 
     // Periodically re-measures the gateway→host RTT leg over the session's own transport path (direct

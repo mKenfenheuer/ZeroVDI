@@ -43,13 +43,22 @@ function rdpGfxMode() {
     }
     if (v == null) return "off";
     v = v.toLowerCase();
+    let mode;
     if (v === "0" || v === "false" || v === "off" || v === "") return "off";
-    if (v === "1" || v === "true" || v === "auto") return "avc420";
-    if (v === "clearcodec" || v === "clear") return "clearcodec";
-    if (v === "progressive" || v === "rfx" || v === "remotefx") return "progressive";
-    if (v === "avc420" || v === "h264" || v === "avc") return "avc420";
-    if (v === "avc444") return "avc444";
-    return "avc420"; // unknown but truthy → try AVC
+    else if (v === "1" || v === "true" || v === "auto") mode = "avc420";
+    else if (v === "clearcodec" || v === "clear") mode = "clearcodec";
+    else if (v === "progressive" || v === "rfx" || v === "remotefx") mode = "progressive";
+    else if (v === "avc420" || v === "h264" || v === "avc") mode = "avc420";
+    else if (v === "avc444") mode = "avc444";
+    else mode = "avc420"; // unknown but truthy → try AVC
+    // An AVC mode is only advertised when this browser can actually decode H.264 (RdpGfx.probeAvc runs
+    // at script load, long before the Graphics DVC opens). Without a decoder the host would negotiate
+    // AVC and every frame would be dropped — a frozen/black desktop — so fall back to RemoteFX
+    // Progressive, which the worker decodes in pure JS on every engine.
+    if ((mode === "avc420" || mode === "avc444") && typeof RdpGfx !== "undefined" && RdpGfx.avcSupported === false) {
+        return "progressive";
+    }
+    return mode;
 }
 
 // Whether the GFX path is enabled at all (any mode other than "off"). The CS_CORE GFX flag + extra GCC
@@ -2415,6 +2424,12 @@ RdpProtocol.prototype._initGfxDvc = function (channelId, cbId) {
             // Forward a complete RDPGFX PDU back to the host on the graphics DVC. The client sends
             // uncompressed (no ZGFX), so the payload is the bare PDU — the DVC fragmenter wraps it.
             send: function (payload) { self._sendDvcData(channelId, cbId, payload); },
+            // The H.264 decoder lost its reference state (rebuilt after an error): ask the host to repaint
+            // the whole desktop, which forces a fresh keyframe.
+            requestRefresh: function () { self.sendRefreshRect(); },
+            // Unrecoverable client-side codec problem (e.g. H.264 undecodable in this browser): the page
+            // ends the session with a clear reason and reconnects with a Progressive-only capset.
+            onFatal: function (message) { if (self.cb.onGfxFatal) self.cb.onGfxFatal(message); },
             onReset: function (w, h) { if (self.cb.onGfxReset) self.cb.onGfxReset(w, h); },
             onPaint: function (canvas, sx, sy, sw, sh, dx, dy) {
                 if (self.cb.onGfxPaint) self.cb.onGfxPaint(canvas, sx, sy, sw, sh, dx, dy);

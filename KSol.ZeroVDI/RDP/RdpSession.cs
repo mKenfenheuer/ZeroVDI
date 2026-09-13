@@ -36,16 +36,26 @@ public sealed class RdpSession
     // drdynvc dynamic channels.
     private readonly Dictionary<int, string> _dvcById = new();
     private int _dvcVersion = 1;
-    // Per-DVC reassembly for DATA_FIRST + DATA* (key: dvc channel id).
-    private readonly Dictionary<int, DvcReasm> _dvcReasm = new();
-    // Per-DVC ZGFX context for v3 compressed data, and a dedicated one for the GFX channel.
-    private readonly Dictionary<int, Zgfx> _dvcZgfx = new();
-    private readonly Dictionary<int, Zgfx> _gfxZgfx = new();
+    // EVERY piece of per-channel stream state below is keyed by DIRECTION as well as channel. Both
+    // directions feed one session in wire order, and the browser answers each GFX END_FRAME with
+    // FRAME_ACK/QOE DATA PDUs on the SAME Graphics channel id: keyed by id alone, a client ack landing
+    // while a multi-chunk server frame was pending was appended into the server's accumulator (garbage
+    // inside, early completion, remaining chunks orphaned), and the client's raw ZGFX segments were fed
+    // through the server-direction ZGFX history — corrupting every later cross-PDU match from Windows
+    // hosts. Recordings of Windows RDS sessions were unreliable because of it.
+    // Per-DVC reassembly for DATA_FIRST + DATA* (key: direction + dvc channel id).
+    private readonly Dictionary<(RdpDir Dir, int Id), DvcReasm> _dvcReasm = new();
+    // Per-DVC ZGFX context for v3 compressed data, and a dedicated one for the GFX channel (per direction).
+    private readonly Dictionary<(RdpDir Dir, int Id), Zgfx> _dvcZgfx = new();
+    private readonly Dictionary<(RdpDir Dir, int Id), Zgfx> _gfxZgfx = new();
     // Per-static-channel MPPC context: with INFO_COMPRESSION the host bulk-compresses static-channel
-    // chunks (CHANNEL_PACKET_COMPRESSED). Keyed by "name|dir" since each direction has its own history.
+    // chunks (CHANNEL_PACKET_COMPRESSED). Keyed "name|dir|level" since each direction has its own history.
     private readonly Dictionary<string, Mppc> _svcMppc = new();
-    // Per-static-channel reassembly for CHANNEL_PDU_HEADER FIRST..LAST (key: channel name).
+    // Per-static-channel reassembly for CHANNEL_PDU_HEADER FIRST..LAST (key: "name|dir").
     private readonly Dictionary<string, SvcReasm> _svcReasm = new();
+    // Bound on unframed bytes per direction: after a framing error the stream cannot be re-synchronised,
+    // so the buffer is dropped (forwarded raw) instead of growing for the rest of the session.
+    private const int MaxUnframedBytes = 4 * 1024 * 1024;
 
     private sealed class DvcReasm { public List<byte> Parts = new(); public long Total; }
     private sealed class SvcReasm { public List<byte> Parts = new(); public long Total; }
@@ -108,7 +118,21 @@ public sealed class RdpSession
         while (true)
         {
             int unitLen = NextUnitLength(rx);
-            if (unitLen <= 0) break;                 // need more bytes (0) — keep buffering
+            if (unitLen == 0 && rx.Count > MaxUnframedBytes) unitLen = -1; // no complete unit within the bound
+            if (unitLen < 0)
+            {
+                // Invalid framing: the stream cannot be re-synchronised from here. Forward what we hold
+                // untouched and drop it, rather than keeping every later byte in _rx for the whole session
+                // (the decoder would otherwise silently retain the entire remaining stream in memory).
+                var raw = new Node("raw.desync");
+                raw.Field("error", "invalid framing; decoder resynchronised by dropping " + rx.Count + " bytes");
+                raw.Raw(rx.ToArray());
+                _sink.Emit(dir, _sw.ElapsedMilliseconds, raw, new RoundTrip(true, rx.Count, rx.Count, -1));
+                outBytes.AddRange(rx);
+                rx.Clear();
+                break;
+            }
+            if (unitLen == 0) break;                 // need more bytes — keep buffering
             var unit = new byte[unitLen];
             rx.CopyTo(0, unit, 0, unitLen);
             rx.RemoveRange(0, unitLen);
@@ -210,8 +234,8 @@ public sealed class RdpSession
     internal int DrdynvcId { get => _drdynvcId; set => _drdynvcId = value; }
     internal Dictionary<int, string> DvcById => _dvcById;
     internal int DvcVersion { get => _dvcVersion; set => _dvcVersion = value; }
-    internal Dictionary<int, Zgfx> DvcZgfx => _dvcZgfx;
-    internal Dictionary<int, Zgfx> GfxZgfx => _gfxZgfx;
+    internal Dictionary<(RdpDir Dir, int Id), Zgfx> DvcZgfx => _dvcZgfx;
+    internal Dictionary<(RdpDir Dir, int Id), Zgfx> GfxZgfx => _gfxZgfx;
 
     internal void RebuildChannelMap()
     {
@@ -242,7 +266,7 @@ public sealed class RdpSession
     // ---- static-channel CHANNEL_PDU_HEADER reassembly (returns complete payload or null) ----
     // Per-chunk MPPC-decompresses when CHANNEL_PACKET_COMPRESSED is set (the compression history spans
     // chunks, so we inflate each chunk before reassembling the FIRST..LAST message).
-    internal byte[]? ReassembleSvc(string name, ref Cur r, out uint chFlags)
+    internal byte[]? ReassembleSvc(RdpDir dir, string name, ref Cur r, out uint chFlags)
     {
         uint totalLen = r.U32le();
         chFlags = r.U32le();
@@ -252,7 +276,7 @@ public sealed class RdpSession
         {
             int type = (int)((chFlags & CHANNEL_COMPRESSION_TYPE_MASK) >> 16); // 0=8K, 1=64K
             int level = type == 1 ? 1 : 0;                                     // RDP6/RDP61 fall back to 8K window
-            string key = name + "|" + (level == 1 ? "64k" : "8k");
+            string key = name + "|" + dir + "|" + (level == 1 ? "64k" : "8k");
             if (!_svcMppc.TryGetValue(key, out var mppc)) _svcMppc[key] = mppc = new Mppc(level);
             int mflags = Mppc.PACKET_COMPRESSED
                 | ((chFlags & CHANNEL_PACKET_AT_FRONT) != 0 ? Mppc.PACKET_AT_FRONT : 0)
@@ -263,29 +287,31 @@ public sealed class RdpSession
 
         bool first = (chFlags & CHANNEL_FLAG_FIRST) != 0;
         bool last = (chFlags & CHANNEL_FLAG_LAST) != 0;
+        var reasmKey = name + "|" + dir;
         if (first && last) return chunk;
-        if (first) { _svcReasm[name] = new SvcReasm { Parts = new List<byte>(chunk), Total = totalLen }; return null; }
-        if (!_svcReasm.TryGetValue(name, out var acc)) return null;
+        if (first) { _svcReasm[reasmKey] = new SvcReasm { Parts = new List<byte>(chunk), Total = totalLen }; return null; }
+        if (!_svcReasm.TryGetValue(reasmKey, out var acc)) return null;
         acc.Parts.AddRange(chunk);
         if (!last) return null;
-        _svcReasm.Remove(name);
+        _svcReasm.Remove(reasmKey);
         return acc.Parts.ToArray();
     }
 
     // ---- DVC DATA_FIRST/DATA reassembly (returns complete payload or null) ----
-    internal byte[]? ReassembleDvc(int channelId, bool isFirst, long total, byte[] chunk)
+    internal byte[]? ReassembleDvc(RdpDir dir, int channelId, bool isFirst, long total, byte[] chunk)
     {
+        var key = (dir, channelId);
         if (isFirst)
         {
             if (chunk.Length >= total) return chunk;
-            _dvcReasm[channelId] = new DvcReasm { Parts = new List<byte>(chunk), Total = total };
+            _dvcReasm[key] = new DvcReasm { Parts = new List<byte>(chunk), Total = total };
             return null;
         }
-        if (_dvcReasm.TryGetValue(channelId, out var acc))
+        if (_dvcReasm.TryGetValue(key, out var acc))
         {
             acc.Parts.AddRange(chunk);
             if (acc.Parts.Count < acc.Total) return null;
-            _dvcReasm.Remove(channelId);
+            _dvcReasm.Remove(key);
             return acc.Parts.ToArray();
         }
         return chunk; // unfragmented DATA with no prior FIRST

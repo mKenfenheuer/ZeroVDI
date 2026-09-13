@@ -4,6 +4,13 @@ A consolidated list of the main configuration keys. All are read from the standa
 configuration providers (`appsettings.json`, environment variables, user-secrets). Environment-variable
 form uses `__` for nesting, e.g. `Mfa__RequireForAll=true`.
 
+## App
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `App:PublicBaseUrl` | URL | — (request host) | The address users reach ZeroVDI at, e.g. `https://vdi.example.com`. Used for password-reset and e-mail-change links and the connector enrolment command. **Set it in production** — without it those links are built from the request's `Host` header, which an attacker can forge unless `AllowedHosts` is restricted. |
+| `AllowedHosts` | string | `*` | Standard ASP.NET Core host filtering. Restrict to your public host name(s), e.g. `vdi.example.com`. |
+
 ## DataProtection
 
 | Key | Type | Default | Description |
@@ -27,10 +34,36 @@ form uses `__` for nesting, e.g. `Mfa__RequireForAll=true`.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `RateLimiting:Auth:PermitLimit` | int | `10` | Requests per window on Identity/login pages, per IP. |
-| `RateLimiting:Auth:WindowSeconds` | int | `60` | Window length for the auth policy. |
-| `RateLimiting:Ws:PermitLimit` | int | `30` | Requests per window on the WS relay handshake, per IP. |
-| `RateLimiting:Ws:WindowSeconds` | int | `60` | Window length for the ws policy. |
+| `RateLimiting:AuthPermitLimit` | int | `10` (shipped `appsettings.json`: `30`) | Requests per window on Identity/login pages, per client IP. |
+| `RateLimiting:AuthWindowSeconds` | int | `60` | Window length for the auth policy. |
+| `RateLimiting:WsPermitLimit` | int | `30` (shipped `appsettings.json`: `45`) | Requests per window on the WS relay handshake, per client IP. |
+| `RateLimiting:WsWindowSeconds` | int | `60` | Window length for the ws policy. |
+
+The limits are keyed on the client IP. Behind a reverse proxy you **must** list the proxy in
+`ForwardedHeaders:KnownProxies` / `KnownNetworks` (or set `ForwardedHeaders:TrustAllProxies=true`
+when the app is reachable only through the proxy) — otherwise every client shares the proxy's single
+bucket and a handful of users can lock the login page for everyone.
+
+## ForwardedHeaders
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `ForwardedHeaders:KnownProxies` | string[] | loopback only | Reverse-proxy IPs whose `X-Forwarded-*` headers are honoured. |
+| `ForwardedHeaders:KnownNetworks` | string[] (`cidr/prefix`) | — | Reverse-proxy networks whose `X-Forwarded-*` headers are honoured. |
+| `ForwardedHeaders:TrustAllProxies` | bool | `false` | Honour forwarded headers from any hop. Only when the app is reachable solely through the proxy. |
+
+## Bootstrap
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `Bootstrap:AdminEmail` | string | `admin@example.com` | Username/e-mail of the initial administrator. |
+| `Bootstrap:AdminPassword` | string | random, logged once | Password of the initial administrator on first start. |
+
+## HostCertificates
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `HostCertificates:Mode` | `Tofu` / `Audit` / `Off` | `Tofu` | RDP host TLS certificate pinning: enforce (refuse a changed certificate), log only, or disabled. See [Security](../features/security). |
 
 ## Recording
 

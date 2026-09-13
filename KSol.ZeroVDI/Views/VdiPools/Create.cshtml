@@ -44,7 +44,10 @@
     <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div>
             <label class="form-label" asp-for="Kind">Kind</label>
-            <select class="form-input" asp-for="Kind" asp-items="Html.GetEnumSelectList<KSol.ZeroVDI.Models.VdiPoolKind>()"></select>
+            <select class="form-input" asp-for="Kind">
+                <option value="0">Dedicated — one persistent desktop per user</option>
+                <option value="1" disabled>Floating — shared desktops (not yet available)</option>
+            </select>
         </div>
         <div>
             <label class="form-label" asp-for="CloneMode">Clone mode</label>

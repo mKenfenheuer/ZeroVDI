@@ -1036,6 +1036,7 @@
             var pfId = window.RDP_RESOURCE_ID;
             var pfLabels = {
                 checking: "Checking resource…",
+                provisioning: "Creating your desktop… (first connect, this can take a few minutes)",
                 starting: "Starting resource…",
                 guestagent: "Waiting for guest agent…",
                 waitingip: "Waiting for IP address…",
@@ -1043,7 +1044,9 @@
                 finalizing: "Finalizing connection…",
                 ready: "Ready"
             };
-            var pfOrder = ["checking", "starting", "guestagent", "waitingip", "rdpprobe", "finalizing", "ready"];
+            // Mirrors ReadinessPhase in RDP/ConnectionReadiness.cs (lower-cased). "provisioning" only occurs on
+            // the first connect to a VDI pool (the clone); without it here the bar sat on step 1 for minutes.
+            var pfOrder = ["checking", "provisioning", "starting", "guestagent", "waitingip", "rdpprobe", "finalizing", "ready"];
             var pfStepCount = pfOrder.length - 1; // 'ready' is completion, not a step
 
             function pfRender(phase) {

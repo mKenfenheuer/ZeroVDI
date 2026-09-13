@@ -43,7 +43,7 @@ internal static class RdpChannels
     public static void DecodeStaticChannel(RdpSession s, RdpDir dir, Node parent, string name, ReadOnlySpan<byte> chanData)
     {
         var c = new Cur(chanData);
-        var payload = s.ReassembleSvc(name, ref c, out uint chFlags);
+        var payload = s.ReassembleSvc(dir, name, ref c, out uint chFlags);
         var hdr = new Node("CHANNEL_PDU_HEADER");
         hdr.Field("channel", name).Field("flags", "0x" + chFlags.ToString("X8"));
         hdr.Raw(chanData); // whole channel chunk echoed (incl. header) — round-trips
@@ -222,7 +222,7 @@ internal static class RdpChannels
         // "drdynvc" so each direction shares the session's per-channel MPPC/reassembly state.
         var rc = new Cur(chanData);
         if (rc.Remaining < 8) { Raw(parent, "drdynvc.short", chanData); return; }
-        var dvcMsg = s.ReassembleSvc("drdynvc", ref rc, out uint svcFlags);
+        var dvcMsg = s.ReassembleSvc(dir, "drdynvc", ref rc, out uint svcFlags);
         if (dvcMsg == null)
         {
             var pend = new Node("drdynvc.pending");
@@ -304,14 +304,14 @@ internal static class RdpChannels
                 // v3 compressed: ZGFX-inflate through a per-channel context before reassembly.
                 if (compressed)
                 {
-                    var z = s.DvcZgfx.TryGetValue(channelId, out var zz) ? zz : (s.DvcZgfx[channelId] = new Zgfx());
+                    var z = s.DvcZgfx.TryGetValue((dir, channelId), out var zz) ? zz : (s.DvcZgfx[(dir, channelId)] = new Zgfx());
                     var inflated = z.Decompress(chunk);
                     if (inflated == null) { n.Field("zgfx", "inflate-failed").Field("chunkLen", chunk.Length); break; }
                     n.Field("zgfx", $"{chunk.Length}B->{inflated.Length}B");
                     chunk = inflated;
                 }
 
-                var complete = s.ReassembleDvc(channelId, isFirst, isFirst ? total : 0, chunk);
+                var complete = s.ReassembleDvc(dir, channelId, isFirst, isFirst ? total : 0, chunk);
                 if (complete == null) { n.Field("reassembly", "pending"); break; }
 
                 DispatchDvcPayload(s, dir, n, channelId, dvcName, complete);
@@ -332,7 +332,7 @@ internal static class RdpChannels
     {
         if (name == "Microsoft::Windows::RDS::Graphics")
         {
-            DecodeGfx(s, parent, channelId, data);
+            DecodeGfx(s, dir, parent, channelId, data);
             return;
         }
         if (name == "Microsoft::Windows::RDS::DisplayControl") { DecodeDisplayControl(parent, data); return; }
@@ -486,7 +486,7 @@ internal static class RdpChannels
     // ==============================================================================================
     // RDPEGFX command stream (already ZGFX-inflated by the caller)
     // ==============================================================================================
-    private static void DecodeGfx(RdpSession s, Node parent, int channelId, byte[] payload)
+    private static void DecodeGfx(RdpSession s, RdpDir dir, Node parent, int channelId, byte[] payload)
     {
         var gfx = new Node("rdpgfx");
         gfx.Field("len", payload.Length);
@@ -502,7 +502,9 @@ internal static class RdpChannels
         byte[] inflated = payload;
         if (payload.Length >= 1 && (payload[0] == 0xe0 || payload[0] == 0xe1))
         {
-            var z = s.GfxZgfx.TryGetValue(channelId, out var zz) ? zz : (s.GfxZgfx[channelId] = new Zgfx());
+            // Per-direction context: the browser's uncompressed acks (0xE0 raw segments) must never touch the
+            // host's ZGFX history, or every later cross-PDU match in the host stream decodes garbage.
+            var z = s.GfxZgfx.TryGetValue((dir, channelId), out var zz) ? zz : (s.GfxZgfx[(dir, channelId)] = new Zgfx());
             var r = z.Decompress(payload);
             if (r == null) { gfx.Field("error", $"zgfx inflate failed ({payload.Length}B)"); return; }
             gfx.Field("zgfx", $"{payload.Length}B->{r.Length}B");

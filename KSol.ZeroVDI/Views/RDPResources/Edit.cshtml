@@ -239,6 +239,29 @@
                 </dl>
             }
         </div>
+
+        <!-- Host TLS certificate (trust on first use) -->
+        <div class="card-surface p-6 mt-4">
+            <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Host certificate</h2>
+            @if (!string.IsNullOrEmpty(r.HostCertFingerprint))
+            {
+                <p class="text-sm text-muted-foreground mb-3">Pinned on the first successful connection. A connection that presents a different certificate is refused (and audited) until an administrator forgets this pin.</p>
+                <dl class="grid grid-cols-1 gap-y-2 text-sm">
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground shrink-0">Subject</dt><dd class="truncate">@(r.HostCertSubject ?? "—")</dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground shrink-0">SHA-256</dt><dd class="font-mono text-xs break-all">@r.HostCertFingerprint</dd></div>
+                    <div class="flex justify-between gap-4"><dt class="text-muted-foreground shrink-0">Pinned (UTC)</dt><dd>@(r.HostCertPinnedUtc?.ToString("u") ?? "—")</dd></div>
+                </dl>
+                <form asp-action="ForgetCertificate" asp-route-id="@r.Id" method="post" class="mt-4"
+                      data-confirm="Forget the pinned certificate? Only do this after a legitimate change on the host (reinstall, renewed certificate). The next successful connection pins whatever certificate the host presents.">
+                    @Html.AntiForgeryToken()
+                    <button type="submit" class="btn-outline btn-sm text-warning border-warning/40 hover:bg-warning/10"><i class="ri-shield-cross-line"></i> Forget pinned certificate</button>
+                </form>
+            }
+            else
+            {
+                <p class="text-sm text-muted-foreground">No certificate pinned yet. The host's TLS certificate is recorded on the first successful connection, and every later connection must present the same one.</p>
+            }
+        </div>
     </section>
 
     <!-- Users & access -->

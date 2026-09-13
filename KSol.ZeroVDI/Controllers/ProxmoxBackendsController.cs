@@ -55,7 +55,7 @@ public class ProxmoxBackendsController : Controller
     [HttpPost("create")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Create(
-        [Bind("Name,Host,ApiTokenId,ApiTokenSecret,VerifyTls,ConnectorId,DefaultRdpPort,IdleReapEnabled,IdleTimeoutHours,PauseAction,StartTimeoutSeconds")] ProxmoxBackend backend)
+        [Bind("Name,Host,ApiTokenId,ApiTokenSecret,VerifyTls,ConnectorId,DefaultRdpPort,IdleReapEnabled,IdleTimeoutHours,PauseAction,StartTimeoutSeconds,KerberosRealm,KdcHost")] ProxmoxBackend backend)
     {
         if (!ModelState.IsValid) { await PopulateConnectorsAsync(); return View(backend); }
         _context.Add(backend);
@@ -77,7 +77,7 @@ public class ProxmoxBackendsController : Controller
     [HttpPost("edit/{id:int}")]
     [ValidateAntiForgeryToken]
     public async Task<IActionResult> Edit(int id,
-        [Bind("Id,Name,Host,ApiTokenId,ApiTokenSecret,VerifyTls,ConnectorId,DefaultRdpPort,IdleReapEnabled,IdleTimeoutHours,PauseAction,StartTimeoutSeconds")] ProxmoxBackend input)
+        [Bind("Id,Name,Host,ApiTokenId,ApiTokenSecret,VerifyTls,ConnectorId,DefaultRdpPort,IdleReapEnabled,IdleTimeoutHours,PauseAction,StartTimeoutSeconds,KerberosRealm,KdcHost")] ProxmoxBackend input)
     {
         if (id != input.Id) return NotFound();
 
@@ -100,6 +100,8 @@ public class ProxmoxBackendsController : Controller
         backend.IdleTimeoutHours = input.IdleTimeoutHours;
         backend.PauseAction = input.PauseAction;
         backend.StartTimeoutSeconds = input.StartTimeoutSeconds;
+        backend.KerberosRealm = string.IsNullOrWhiteSpace(input.KerberosRealm) ? null : input.KerberosRealm.Trim();
+        backend.KdcHost = string.IsNullOrWhiteSpace(input.KdcHost) ? null : input.KdcHost.Trim();
 
         await _context.SaveChangesAsync();
         TempData["Status"] = $"Backend \"{backend.Name}\" saved.";
@@ -123,8 +125,17 @@ public class ProxmoxBackendsController : Controller
         var backend = await _context.ProxmoxBackends.FindAsync(id);
         if (backend != null)
         {
+            // VDI pools reference the backend with a Restrict FK; deleting under them used to surface as a
+            // raw 500. Explain instead.
+            var poolCount = await _context.VdiPools.CountAsync(p => p.ProxmoxBackendId == id);
+            if (poolCount > 0)
+            {
+                TempData["Error"] = $"\"{backend.Name}\" still backs {poolCount} VDI pool(s). Delete those pools first.";
+                return RedirectToAction(nameof(Index));
+            }
             _context.ProxmoxBackends.Remove(backend);
             await _context.SaveChangesAsync();
+            TempData["Status"] = $"Backend \"{backend.Name}\" deleted.";
         }
         return RedirectToAction(nameof(Index));
     }

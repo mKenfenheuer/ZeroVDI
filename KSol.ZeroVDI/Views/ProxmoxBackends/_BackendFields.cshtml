@@ -28,6 +28,7 @@
             <input asp-for="VerifyTls" class="form-check" />
             <span>@Html.DisplayNameFor(m => m.VerifyTls)</span>
         </label>
+        <p class="md:col-span-2 text-xs text-muted-foreground -mt-2">Keep this on: the API token that manages every VM travels over this connection. Turn it off only for a self-signed lab cluster.</p>
         @if (ViewBag.Connectors is List<KSol.ZeroVDI.Models.Connector> connectors && connectors.Count > 0)
         {
             <div class="md:col-span-2">
@@ -43,6 +44,21 @@
             </div>
         }
     </div>
+</div>
+
+<div>
+    <h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">Desktop sign-in (NLA) — optional Kerberos</h2>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+            <label asp-for="KerberosRealm" class="form-label"></label>
+            <input asp-for="KerberosRealm" class="form-input" placeholder="CORP.EXAMPLE.COM" />
+        </div>
+        <div>
+            <label asp-for="KdcHost" class="form-label"></label>
+            <input asp-for="KdcHost" class="form-input" placeholder="dc1.corp.example.com[:88]" />
+        </div>
+    </div>
+    <p class="text-xs text-muted-foreground mt-1">For the VMs on this backend. Leave empty for workgroup VMs (NTLMv2 is used). Kerberos for NLA is prepared but not yet active in the console; these values are stored for when it is.</p>
 </div>
 
 <div>

@@ -135,7 +135,22 @@ function RdpGfx(cb) {
     this.progressive = (typeof RfxProgressive !== "undefined") ? RfxProgressive : null;
     this.progCtx = {};           // surfaceId -> RfxProgressive.Context (main-thread fallback only)
     this.framesDecoded = 0;
-    this._dirty = [];            // output rects touched in the current frame, flushed at END_FRAME
+    // Output compositing is COALESCED: surface writes only mark a per-surface dirty rect (surf.dirty),
+    // and ONE blit per surface goes to the output canvas at END_FRAME or the next animation frame (see
+    // _markDirty / _flushDirty). Blitting every tile straight from the surface into the visible canvas
+    // was the single biggest cost on WebKit: each drawImage from a surface materialises a native image
+    // of the WHOLE surface, and the next putImageData into it copies the whole backing store again —
+    // hundreds of full-surface copies per progressive PDU.
+    this._flushScheduled = false;
+    this._flushRaf = 0;
+    this._flushTimer = 0;
+    // Frame acknowledgement is deferred until the frame's content has actually landed (see _onEndFrame /
+    // _tryAckFrames) so the host's unacknowledged-frame window throttles it to what we can render.
+    this._pendingAcks = [];      // [{frameId, barrier, h264Barrier, startMs, endMs}] in frame order
+    this._ackTimer = null;
+    this._h264Submitted = 0;     // H.264 chunks the decoder accepted (each yields exactly one output frame)
+    this._h264Painted = 0;       // H.264 output frames painted (decoder output is in submission order)
+    this._inflightBytes = 0;     // codec bytes submitted to async decode and not yet landed (→ queueDepth)
     this.outputWidth = 0;
     this.outputHeight = 0;
 
@@ -193,10 +208,24 @@ RdpGfx.prototype._onWorkerMessage = function (msg) {
     // so a following SURFACE_TO_SURFACE that we release once the PDU is consumed still composites the
     // right pixels because the decoder can't reorder a later frame ahead of this surface's earlier one.
     if (msg.cmd === "h264-frame") { this._paintH264Frame(msg); return; }
-    if (msg.cmd === "h264-need-keyframe") { if (this.requestKeyframe) this.requestKeyframe(msg.surfaceId); return; }
+    if (msg.cmd === "h264-need-keyframe") {
+        // The decoder was rebuilt; any output frames it still owed us are gone. Stop waiting for them so
+        // frame acks are not held back by outputs that will never arrive, then ask for a fresh keyframe.
+        this._h264Painted = this._h264Submitted;
+        this._tryAckFrames();
+        this.requestKeyframe(msg.surfaceId);
+        return;
+    }
+    if (msg.cmd === "h264-unsupported") { this._onAvcUnsupported(msg.reason); return; }
     const pending = this._workerPending[msg.reqId];
     if (!pending) return; // reset() cleared it — stale pre-reset reply; the seq counters were reset too
     delete this._workerPending[msg.reqId];
+    if (pending.bytes) this._inflightBytes = Math.max(0, this._inflightBytes - pending.bytes);
+    // _h264Submitted was counted at submit time (synchronously, so an END_FRAME parsed right after the
+    // PDU captures it in its barrier). If the worker consumed the chunk WITHOUT queuing a decode (waiting
+    // for a keyframe, unsupported), no output frame will ever come for it — account for it as "painted"
+    // so the frame ack is not held until the safety timer.
+    if (msg.cmd === "h264-submitted" && !msg.willOutput) this._h264Painted++;
     const surf = this.surfaces[pending.surfaceId];
     // CRITICAL: every submitted decode MUST advance the barrier exactly once, or the ordered queue wedges
     // FOREVER (settledSeq stalls below decodeSeq, every later order-sensitive op queues and never drains,
@@ -216,17 +245,19 @@ RdpGfx.prototype._onWorkerMessage = function (msg) {
     } finally {
         // "h264-submitted" only advances the barrier (its frame paints later, off-barrier).
         this._decodeSettled();
+        this._tryAckFrames();
     }
 };
 
-// Paint a VideoFrame transferred from the decode worker. Runs the exact old onDecodedFrame paint path
-// (a single drawImage of the whole decoded frame), which is all that remains on the main thread for
-// H.264 now — the decode itself happened in the worker.
+// Paint a VideoFrame transferred from the decode worker (the decode itself happened there); all that
+// remains on the main thread is a GPU-side copy of the changed regions into the surface.
 RdpGfx.prototype._paintH264Frame = function (msg) {
+    this._h264Painted++;
     const surf = this.surfaces[msg.surfaceId];
     const frame = msg.frame;
-    if (!surf) { if (frame && frame.close) frame.close(); return; }
-    this.onDecodedFrame(msg.surfaceId, frame, msg.regions);
+    if (!surf) { if (frame && frame.close) frame.close(); }
+    else this.onDecodedFrame(msg.surfaceId, frame, msg.regions);
+    this._tryAckFrames();
 };
 
 RdpGfx.prototype._log = function (m) { if (this.cb.onLog) this.cb.onLog(m); };
@@ -373,8 +404,12 @@ RdpGfx.prototype.reset = function () {
     for (const id in this.decoders) this.decoders[id].close();
     this.surfaces = {}; this.outputMap = {}; this.decoders = {}; this.cache = {};
     this.progCtx = {};
-    this._dirty = []; this.confirmedVersion = 0; this.framesDecoded = 0;
+    this.confirmedVersion = 0; this.framesDecoded = 0;
     this._qoeT0 = null;
+    this._cancelFlush();
+    this._pendingAcks = [];
+    if (this._ackTimer) { clearTimeout(this._ackTimer); this._ackTimer = null; }
+    this._h264Submitted = 0; this._h264Painted = 0; this._inflightBytes = 0;
     if (this.clear) this.clear.reset();
     this._workerPending = {};
     this._decodeSeq = 0; this._decodeSettledSeq = 0; this._orderedQueue = [];
@@ -384,8 +419,52 @@ RdpGfx.prototype.reset = function () {
 
 // Session teardown (page navigation / client disposed) — actually terminate the worker thread.
 RdpGfx.prototype.destroy = function () {
+    this._cancelFlush();
+    if (this._ackTimer) { clearTimeout(this._ackTimer); this._ackTimer = null; }
     if (this._worker) { this._worker.terminate(); this._worker = null; }
 };
+
+// Ask the host for a fresh keyframe / full repaint (the H.264 decoder was rebuilt after an error, so its
+// reference state is gone). Routed to a TS_REFRESH_RECT_PDU by protocol.js.
+RdpGfx.prototype.requestKeyframe = function (surfaceId) {
+    if (this.cb.requestRefresh) this.cb.requestRefresh(surfaceId);
+};
+
+// H.264 turned out to be undecodable in this browser at runtime (the load-time probe passed, or the probe
+// API was unavailable). Previously the worker silently dropped every later frame — the user saw a frozen
+// or black desktop with no explanation. Now: remember it so the NEXT connect advertises a Progressive-only
+// capset (see rdpGfxMode in protocol.js), and tell the page so it can end the session with a clear reason.
+RdpGfx.prototype._onAvcUnsupported = function (reason) {
+    RdpGfx.avcSupported = false;
+    this._log("rdpgfx: H.264 decode unsupported in this browser (" + reason + ") — next connect uses RemoteFX Progressive");
+    if (this.cb.onFatal) this.cb.onFatal("This browser cannot decode H.264 video. Reconnect to continue with RemoteFX Progressive.");
+};
+
+// Probe WebCodecs H.264 support ONCE at script load — long before any session advertises its GFX
+// capabilities — so a browser without a usable decoder (Safari builds without hardware H.264 in
+// WebCodecs, locked-down Firefox, anything without WebCodecs at all) is steered to RemoteFX Progressive
+// up front instead of negotiating AVC and then dropping every frame. Accept either High or Main profile
+// (RDP hosts emit both); the config mirrors the annexb, no-description setup decode-worker.js uses.
+RdpGfx.avcSupported = null; // null = unknown (still probing), else true/false
+RdpGfx.probeAvc = function () {
+    if (typeof VideoDecoder === "undefined") {
+        RdpGfx.avcSupported = false;
+        return Promise.resolve(false);
+    }
+    if (typeof VideoDecoder.isConfigSupported !== "function") {
+        RdpGfx.avcSupported = true; // no probe API but the decoder exists: assume it works (old behaviour)
+        return Promise.resolve(true);
+    }
+    const probe = function (codec) {
+        return VideoDecoder.isConfigSupported({ codec: codec, optimizeForLatency: true })
+            .then(function (res) { return !!(res && res.supported); }, function () { return false; });
+    };
+    return Promise.all([probe("avc1.640028"), probe("avc1.4d0028")]).then(function (r) {
+        RdpGfx.avcSupported = r[0] || r[1];
+        return RdpGfx.avcSupported;
+    });
+};
+if (typeof window !== "undefined") RdpGfx.probeAvc();
 
 // Build the CAPS_ADVERTISE PDU. The host picks the HIGHEST version it accepts and honors that capset's
 // flags. CRITICAL (from an mstsc wire log against this host): the host enables AVC/H.264 only when the
@@ -631,14 +710,14 @@ RdpGfx.prototype._makeSurfaceRecord = function (width, height, pixelFormat) {
     const canvas = (typeof OffscreenCanvas !== "undefined")
         ? new OffscreenCanvas(width, height)
         : Object.assign(document.createElement("canvas"), { width: width, height: height });
-    // willReadFrequently: surface canvases are read back regularly — ClearCodec re-snapshots its glyph from
-    // the composed destination (_finishClear) and the always-on black-cache detection scans cache source
-    // rects (_scanBlack). Without the hint the browser keeps the canvas GPU-backed and every getImageData
-    // forces a readback stall (Chrome logs "Multiple readback operations ... are faster with
-    // willReadFrequently"). A CPU-backed canvas is the right tradeoff here: our draws are putImageData /
-    // drawImage of decoded tiles, not GPU-heavy compositing.
-    const ctx = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
-    return { width, height, canvas, ctx, pixelFormat, touched: false };
+    // NO willReadFrequently: that hint pins the canvas to CPU memory, and then every drawImage(VideoFrame)
+    // into it is a GPU→CPU readback plus a colour conversion, every blit OUT of it to the visible canvas is
+    // a CPU→GPU upload, and (on WebKit) every putImageData after a blit copies the whole backing store.
+    // Surfaces are written by putImageData/drawImage and read back only in two rare places — a ClearCodec
+    // glyph with uncovered pixels (_finishClear, ≤1024 px) and the RDP_GFX_DIAG black-cache scan — which
+    // is far cheaper than paying a readback for every frame.
+    const ctx = canvas.getContext("2d", { alpha: false });
+    return { width, height, canvas, ctx, pixelFormat, touched: false, dirty: null };
 };
 
 // Lazily materialise a surface for an id the host is drawing into before (or between) CREATE_SURFACE. It
@@ -719,7 +798,7 @@ RdpGfx.prototype._onMapSurfaceToOutput = function (r) {
     this.outputMap[surfaceId] = { originX, originY, scaleW: 0, scaleH: 0 };
     this._log("rdpgfx: MAP_SURFACE_TO_OUTPUT id=" + surfaceId + " @" + originX + "," + originY);
     // The full surface is now visible at this origin — paint what we already have.
-    this._paintSurface(surfaceId, 0, 0, null, null);
+    this._markDirty(surfaceId, null);
 };
 
 RdpGfx.prototype._onMapSurfaceToScaledOutput = function (r) {
@@ -732,14 +811,13 @@ RdpGfx.prototype._onMapSurfaceToScaledOutput = function (r) {
     this.outputMap[surfaceId] = { originX, originY, scaleW: targetWidth, scaleH: targetHeight };
     this._log("rdpgfx: MAP_SURFACE_TO_SCALED_OUTPUT id=" + surfaceId + " @" + originX + "," +
         originY + " -> " + targetWidth + "x" + targetHeight);
-    this._paintSurface(surfaceId, 0, 0, null, null);
+    this._markDirty(surfaceId, null);
 };
 
 RdpGfx.prototype._onStartFrame = function (r) {
     /* timestamp */ r.u32le();
     this._curFrameId = r.u32le();
     this._frameStartMs = Date.now();   // for QOE timeDiffSE (START->END)
-    this._dirty = [];
 };
 
 // END_FRAME: flush this frame's dirty regions to the output, then acknowledge.
@@ -751,29 +829,58 @@ RdpGfx.prototype._onStartFrame = function (r) {
 // suspend (mstsc kept normal acks through frame ~19 and only later sent the SUSPEND sentinel).
 RdpGfx.prototype._onEndFrame = function (r) {
     const frameId = r.u32le();
-    this.framesDecoded++;
-    // FLOW CONTROL ([MS-RDPEGFX] 3.2.5.13 + 3.2.1.2 Unacknowledged Frames). GROUND TRUTH from the working
-    // mstsc MITM capture against THIS host (/tmp/rdpmitm, 3.6MB s2c, true wire order): mstsc sends a real
-    // FRAME_ACKNOWLEDGE (cmdId 0x0d) with queueDepth=0 for EVERY frame (45 frame-acks, almost all
-    // queueDepth=0x0, a few real buffered-byte counts like 0x55/0x15E/0x1778), PLUS a QOE ack per frame.
-    // The host's GFX scheduler is DRIVEN by this per-frame FRAME_ACK feedback loop — it streams a burst,
-    // waits for the ack, streams more. mstsc sends SUSPEND (0xFFFFFFFF) exactly ONCE, at the very END of
-    // the session (frame ~45, during teardown) — never up front.
-    //
-    // A previous experiment sent SUSPEND on the FIRST END_FRAME (then stopped FRAME_ACKs). That is the
-    // OPPOSITE of mstsc and it DETERMINISTICALLY stalls this host at frame 2-4: with no per-frame ack the
-    // host has no queueDepth signal and simply stops scheduling GFX (spec says it MUST NOT *block*, but
-    // "not block" ≠ "keep streaming" — this host throttles to nothing without the ack loop). So: mirror
-    // mstsc exactly — FRAME_ACK queueDepth=0 every frame + QOE every frame. (RDP_GFX_SUSPEND=1 forces the
-    // old up-front-SUSPEND behavior for A/B testing only.)
+    // FLOW CONTROL ([MS-RDPEGFX] 3.2.5.13 + 3.2.1.2 Unacknowledged Frames). Every frame still gets a
+    // FRAME_ACKNOWLEDGE + QOE ack — an mstsc MITM capture showed the host's GFX scheduler is DRIVEN by that
+    // per-frame loop and stops scheduling without it (an early SUSPEND experiment stalled it at frame 2-4;
+    // RDP_GFX_SUSPEND=1 still forces that for A/B). What changed: the ack is sent once the frame's content
+    // has LANDED — every async decode submitted before this END_FRAME has settled and every H.264 chunk
+    // the decoder accepted has produced its output frame (see _tryAckFrames). Acking at parse time with
+    // queueDepth=0 told the host we were keeping up while the decode/paint backlog grew without bound;
+    // the host bounds its unacknowledged frames, so acking late is exactly how a client says "slower".
     const RDPGFX_SUSPEND_FRAME_ACK = 0xFFFFFFFF;
     const forceSuspend = (typeof window !== "undefined" && window.RDP_GFX_SUSPEND);
     if (forceSuspend) {
         if (!this._suspendSent) { this._sendFrameAck(frameId, RDPGFX_SUSPEND_FRAME_ACK); this._suspendSent = true; }
-    } else {
-        this._sendFrameAck(frameId, RDPGFX_QUEUE_DEPTH_UNAVAILABLE);
+        return;
     }
-    this._sendQoeFrameAck(frameId);
+    this._pendingAcks.push({
+        frameId: frameId,
+        barrier: this._decodeSeq,
+        h264Barrier: this._h264Submitted,
+        startMs: this._frameStartMs || Date.now(),
+        endMs: Date.now(),
+    });
+    // Everything this frame painted synchronously goes to the output in one blit per surface now.
+    this._flushDirty();
+    this._tryAckFrames();
+};
+
+// Acknowledge every pending frame whose content has landed, in frame order. queueDepth reports the codec
+// bytes still in flight for NEWER frames ([MS-RDPEGFX] 2.2.2.13) — the throttle signal the host reads.
+// A safety timer force-acks a frame that has waited too long: a decoder that keeps one frame in its
+// output pipeline releases it only when the next chunk arrives, which on a static desktop may be never,
+// and a decode that never settles must not silence the ack loop and stall the host.
+RdpGfx.prototype._ACK_FORCE_MS = 300;
+RdpGfx.prototype._tryAckFrames = function () {
+    while (this._pendingAcks.length) {
+        const head = this._pendingAcks[0];
+        const landed = this._decodeSettledSeq >= head.barrier && this._h264Painted >= head.h264Barrier;
+        const forced = !landed && (Date.now() - head.endMs) >= this._ACK_FORCE_MS;
+        if (!landed && !forced) break;
+        this._pendingAcks.shift();
+        this.framesDecoded++;
+        if (forced) {
+            // Stop waiting for this frame's outputs; later frames are judged on their own content.
+            if (this._h264Painted < head.h264Barrier) this._h264Painted = head.h264Barrier;
+        }
+        this._sendFrameAck(head.frameId, this._inflightBytes >>> 0);
+        this._sendQoeFrameAck(head.frameId, head.startMs, head.endMs);
+    }
+    if (this._pendingAcks.length && !this._ackTimer) {
+        const self = this;
+        const wait = Math.max(1, this._ACK_FORCE_MS - (Date.now() - this._pendingAcks[0].endMs));
+        this._ackTimer = setTimeout(function () { self._ackTimer = null; self._tryAckFrames(); }, wait);
+    }
 };
 
 RdpGfx.prototype._sendFrameAck = function (frameId, queueDepth) {
@@ -791,21 +898,22 @@ RdpGfx.prototype._sendFrameAck = function (frameId, queueDepth) {
 // QOE_FRAME_ACKNOWLEDGE ([MS-RDPEGFX] 2.2.2.14): frameId(4) timestamp(4) timeDiffSE(2) timeDiffEDR(2).
 // mstsc sends one per frame and the host requires them to keep the GFX video stream free-running. We
 // report a monotonic timestamp (ms since first frame) and zero time-diffs (we don't measure E2E latency).
-RdpGfx.prototype._sendQoeFrameAck = function (frameId) {
+RdpGfx.prototype._sendQoeFrameAck = function (frameId, startMs, endMs) {
     if (!this.cb.send) return;
-    // Match mstsc's QOE exactly (recovered from MITM): it sends a RAW wall-clock tick (GetTickCount,
-    // a large 32-bit value like 0x17e43536) as the timestamp — NOT a since-first-frame delta starting
-    // at 0. The spec calls QOE informational, but this host gated v3 and caps on "informational" fields
-    // too, so we mirror mstsc precisely: raw Date.now() low-32 timestamp + small real timeDiffSE.
-    const now = Date.now() >>> 0;
-    if (this._qoeStartT == null) this._qoeStartT = now;
-    const ts = now;                                  // raw tick, like mstsc
-    const diffSE = Math.min(0xffff, (this._frameStartMs ? (now - this._frameStartMs) : 0)) & 0xffff;
+    // Match mstsc's QOE (recovered from MITM): a RAW wall-clock tick (GetTickCount-style large 32-bit
+    // value) as the timestamp — NOT a since-first-frame delta. The spec calls QOE informational, but this
+    // host gated v3 and caps on "informational" fields too. Both time diffs are real now: START→END is the
+    // wire span of the frame, END→DR is how long its decode + render took after END_FRAME arrived.
+    const now = Date.now();
+    const ts = now >>> 0;                            // raw tick, like mstsc
+    const e = endMs || now, s = startMs || e;
+    const diffSE = Math.min(0xffff, Math.max(0, e - s)) & 0xffff;
+    const diffEDR = Math.min(0xffff, Math.max(0, now - e)) & 0xffff;
     const body = new ByteWriter();
     body.u32le(frameId);   // frameId
     body.u32le(ts);        // timestamp (raw ms tick)
-    body.u16le(diffSE);    // timeDiffSE (START->END decode, ms)
-    body.u16le(0);         // timeDiffEDR
+    body.u16le(diffSE);    // timeDiffSE (START->END, ms)
+    body.u16le(diffEDR);   // timeDiffEDR (END->decoded+rendered, ms)
     this.cb.send(this._wrapPdu(RDPGFX_CMDID_QOEFRAMEACKNOWLEDGE, body.toArray()));
 };
 
@@ -921,8 +1029,9 @@ RdpGfx.prototype._decodeProgressive = function (surfaceId, surf, bitmapData, cod
     const reqId = ++this._workerReqId;
     // Stash the raw codec bytes for black-frame diagnostics (only when RDP_GFX_DIAG is on — the copy
     // below is transferred to the worker, so keep an independent slice here for the reply-side dump).
-    this._workerPending[reqId] = { surfaceId: surfaceId, kind: "progressive",
+    this._workerPending[reqId] = { surfaceId: surfaceId, kind: "progressive", bytes: bitmapData.length,
         diagBytes: this._diag() ? bitmapData.slice() : null };
+    this._inflightBytes += bitmapData.length;
     // bitmapData is a view into the (about-to-be-reused) ZGFX inflate buffer, so copy it before the
     // transfer — postMessage with a transfer list detaches the buffer, and we don't own the original.
     const copy = bitmapData.slice();
@@ -1088,7 +1197,13 @@ RdpGfx.prototype._decodeAvc420 = function (surfaceId, surf, destRect, data) {
     if (this._worker) {
         this._decodeSeq++;
         const reqId = ++this._workerReqId;
-        this._workerPending[reqId] = { surfaceId: surfaceId, kind: "h264" };
+        this._workerPending[reqId] = { surfaceId: surfaceId, kind: "h264", bytes: data.length };
+        this._inflightBytes += data.length;
+        // Every submitted chunk is expected to yield exactly one output frame, in order (a live desktop
+        // stream has no B-frames). Counted HERE, synchronously, so the END_FRAME that follows this PDU in
+        // the same inflate buffer captures it in its ack barrier; the worker's reply corrects the count
+        // when the chunk was consumed without a decode (see _onWorkerMessage).
+        this._h264Submitted++;
         // data is a view into the ZGFX inflate buffer (about to be reused) — copy before transfer.
         const copy = data.slice();
         this._worker.postMessage(
@@ -1197,8 +1312,15 @@ RdpGfx.prototype._finishClear = function (surfaceId, surf, msg) {
         // clear.js stored is provisional — its uncovered pixels are alpha-0 holes, but the host's
         // model says the glyph holds the fully-composed rect, and a later GLYPH_HIT paints it as-is.
         if (msg.glyphEntry) {
-            const snap = surf.ctx.getImageData(msg.rect.left, msg.rect.top, w, h);
-            msg.glyphEntry.pixels.set(new Uint32Array(snap.data.buffer, 0, w * h));
+            // If the decode covered every pixel (no alpha-0 holes) the provisional decode-buffer copy
+            // clear.js already stored IS the composed result — no canvas readback needed. Only a glyph
+            // with uncovered pixels needs the (tiny, ≤1024 px) snapshot of the composed surface rect.
+            let covered = true;
+            for (let i = 3, n = rgba.length; i < n; i += 4) { if (rgba[i] !== 255) { covered = false; break; } }
+            if (!covered) {
+                const snap = surf.ctx.getImageData(msg.rect.left, msg.rect.top, w, h);
+                msg.glyphEntry.pixels.set(new Uint32Array(snap.data.buffer, 0, w * h));
+            }
         }
         if (this._verbose()) {
             this._log("rdpgfx: ClearCodec PAINT surface=" + surfaceId + " at " + msg.rect.left + "," + msg.rect.top +
@@ -1217,66 +1339,49 @@ RdpGfx.prototype.onDecodedFrame = function (surfaceId, frame, regions) {
         if (frame.close) frame.close();
         return;
     }
-
-    const self = this;
-
     const cw = frame.codedWidth;
     const ch = frame.codedHeight;
-
     if (!cw || !ch) {
         if (frame.close) frame.close();
         return;
     }
-
-    const paintFrame = function (bitmap) {
-        try {
-            // Draw full frame (NO RGBA extraction, NO stride risk)
-            surf.ctx.drawImage(bitmap, 0, 0, cw, ch);
-
-            self._afterSurfaceUpdate(surfaceId, surf, [
-                { left: 0, top: 0, right: cw, bottom: ch }
-            ]);
-
-        } catch (e) {
-            self._log("rdpgfx: bitmap paint failed: " + (e && e.message || e));
-        } finally {
-            if (bitmap && bitmap.close) bitmap.close();
-            if (frame.close) frame.close();
+    // Copy only the region rects the AVC420 metablock declared ([MS-RDPEGFX] 2.2.4.4 — pixels outside
+    // them are not part of this update; FreeRDP does the same). No rects → the whole coded frame. The
+    // surface is GPU-backed, so drawImage(VideoFrame) is a GPU-side copy with no readback; the blit to
+    // the output canvas is coalesced by _afterSurfaceUpdate and covers only these rects.
+    const rects = (regions && regions.length) ? regions : [{ left: 0, top: 0, right: cw, bottom: ch }];
+    const self = this;
+    const paint = function (src) {
+        const painted = [];
+        for (const rc of rects) {
+            const sl = Math.max(0, rc.left | 0), st = Math.max(0, rc.top | 0);
+            const sr = Math.min(cw, rc.right | 0), sb = Math.min(ch, rc.bottom | 0);
+            const w = sr - sl, h = sb - st;
+            if (w <= 0 || h <= 0) continue;
+            surf.ctx.drawImage(src, sl, st, w, h, sl, st, w, h);
+            painted.push({ left: sl, top: st, right: sr, bottom: sb });
         }
+        if (painted.length) self._afterSurfaceUpdate(surfaceId, surf, painted);
     };
 
-    // Fast path: draw the VideoFrame straight onto the 2D context. Canvas2D accepts a VideoFrame as an
-    // image source on every current engine (Chrome/Edge/Firefox, Safari 16.4+), so this needs no
-    // intermediate ImageBitmap allocation and — crucially — no extra async event-loop turn per frame,
-    // which matters now that we render at full video frame rate. On the rare engine that rejects a
-    // VideoFrame source (older Safari/iOS), fall back to createImageBitmap.
+    // Fast path: Canvas2D accepts a VideoFrame as an image source on every current engine (Chrome/Edge/
+    // Firefox, Safari 16.4+) — no intermediate ImageBitmap, no extra event-loop turn per frame. On an
+    // engine that rejects a VideoFrame source (older Safari/iOS), fall back to createImageBitmap.
     let drawn = false;
-    try {
-        surf.ctx.drawImage(frame, 0, 0, cw, ch);
-        drawn = true;
-    } catch (e) {
-        // Fall through to the ImageBitmap path below.
-    }
-    if (drawn) {
-        try {
-            self._afterSurfaceUpdate(surfaceId, surf, [{ left: 0, top: 0, right: cw, bottom: ch }]);
-        } finally {
-            if (frame.close) frame.close();
-        }
-        return;
-    }
+    try { paint(frame); drawn = true; } catch (e) { /* fall through to the ImageBitmap path */ }
+    if (drawn) { if (frame.close) frame.close(); return; }
 
-    // Compatibility path (older Safari/iOS): decode the frame into an ImageBitmap first.
     if (typeof createImageBitmap === "function") {
-        createImageBitmap(frame)
-            .then(paintFrame)
-            .catch(function (e) {
-                self._log("rdpgfx: createImageBitmap failed: " + (e && e.message || e));
-                if (frame.close) frame.close();
-            });
+        createImageBitmap(frame).then(function (bmp) {
+            try { paint(bmp); }
+            catch (e) { self._log("rdpgfx: bitmap paint failed: " + (e && e.message || e)); }
+            finally { if (bmp && bmp.close) bmp.close(); if (frame.close) frame.close(); }
+        }).catch(function (e) {
+            self._log("rdpgfx: createImageBitmap failed: " + (e && e.message || e));
+            if (frame.close) frame.close();
+        });
         return;
     }
-
     if (frame.close) frame.close();
 };
 
@@ -1312,7 +1417,63 @@ RdpGfx.prototype._paintViaBitmap = function (surfaceId, surf, frame, rects, cw, 
 // is composited immediately (per-region) so partial updates appear without waiting for a full frame.
 RdpGfx.prototype._afterSurfaceUpdate = function (surfaceId, surf, regions) {
     surf.touched = true; // has real content now — MAP-time full blits may paint it
-    for (const rc of regions) this._paintSurface(surfaceId, 0, 0, surf, rc);
+    for (const rc of regions) this._markDirty(surfaceId, rc, surf);
+};
+
+// Union `rect` (null = whole surface) into the surface's dirty rect and schedule a flush. The blit to the
+// output canvas happens ONCE per surface per flush (END_FRAME, or the next animation frame for updates
+// that land outside a frame), no matter how many tiles/regions were written. This is what keeps WebKit's
+// canvas backend from copying the whole surface for every 64x64 tile — and on every engine it turns
+// hundreds of drawImage calls per PDU into one.
+RdpGfx.prototype._markDirty = function (surfaceId, rect, surf) {
+    surf = surf || this.surfaces[surfaceId];
+    if (!surf) return;
+    const l = rect ? Math.max(0, rect.left | 0) : 0;
+    const t = rect ? Math.max(0, rect.top | 0) : 0;
+    const r = rect ? Math.min(surf.width, rect.right | 0) : surf.width;
+    const b = rect ? Math.min(surf.height, rect.bottom | 0) : surf.height;
+    if (r <= l || b <= t) return;
+    const d = surf.dirty;
+    if (!d) surf.dirty = { left: l, top: t, right: r, bottom: b };
+    else {
+        if (l < d.left) d.left = l;
+        if (t < d.top) d.top = t;
+        if (r > d.right) d.right = r;
+        if (b > d.bottom) d.bottom = b;
+    }
+    this._scheduleFlush();
+};
+
+RdpGfx.prototype._scheduleFlush = function () {
+    if (this._flushScheduled) return;
+    this._flushScheduled = true;
+    const self = this;
+    if (typeof requestAnimationFrame === "function") {
+        this._flushRaf = requestAnimationFrame(function () { self._flushRaf = 0; self._flushDirty(); });
+    } else {
+        this._flushTimer = setTimeout(function () { self._flushTimer = 0; self._flushDirty(); }, 0);
+    }
+};
+
+RdpGfx.prototype._cancelFlush = function () {
+    if (this._flushRaf) { if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(this._flushRaf); this._flushRaf = 0; }
+    if (this._flushTimer) { clearTimeout(this._flushTimer); this._flushTimer = 0; }
+    this._flushScheduled = false;
+    for (const id in this.surfaces) this.surfaces[id].dirty = null;
+};
+
+// Blit every surface's accumulated dirty rect to the output (one drawImage per surface) and clear them.
+RdpGfx.prototype._flushDirty = function () {
+    this._flushScheduled = false;
+    if (this._flushRaf) { cancelAnimationFrame(this._flushRaf); this._flushRaf = 0; }
+    if (this._flushTimer) { clearTimeout(this._flushTimer); this._flushTimer = 0; }
+    for (const id in this.surfaces) {
+        const surf = this.surfaces[id];
+        const d = surf.dirty;
+        if (!d) continue;
+        surf.dirty = null;
+        this._paintSurface(id | 0, 0, 0, surf, d);
+    }
 };
 
 // Repaint every currently-mapped, touched surface onto the output canvas in full. Needed after the
@@ -1322,7 +1483,8 @@ RdpGfx.prototype._afterSurfaceUpdate = function (surfaceId, surf, regions) {
 // fresh WIRE_TO_SURFACE PDU after the resize get re-blitted, leaving every static/unchanging area of the
 // desktop permanently black until the host redraws it (which may be never, for idle UI chrome).
 RdpGfx.prototype.repaintAll = function () {
-    for (const surfaceId in this.surfaces) this._paintSurface(surfaceId | 0, 0, 0, this.surfaces[surfaceId], null);
+    for (const id in this.surfaces) this._markDirty(id | 0, null, this.surfaces[id]);
+    this._flushDirty();
 };
 
 // Blit a surface region to the output via onPaint. `region` null => whole surface.
@@ -1457,17 +1619,14 @@ RdpGfx.prototype._onSurfaceToCache = function (r) {
     }
     slot.srcLeft = left; slot.srcTop = top; // diagnostic only: origin this snapshot was taken from
     slot.ctx.drawImage(surf.canvas, left, top, w, h, 0, 0, w, h);
-    // Record whether the SOURCE surface rect was black AT SNAPSHOT TIME. This is the crux of the "black
-    // returns from cache" bug — if the slot is snapshotted black, the content for that region never landed
-    // on the surface before the host cached it (upstream drop / mis-order), and every later
-    // CACHE_TO_SURFACE faithfully replays black. This check runs ALWAYS (even in prod, flag off): it's the
-    // root-cause signal and cheap — one small readback per cache-populate, and SURFACE_TO_CACHE is far less
-    // frequent than CACHE_TO_SURFACE. We skip the scan entirely for benign base-layer corners/edges (the
-    // host's expected black background) via a coordinate test first, so only INTERIOR regions are scanned.
+    // Record whether the SOURCE surface rect was black AT SNAPSHOT TIME — the "black returns from cache"
+    // root-cause signal (a slot cached black replays black on every CACHE_TO_SURFACE). Gated behind
+    // RDP_GFX_DIAG: the scan is a synchronous canvas readback, Windows issues SURFACE_TO_CACHE constantly
+    // while scrolling, and always-on it forced the surfaces to stay CPU-backed. Benign base-layer
+    // corners/edges (the host's black background) are skipped via a coordinate test first.
     {
-        // Corner/edge tile (touches x==0, top, or the bottom/right edge) = host's black background — skip.
         const isEdge = (left <= 0) || (top <= 0) || (bottom >= (this.outputHeight || 1e9)) || (right >= (this.outputWidth || 1e9));
-        slot.snapBlack = !isEdge && this._scanBlack(surf, { left: left, top: top, right: right, bottom: bottom }).black;
+        slot.snapBlack = !!this._diag() && !isEdge && this._scanBlack(surf, { left: left, top: top, right: right, bottom: bottom }).black;
         if (slot.snapBlack) {
             // Distinguish an ORDERING bug from a MISSING-content bug from expected PRIMING. inflight
             // (decodeSeq > settledSeq) is the only real ordering signal — the drain loop in
