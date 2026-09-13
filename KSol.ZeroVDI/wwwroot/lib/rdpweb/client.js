@@ -80,6 +80,15 @@ function Client(websocketURL, canvasID) {
     this._preserveScaleOnReconnect = false;
     // Keys currently held down on the remote (by e.code), released in bulk when the window loses focus.
     this._heldKeys = new Set();
+    // Toggle-key mask (TS_SYNC_*) the host was last told about; -1 = never synced this session.
+    this._syncedToggles = -1;
+    // macOS swallows keyup for most keys while Command is held; see _releaseHeld.
+    this._isMac = /Mac|iPhone|iPad/.test((navigator.platform || "") + " " + (navigator.userAgent || ""));
+    this._isWindows = /Win/.test(navigator.platform || "");
+    // AltGr bookkeeping: when the left Ctrl we forwarded turns out to have been Windows' synthetic
+    // AltGr half, we take it back and must then swallow its matching keyup.
+    this._ctrlLeftDownAt = 0;
+    this._altGrSynthCtrl = false;
     // Latest unsent mousemove + the animation-frame handle that will flush it (see handleMouseMove).
     this._pendingMove = null;
     this._moveRaf = 0;
@@ -109,6 +118,7 @@ function Client(websocketURL, canvasID) {
     this.onUpdate = this.onUpdate.bind(this);
     this.deinitialize = this.deinitialize.bind(this);
     this.handleBlur = this.handleBlur.bind(this);
+    this.handleFocus = this.handleFocus.bind(this);
     this._invalidateCanvasRect = this._invalidateCanvasRect.bind(this);
 }
 
@@ -1139,9 +1149,15 @@ Client.prototype._onActive = function () {
     // Display Control may have signalled ready before the session was ACTIVE; now canResize() is true.
     this._applyInitialScale();
 
+    // Reset the host's key-down state and its idea of the lock keys for this fresh session; the
+    // first real keystroke replaces the zeroed mask with what the keyboard actually reports.
+    this._syncedToggles = -1;
+    this._syncToggles(0);
+
     window.addEventListener("keydown", this.handleKeyDown);
     window.addEventListener("keyup", this.handleKeyUp);
     window.addEventListener("blur", this.handleBlur);
+    window.addEventListener("focus", this.handleFocus);
     window.addEventListener("resize", this._invalidateCanvasRect);
     window.addEventListener("scroll", this._invalidateCanvasRect, true);
     this.canvas.addEventListener("mousemove", this.handleMouseMove);
@@ -1160,9 +1176,11 @@ Client.prototype.deinitialize = function () {
     window.removeEventListener("keydown", this.handleKeyDown);
     window.removeEventListener("keyup", this.handleKeyUp);
     window.removeEventListener("blur", this.handleBlur);
+    window.removeEventListener("focus", this.handleFocus);
     window.removeEventListener("resize", this._invalidateCanvasRect);
     window.removeEventListener("scroll", this._invalidateCanvasRect, true);
     this._heldKeys.clear();
+    this._syncedToggles = -1;
     if (this._moveRaf) { cancelAnimationFrame(this._moveRaf); this._moveRaf = 0; }
     this._pendingMove = null;
     this.canvas.removeEventListener("mousemove", this.handleMouseMove);
@@ -1581,34 +1599,186 @@ function _typingInOverlay() {
     const tag = el.tagName;
     return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
 }
+// ---- toggle-key synchronisation -------------------------------------------------------------
+// The host tracks Caps/Num/Scroll Lock itself, but it only ever sees the keystrokes we forward. A
+// lock toggled while the session didn't have focus (or before it started) leaves the two sides
+// disagreeing, which shows up as everything typing in capitals. TS_FP_SYNC_EVENT restates the truth
+// and resets the host's key-down state, so we send it on activation and whenever we notice drift.
+Client.prototype._toggleMaskFrom = function (e) {
+    let mask = 0;
+    try {
+        if (e.getModifierState("CapsLock")) mask |= TS_SYNC_CAPS_LOCK;
+        if (e.getModifierState("ScrollLock")) mask |= TS_SYNC_SCROLL_LOCK;
+        // Apple keyboards have no Num Lock and the browser always reports it off. Reporting that to
+        // the host would switch the remote keypad into cursor mode, so claim the Windows default
+        // (on) instead; elsewhere trust what the browser says.
+        if (this._isMac) mask |= TS_SYNC_NUM_LOCK;
+        else if (e.getModifierState("NumLock")) mask |= TS_SYNC_NUM_LOCK;
+    } catch (err) { /* getModifierState with an unknown key name: leave the bit clear */ }
+    return mask;
+};
+
+Client.prototype._syncToggles = function (mask) {
+    if (!this.connected || !this.proto || mask === this._syncedToggles) return;
+    this._syncedToggles = mask;
+    this.proto.sendInputSync(mask);
+    // The sync also resets the host to "all keys up" ([MS-RDPBCGR] 2.2.8.1.1.3.1.1.5), which would
+    // silently drop a Shift/Ctrl the user is still holding. The spec's own remedy: follow the sync
+    // with key-downs for everything that is in fact down.
+    for (const code of this._heldKeys) {
+        if (KeyMap[code] !== undefined) this._sendEvent(new KeyboardEventKeyDown(code).serialize());
+    }
+};
+
+// Released everything we believe is down. `modifiersToo` is false for the macOS Command workaround,
+// where the modifiers genuinely are still held.
+Client.prototype._releaseHeld = function (modifiersToo) {
+    for (const code of Array.from(this._heldKeys)) {
+        if (!modifiersToo && KeyIsModifier.has(code)) continue;
+        this._heldKeys.delete(code);
+        if (KeyMap[code] !== undefined) this._sendEvent(new KeyboardEventKeyUp(code).serialize());
+    }
+};
+
+// ---- keystrokes -------------------------------------------------------------------------------
 Client.prototype.handleKeyDown = function (e) {
     if (!this.connected || _typingInOverlay()) return;
-    const ev = new KeyboardEventKeyDown(e.code);
-    if (ev.keyCode === undefined) { e.preventDefault(); return false; }
-    this._sendEvent(ev.serialize());
-    this._heldKeys.add(e.code);
     e.preventDefault();
+    // An IME is composing in the browser (only possible with an editable element focused); the
+    // committed text arrives later and forwarding the raw keys now would double it.
+    if (e.isComposing || e.keyCode === 229) return false;
+
+    this._syncToggles(this._toggleMaskFrom(e));
+
+    // PAUSE is the one key with no make code of its own: plain PAUSE is an E1-prefixed
+    // Ctrl+NumLock pair, while Ctrl+PAUSE is BREAK — the extended 0x46.
+    if (e.code === "Pause") {
+        if (e.ctrlKey) {
+            this._sendEvent(new ScancodeEvent(0x46, FASTPATH_INPUT_KBDFLAGS_EXTENDED).serialize());
+            this._sendEvent(new ScancodeEvent(0x46, FASTPATH_INPUT_KBDFLAGS_EXTENDED |
+                FASTPATH_INPUT_KBDFLAGS_RELEASE).serialize());
+        } else {
+            for (const ev of pauseKeySequence()) this._sendEvent(ev.serialize());
+        }
+        return false;
+    }
+
+    const code = this._mapCode(e.code);
+    if (KeyMap[code] !== undefined) {
+        if (code === "AltRight") this._dropSyntheticAltGrCtrl();
+        if (code === "ControlLeft") this._ctrlLeftDownAt = performance.now();
+        this._sendEvent(new KeyboardEventKeyDown(code).serialize());
+        this._heldKeys.add(code);
+        return false;
+    }
+    // No physical position for this key (soft keyboards, layouts with keys we don't know). If it
+    // produced a character, send it as text instead of dropping the keystroke entirely.
+    this._sendPrintableFallback(e);
     return false;
 };
+
 Client.prototype.handleKeyUp = function (e) {
     if (!this.connected || _typingInOverlay()) return;
-    this._heldKeys.delete(e.code);
-    const ev = new KeyboardEventKeyUp(e.code);
-    if (ev.keyCode === undefined) { e.preventDefault(); return false; }
-    this._sendEvent(ev.serialize());
     e.preventDefault();
+    if (e.isComposing || e.keyCode === 229) return false;
+
+    const code = this._mapCode(e.code);
+    // The left Ctrl was Windows' synthetic AltGr half and we already released it on the host; its
+    // keyup would otherwise arrive as a second release the host never saw a press for.
+    if (code === "ControlLeft" && this._altGrSynthCtrl && !this._heldKeys.has("ControlLeft")) {
+        this._altGrSynthCtrl = false;
+        return false;
+    }
+    if (code === "AltRight") this._altGrSynthCtrl = false;
+    this._heldKeys.delete(code);
+    if (KeyMap[code] !== undefined) this._sendEvent(new KeyboardEventKeyUp(code).serialize());
+
+    // macOS suppresses keyup for ordinary keys while Command is held, so a Cmd+C leaves "C" stuck
+    // down on the host forever. When Command itself comes up, sweep the non-modifiers it hid.
+    if (this._isMac && (e.code === "MetaLeft" || e.code === "MetaRight" ||
+                        e.code === "OSLeft" || e.code === "OSRight")) {
+        this._releaseHeld(false);
+    }
     return false;
 };
+
+// Windows reports AltGr as two events: a synthetic ControlLeft immediately followed by AltRight.
+// Forwarding both leaves Ctrl+AltGr pressed on the host, which a Linux/GNOME Remote Desktop target
+// does NOT read as AltGr — so the European third-level characters (@, backslash, the curly braces)
+// never arrive. Windows hosts synthesise the Ctrl themselves from the right Alt, so taking ours back
+// is safe on both. Only the pairing within one key press qualifies: a Ctrl held 50 ms earlier is a
+// human pressing Ctrl, not the driver.
+Client.prototype._dropSyntheticAltGrCtrl = function () {
+    if (!this._isWindows || !this._heldKeys.has("ControlLeft")) return;
+    if (performance.now() - this._ctrlLeftDownAt > 50) return;
+    this._heldKeys.delete("ControlLeft");
+    this._sendEvent(new KeyboardEventKeyUp("ControlLeft").serialize());
+    this._altGrSynthCtrl = true;
+};
+
+// The physical Command key is the Windows key, and that is what we send — so Win+R and Win+E work
+// from a Mac. Users who would rather have Mac muscle memory (Cmd+C/Cmd+V as the remote's Ctrl+C/V)
+// can set window.RDP_MAC_CMD_AS_CTRL = true before connecting; the Windows key is then unreachable.
+Client.prototype._mapCode = function (code) {
+    if (!this._isMac || !window.RDP_MAC_CMD_AS_CTRL) return code;
+    if (code === "MetaLeft" || code === "OSLeft") return "ControlLeft";
+    if (code === "MetaRight" || code === "OSRight") return "ControlRight";
+    return code;
+};
+
+// A key we have no scancode for, but which produced a printable character: send it as a Unicode
+// keyboard event (the host inserts the character directly, bypassing layout translation). Only when
+// no Ctrl/Alt/Meta is held — a Unicode event carries no modifier state, so a shortcut can't be
+// expressed this way and sending the bare character would type it instead.
+Client.prototype._sendPrintableFallback = function (e) {
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+    const k = e.key;
+    if (!k || k.length > 2 || k === "Dead" || k === "Unidentified" || k === "Process") return;
+    if (k.length === 1 && k.charCodeAt(0) < 0x20) return;   // control character, not printable
+    this.sendUnicodeText(k);
+};
+
+// Type a string into the remote session as Unicode keyboard events. Modifier-independent, so it is
+// also the right tool for injecting text the user didn't type (paste-as-keystrokes, macros).
+Client.prototype.sendUnicodeText = function (text) {
+    if (!this.connected || !text) return;
+    for (let i = 0; i < text.length; i++) {
+        const unit = text.charCodeAt(i);   // UTF-16 code unit; surrogate pairs go out as two events
+        this._sendEvent(new UnicodeKeyEvent(unit, false).serialize());
+        this._sendEvent(new UnicodeKeyEvent(unit, true).serialize());
+    }
+};
+
+// Ctrl+Alt+Del never reaches the page — every OS grabs it first — so the session toolbar offers a
+// button that synthesises it. Same for any other combination the browser or OS swallows.
+Client.prototype.sendCtrlAltDel = function () {
+    this.sendKeyCombo(["ControlLeft", "AltLeft", "Delete"]);
+};
+
+// Press the given keys (by e.code) in order, then release them in reverse — the shape every
+// modifier+key shortcut needs.
+Client.prototype.sendKeyCombo = function (codes) {
+    if (!this.connected || !codes || !codes.length) return;
+    const usable = codes.filter((c) => KeyMap[c] !== undefined);
+    for (const c of usable) this._sendEvent(new KeyboardEventKeyDown(c).serialize());
+    for (let i = usable.length - 1; i >= 0; i--) {
+        this._sendEvent(new KeyboardEventKeyUp(usable[i]).serialize());
+    }
+};
+
 // The OS/browser took focus away (Alt+Tab, Cmd+Tab, a dialog, the URL bar): any key still held never
 // gets its keyup here, so the host would keep it pressed — a stuck Ctrl/Alt/Shift/Win until the user
 // taps it again. Release everything we know is down.
 Client.prototype.handleBlur = function () {
+    this._altGrSynthCtrl = false;
     if (!this.connected || !this._heldKeys.size) return;
-    for (const code of this._heldKeys) {
-        const ev = new KeyboardEventKeyUp(code);
-        if (ev.keyCode !== undefined) this._sendEvent(ev.serialize());
-    }
-    this._heldKeys.clear();
+    this._releaseHeld(true);
+};
+
+// Coming back from a focus loss, the lock keys may have been toggled elsewhere. We can't read them
+// without a key event, so just forget what we synced; the next keystroke re-sends the true state.
+Client.prototype.handleFocus = function () {
+    this._syncedToggles = -1;
 };
 Client.prototype.handleMouseMove = function (e) {
     if (!this.connected) return;

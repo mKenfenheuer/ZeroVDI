@@ -1345,23 +1345,16 @@ RdpGfx.prototype.onDecodedFrame = function (surfaceId, frame, regions) {
         if (frame.close) frame.close();
         return;
     }
-    // Copy only the region rects the AVC420 metablock declared ([MS-RDPEGFX] 2.2.4.4 — pixels outside
-    // them are not part of this update; FreeRDP does the same). No rects → the whole coded frame. The
-    // surface is GPU-backed, so drawImage(VideoFrame) is a GPU-side copy with no readback; the blit to
-    // the output canvas is coalesced by _afterSurfaceUpdate and covers only these rects.
-    const rects = (regions && regions.length) ? regions : [{ left: 0, top: 0, right: cw, bottom: ch }];
+    // Draw the WHOLE coded frame at 0,0 and mark the whole frame dirty — never a source sub-rect. WebKit
+    // (Safari) mishandles the 9-argument drawImage(VideoFrame, sx, sy, sw, sh, dx, dy, dw, dh) form: it
+    // ignores the source rect and squeezes the entire frame into the destination rect, so per-region
+    // copies rendered the full desktop scaled into every changed tile (v0.6.37 regression). The full-frame
+    // draw is a single GPU-side copy and the output blit is coalesced to one drawImage per flush anyway.
+    void regions; // the AVC420 metablock rects are advisory here; the decoded frame is the surface's truth
     const self = this;
     const paint = function (src) {
-        const painted = [];
-        for (const rc of rects) {
-            const sl = Math.max(0, rc.left | 0), st = Math.max(0, rc.top | 0);
-            const sr = Math.min(cw, rc.right | 0), sb = Math.min(ch, rc.bottom | 0);
-            const w = sr - sl, h = sb - st;
-            if (w <= 0 || h <= 0) continue;
-            surf.ctx.drawImage(src, sl, st, w, h, sl, st, w, h);
-            painted.push({ left: sl, top: st, right: sr, bottom: sb });
-        }
-        if (painted.length) self._afterSurfaceUpdate(surfaceId, surf, painted);
+        surf.ctx.drawImage(src, 0, 0, cw, ch);
+        self._afterSurfaceUpdate(surfaceId, surf, [{ left: 0, top: 0, right: cw, bottom: ch }]);
     };
 
     // Fast path: Canvas2D accepts a VideoFrame as an image source on every current engine (Chrome/Edge/

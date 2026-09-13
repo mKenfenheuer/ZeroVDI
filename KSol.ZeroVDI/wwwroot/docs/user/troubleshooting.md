@@ -28,6 +28,16 @@ rejected, double-check them with whoever manages that desktop.
 - Your browser may have blocked clipboard access — click the padlock / site-info icon in the address
   bar, allow clipboard, and reconnect.
 
+## Keys type the wrong character, or a shortcut doesn't work
+
+- Check your browser's language settings: the remote keyboard layout is derived from them on
+  browsers that can't report your physical keyboard directly (see
+  [Using the console](using-the-console.md#keyboard)).
+- **Ctrl+Alt+Del** is claimed by your own operating system and never reaches the browser — send it
+  with the keyboard button in the session toolbar.
+- If a key seems stuck down on the remote desktop, click back into the console window and tap that
+  key once; switching away from the session releases everything it was holding.
+
 ## No sound, or my mic/camera isn't detected
 
 - Enable **Audio**, **Microphone**, or **Camera** in [Connection settings](connection-settings.md).

@@ -10,11 +10,20 @@ desktop fills your whole screen. Press **F11** again to leave full screen.
 
 ## Keyboard
 
-Most keys pass straight through to the remote desktop. A few combinations are special:
+Most keys pass straight through to the remote desktop, including the arrow and navigation keys, the
+Windows key, AltGr, the numeric keypad and the function row. A few combinations are special:
 
+- **Ctrl+Alt+Del** never reaches the browser — every operating system claims it first. Use the
+  keyboard button in the session toolbar to send it to the remote desktop (that is how you reach the
+  Windows lock, change-password and Task Manager screen).
 - Some browser shortcuts (like **Ctrl+W** to close the tab, or **F11** for full screen) are handled
   by your browser before they reach the desktop.
 - If a shortcut isn't reaching the remote machine, try going full screen first.
+- On a Mac, the **Command** key is sent as the remote **Windows** key, so Command+R opens the remote
+  Run box. Use **Ctrl+C** and **Ctrl+V** for copy and paste inside the remote desktop, or the
+  clipboard panel below to move text between the two machines.
+- **Caps Lock, Num Lock and Scroll Lock** are kept in step with your real keyboard, including when
+  you switch away from the session and toggle them elsewhere.
 
 Your keyboard layout (for example German QWERTZ or French AZERTY) is detected from your browser and
 passed to the remote desktop automatically, so keys produce the characters printed on them. If the

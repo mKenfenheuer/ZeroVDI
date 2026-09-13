@@ -1982,12 +1982,12 @@ RdpProtocol.prototype.sendInputEvent = function (eventBytes) {
 
 // Send a fastpath INPUT SYNC event (FASTPATH_INPUT_EVENT_SYNC, eventCode 3) — toggle-key state sync.
 // mstsc sends this right after the session activates (observed in a MITM capture: a 3-byte fastpath PDU,
-// eventHeader 0x62) before the host begins flooding GFX frames. We send it on activation as a
-// proactive "interactive client present" signal. The event is just the 1-byte eventHeader:
-// (eventCode 3 << 5) | (toggleFlags = 0).
-RdpProtocol.prototype.sendInputSync = function () {
+// eventHeader 0x62) before the host begins flooding GFX frames. client.js sends it on activation as a
+// proactive "interactive client present" signal, and again whenever the browser reports a lock key in a
+// state the host hasn't been told about. toggleFlags is a mask of TS_SYNC_* (see input/keyboard.js).
+RdpProtocol.prototype.sendInputSync = function (toggleFlags) {
     if (this.state !== ST.ACTIVE) return;
-    this.sendInputEvent(new Uint8Array([(3 << 5) | 0]));
+    this.sendInputEvent(new Uint8Array(new SyncEvent(toggleFlags | 0).serialize()));
 };
 
 // Send a TS_REFRESH_RECT_PDU asking the host to repaint the given rect (default: whole desktop). Used

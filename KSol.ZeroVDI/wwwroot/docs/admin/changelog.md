@@ -7,6 +7,63 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ---
 
+## [0.6.38] — 2026-09-13 — H.264 rendering regression fix
+
+### Fixed
+- **Garbled desktop on H.264 (AVC420/444) sessions in Safari.** 0.6.37 changed the H.264 paint path to
+  copy only the changed region rects out of the decoded `VideoFrame` with a source sub-rect. WebKit
+  ignores the source rect on `drawImage(VideoFrame, sx, sy, sw, sh, …)` and squeezes the entire frame
+  into each destination rect, so the whole desktop was rendered scaled into every changed tile. The
+  decoded frame is again drawn in full at 0,0 (one GPU-side copy); the coalesced output blit from
+  0.6.37 is kept.
+
+---
+
+## [0.6.37] — 2026-09-13 — Keyboard correctness (audit finding 6)
+
+### Fixed
+- **Arrow keys and the navigation cluster now carry the extended flag.** The four arrows were mapped
+  onto keypad make codes with no `FASTPATH_INPUT_KBDFLAGS_EXTENDED` (and Up was sent as Numpad5's
+  0x4C instead of 0x48), so the host read them as keypad digits: the cursor moved only while Num Lock
+  happened to be off, and typed "5" the rest of the time. Home, End, Page Up, Page Down, Insert and
+  Delete were not mapped at all and were swallowed silently.
+- **Missing keys are mapped**: right Ctrl, right Alt / AltGr, both Windows (Command) keys, the context-
+  menu key, the keypad's Enter and `/`, Print Screen, Scroll Lock, Pause and Break, the 102-key `<>`
+  key, the F13–F24 row, the Japanese and Korean keys (Yen, Ro, Kana, Convert, Hangul, Hanja), the
+  keypad `=` and ABNT `,`, and the ACPI/multimedia keys. Pause is sent as the Ctrl+Num Lock pair with
+  the EXTENDED1 flag that [MS-RDPBCGR] 2.2.8.1.2.2.1 requires; Ctrl+Pause sends Break.
+- **AltGr no longer arrives as Ctrl+AltGr.** Windows browsers report AltGr as a synthetic left Ctrl
+  immediately followed by right Alt. Forwarding both leaves Ctrl held on the host, which Linux and
+  GNOME Remote Desktop targets do not read as AltGr — `@`, `\`, `{`, `}`, `[`, `]` and the other
+  third-level characters of the European layouts never arrived. The synthetic Ctrl is now retracted
+  when the right Alt follows it within the same key press.
+- **Keystroke events are 2 bytes, not 3.** Every scancode event carried a trailing zero byte — a stray
+  `FASTPATH_INPUT_EVENT_SCANCODE` header past the event the fast-path PDU declared.
+- **Keys stuck down after a macOS Command shortcut.** macOS does not deliver keyup for ordinary keys
+  while Command is held, so a Cmd+C left "C" pressed on the host indefinitely; the non-modifier keys
+  Command hid are now released when Command itself comes up.
+
+### Added
+- **Toggle-key synchronisation.** A `TS_FP_SYNC_EVENT` is sent on activation (resetting the host's
+  key-down state) and whenever the browser reports Caps Lock, Num Lock or Scroll Lock in a state the
+  host has not been told about — a Caps Lock toggled outside the session no longer leaves the remote
+  typing in capitals. Because the sync also resets the host to "all keys up", the keys actually held
+  are re-pressed right after it, as the spec prescribes. Apple keyboards have no Num Lock and report
+  it permanently off, so the Windows default (on) is reported instead to keep the remote keypad in
+  numeric mode.
+- **Ctrl+Alt+Del button** in the session toolbar. The combination is grabbed by the local OS and never
+  reaches the page, so the remote security screen (lock, change password, Task Manager) was
+  unreachable. `Client.sendKeyCombo(codes)` backs it and is available for any other combination the
+  browser swallows.
+- **Unicode keyboard events.** A key with no physical position we recognise (soft keyboards, exotic
+  layouts) that still produced a printable character is now sent as a `TS_FP_UNICODE_KEYBOARD_EVENT`
+  instead of being dropped. `Client.sendUnicodeText(text)` types a string into the session.
+- `window.RDP_MAC_CMD_AS_CTRL` — opt-in for Mac users who want Command to act as the remote's Ctrl
+  (Cmd+C, Cmd+V) rather than as the Windows key, which is the default because it is the physical
+  truth and is what makes Win+R and Win+E reachable.
+
+---
+
 ## [0.6.36] — 2026-09-13 — Security headers, public base URL, recorder direction fix (audit findings 5 and 7)
 
 ### Security

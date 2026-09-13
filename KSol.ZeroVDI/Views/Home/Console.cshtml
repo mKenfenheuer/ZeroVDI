@@ -337,6 +337,8 @@
         <span id="floatbar-controls">
             <button class="btn-session-control" id="btn-clip" type="button"
                     title="Clipboard — sync text with the remote session"><i class="fa-solid fa-clipboard"></i></button>
+            <button class="btn-session-control" id="btn-cad" type="button"
+                    title="Send Ctrl+Alt+Del to the remote session"><i class="fa-solid fa-keyboard"></i></button>
             <button class="btn-session-control" id="btn-fullscreen" type="button"><i class="fa-solid fa-expand"></i></button>
             <button class="btn-session-control" id="btn-mute" type="button" actiontitle="Mute / unmute remote sound"><i class="fa-solid fa-volume"></i></button>
             <button class="btn-session-control fa-red" id="btn-disable-video" type="button"><i class="fa-solid fa-video-slash"></i></button>
@@ -516,6 +518,7 @@
             var btnGiveUp = document.getElementById("btn-give-up");
             var btnConnect = document.getElementById("btn-connect");
             var btnDisconnect = document.getElementById("btn-disconnect");
+            var btnCad = document.getElementById("btn-cad");
             var btnFullscreen = document.getElementById("btn-fullscreen");
             var btnMute = document.getElementById("btn-mute");
             var btnDisableMic = document.getElementById("btn-disable-microphone");
@@ -854,6 +857,14 @@
                 reconnectMsg.textContent = "";
                 var form = document.getElementById("login-form");
                 if (form.requestSubmit) form.requestSubmit(); else form.dispatchEvent(new Event("submit", { cancelable: true }));
+            });
+            // Ctrl+Alt+Del is intercepted by the local OS before the page ever sees it, so the only way
+            // to reach the remote Windows security screen (lock, change password, Task Manager) is to
+            // synthesise the sequence. Drop focus afterwards so a following Space/Enter doesn't re-fire
+            // the button instead of reaching the session.
+            btnCad.addEventListener("click", function () {
+                client.sendCtrlAltDel();
+                btnCad.blur();
             });
             btnFullscreen.addEventListener("click", function () {
                 if (!document.fullscreenElement) {
