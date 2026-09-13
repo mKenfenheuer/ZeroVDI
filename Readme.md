@@ -8,9 +8,9 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Source--Available-blue"></a>
-  <a href="../../actions/workflows/ci.yml"><img alt="Build &amp; test" src="https://img.shields.io/github/actions/workflow/status/mkenfenheuer/ksol-zerovdi/ci.yml?label=build%20%26%20test"></a>
+  <a href="../../actions/workflows/ci.yml"><img alt="Build &amp; test" src="https://img.shields.io/github/actions/workflow/status/mkenfenheuer/zerovdi/ci.yml?label=build%20%26%20test"></a>
   <a href="../../pkgs/container/ksol-zerovdi"><img alt="Container image" src="https://img.shields.io/badge/ghcr.io-ksol--zerovdi-1f6feb"></a>
-  <img alt="Last commit" src="https://img.shields.io/github/last-commit/mkenfenheuer/ksol-zerovdi/main">
+  <img alt="Last commit" src="https://img.shields.io/github/last-commit/mkenfenheuer/zerovdi/main">
 </p>
 
 ---
