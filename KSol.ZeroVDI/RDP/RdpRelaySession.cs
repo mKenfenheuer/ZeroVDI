@@ -28,7 +28,10 @@ public sealed class RdpRelaySession
     private readonly byte[]? _routingToken;
     private readonly VmCredentials? _redirectCreds;
     private readonly Action<RdpServerRedirection>? _onRedirect;
-    private readonly IHostTransport? _hostTransport;
+    private readonly IHostTransport _hostTransport;
+    // WebSocket allows one send at a time, and the writer pump sends fragmented messages: control
+    // frames (SendJsonAsync) must not interleave with them.
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly IRdpResolver _resolver;
     private readonly ILogger _logger;
     // Protocol-level device-policy enforcement (null when no feature is Disabled). See ChannelPolicyGuard.
@@ -79,7 +82,8 @@ public sealed class RdpRelaySession
         _ws = ws;
         _policyGuard = policyGuard;
         _hostCertCheck = hostCertCheck;
-        _hostTransport = hostTransport;
+        // One transport for the whole session, so the RTT sampler can read the live host socket.
+        _hostTransport = hostTransport ?? new DirectTcpTransport(logger);
         _resolver = resolver ?? new NlaRdpResolver();
         _host = host;
         _port = port;
@@ -140,7 +144,7 @@ public sealed class RdpRelaySession
         {
             host = await _resolver.ConnectAsync(
                 new RdpResolveRequest(_host, _port, creds,
-                    _hostTransport ?? new DirectTcpTransport(_logger), _kerberos,
+                    _hostTransport, _kerberos,
                     RequestedProtocols: 0x00000002 | 0x00000001 /* HYBRID | SSL */,
                     RoutingToken: _routingToken, Logger: _logger, CertificateCheck: _hostCertCheck),
                 ct);
@@ -278,20 +282,26 @@ public sealed class RdpRelaySession
     // If we read-then-send in one loop, a slow browser WebSocket send back-pressures the host's TCP window
     // and the host PAUSES MID-FRAME (observed: it stops at a fixed ~11KB into a 22KB frame and never
     // resumes). A working mstsc receives 110KB frames in one uninterrupted burst — because its receiver
-    // drains promptly. So we split: a READER that drains the host SSL into a bounded in-memory queue as
-    // fast as the host sends, and a WRITER that forwards to the browser at the browser's pace. The host
-    // never sees our WebSocket latency. The bound caps memory; if the browser falls hopelessly behind we
-    // fail the session rather than buffer without limit.
+    // drains promptly. So we split: a READER that drains the host SSL into an in-memory queue as fast as
+    // the host sends, and a WRITER that forwards to the browser at the browser's pace. The host never
+    // sees our WebSocket latency.
+    //
+    // The queue is bounded in BYTES (see SendBudget). Everything queued is latency the user feels: on a
+    // 2 Mbit/s link a 4 MB backlog is 16 s between a click and its result on screen. The bound adapts to
+    // about QueueSeconds of the measured browser drain rate, with a QueueFloorBytes floor so a single
+    // large frame always fits in one go (the stall above) and the old 4 MB as the ceiling.
+    private const int QueueFloorBytes = 1024 * 1024;
+    private const int QueueCeilingBytes = 4 * 1024 * 1024;
+    private const double QueueSeconds = 0.5;
+    private const int ReadChunkBytes = 16 * 1024;
+    private const int MaxMessageBytes = 256 * 1024; // queued chunks are coalesced into one message up to this
+
     private async Task PumpSslToWsAsync(Stream ssl, CancellationToken ct)
     {
-        // Bounded so a stuck browser can't OOM us. ~256 chunks * 16KB ≈ 4MB max in flight.
-        var pipe = System.Threading.Channels.Channel.CreateBounded<byte[]>(
-            new System.Threading.Channels.BoundedChannelOptions(256)
-            {
-                SingleReader = true,
-                SingleWriter = true,
-                FullMode = System.Threading.Channels.BoundedChannelFullMode.Wait,
-            });
+        var pipe = System.Threading.Channels.Channel.CreateUnbounded<(byte[] Buf, int Len)>(
+            new System.Threading.Channels.UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
+        var budget = new SendBudget(QueueFloorBytes);
+        var pool = System.Buffers.ArrayPool<byte>.Shared;
         long total = 0, chunks = 0;
 
         // Server-redirection scan: the redirection PDU (~3.5KB) can straddle two ssl.ReadAsync reads, so
@@ -304,27 +314,33 @@ public sealed class RdpRelaySession
         var scanBuf = (_onRedirect != null) ? new MemoryStream() : null;
         const int RedirectScanTail = 64 * 1024; // keep only the last 64 KB to catch a redirect mid-stream
 
-        // READER: drain host SSL promptly into the pipe. This is what keeps the host streaming.
+        // READER: drain host SSL promptly into the pipe. This is what keeps the host streaming. Reads go
+        // straight into pooled buffers that the writer returns after sending — no per-read allocation.
         var reader = Task.Run(async () =>
         {
-            var buffer = new byte[16 * 1024];
             using var dump = OpenDump("our_s2c.bin");
             try
             {
                 while (!ct.IsCancellationRequested)
                 {
-                    int n = await ssl.ReadAsync(buffer, ct);
-                    if (n == 0) { _logger.LogWarning("RDP relay: host→ws reader: host closed (0 bytes) after {Total} bytes / {Chunks} chunks", total, chunks); break; }
+                    var buffer = pool.Rent(ReadChunkBytes);
+                    int n = await ssl.ReadAsync(buffer.AsMemory(0, ReadChunkBytes), ct);
+                    if (n == 0)
+                    {
+                        pool.Return(buffer);
+                        _logger.LogWarning("RDP relay: host→ws reader: host closed (0 bytes) after {Total} bytes / {Chunks} chunks", total, chunks);
+                        break;
+                    }
                     total += n;
                     chunks++;
-                    var slice = buffer.AsMemory(0, n).ToArray();
+                    var slice = buffer.AsMemory(0, n);
                     if (dump != null) { await dump.WriteAsync(slice, ct); await dump.FlushAsync(ct); }
-                    _recorder?.Feed(RdpDir.ServerToClient, slice);
+                    _recorder?.Feed(RdpDir.ServerToClient, slice.Span);
                     if (_policyGuard != null)
                     {
                         // Host→client is learning only (SC_NET ids, DVC names); a violation is still honoured.
-                        var violation = _policyGuard.Feed(RdpDir.ServerToClient, slice);
-                        if (violation != null) { OnPolicyViolation(violation); break; }
+                        var violation = _policyGuard.Feed(RdpDir.ServerToClient, slice.Span);
+                        if (violation != null) { pool.Return(buffer); OnPolicyViolation(violation); break; }
                     }
 
                     // Server Redirection: a session broker (GNOME Remote Desktop "Remote Login") sends a
@@ -333,10 +349,11 @@ public sealed class RdpRelaySession
                     // to the browser (it would choke on it).
                     if (scanBuf != null && !_redirected)
                     {
-                        scanBuf.Write(slice, 0, slice.Length);
+                        scanBuf.Write(buffer, 0, n);
                         var redir = RdpServerRedirection.TryParse(scanBuf.GetBuffer().AsSpan(0, (int)scanBuf.Length));
                         if (redir?.LoadBalanceInfo != null)
                         {
+                            pool.Return(buffer);
                             _redirected = true;
                             _logger.LogInformation("RDP relay: server redirection -> reconnecting (token {Len}B, target {Target}, creds={HasCreds})",
                                 redir.LoadBalanceInfo.Length, redir.TargetHost ?? _host, redir.Username != null && redir.Password != null);
@@ -360,7 +377,8 @@ public sealed class RdpRelaySession
                         }
                     }
 
-                    await pipe.Writer.WriteAsync(slice, ct);
+                    await budget.ReserveAsync(n, ct);
+                    pipe.Writer.TryWrite((buffer, n));
                 }
             }
             catch (OperationCanceledException) { }
@@ -369,15 +387,95 @@ public sealed class RdpRelaySession
         }, ct);
 
         // WRITER: forward to the browser at the browser's pace (may block on a slow WS without affecting
-        // the reader / the host).
+        // the reader / the host). Whatever is queued when the writer gets to it goes out as ONE WebSocket
+        // message (fragmented, no copy): the browser handles one onmessage per batch instead of one per
+        // 16 KB read. While the queue stays non-empty the writer is the bottleneck, so bytes sent per
+        // second in that state is the browser link's real drain rate — it sizes the budget.
+        long windowBytes = 0;
+        var window = System.Diagnostics.Stopwatch.StartNew();
+        double drainRate = 0; // bytes/s, EWMA over backlogged windows
         try
         {
-            await foreach (var slice in pipe.Reader.ReadAllAsync(ct))
-                await _ws.SendAsync(slice, WebSocketMessageType.Binary, endOfMessage: true, ct);
+            var rd = pipe.Reader;
+            while (await rd.WaitToReadAsync(ct))
+            {
+                if (!rd.TryRead(out var pending)) continue;
+                await _sendLock.WaitAsync(ct);
+                try
+                {
+                    int messageBytes = 0;
+                    (byte[] Buf, int Len) next = default;
+                    while (true)
+                    {
+                        messageBytes += pending.Len;
+                        bool more = messageBytes < MaxMessageBytes && rd.TryRead(out next);
+                        await _ws.SendAsync(pending.Buf.AsMemory(0, pending.Len), WebSocketMessageType.Binary,
+                            endOfMessage: !more, ct);
+                        pool.Return(pending.Buf);
+                        budget.Release(pending.Len);
+                        windowBytes += pending.Len;
+                        if (!more) break;
+                        pending = next;
+                    }
+                }
+                finally { _sendLock.Release(); }
+
+                if (window.ElapsedMilliseconds >= 1000)
+                {
+                    if (budget.Queued > 0) // backlogged for this window: the link, not the host, set the pace
+                    {
+                        var rate = windowBytes / window.Elapsed.TotalSeconds;
+                        drainRate = drainRate == 0 ? rate : drainRate * 0.7 + rate * 0.3;
+                        budget.Limit = (long)Math.Clamp(drainRate * QueueSeconds, QueueFloorBytes, QueueCeilingBytes);
+                    }
+                    windowBytes = 0;
+                    window.Restart();
+                }
+            }
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { _logger.LogError(ex, "RDP relay: host→ws writer FAILED"); }
         finally { try { await reader; } catch { } }
+    }
+
+    /// <summary>
+    /// Byte-based back-pressure between the relay's reader and writer (single producer, single
+    /// consumer). The reader may always enqueue into an empty queue, so one chunk can exceed the limit.
+    /// </summary>
+    private sealed class SendBudget
+    {
+        private long _queued;
+        private int _waiting;
+        private readonly SemaphoreSlim _freed = new(0);
+        public long Limit;
+
+        public SendBudget(long limit) => Limit = limit;
+        public long Queued => Interlocked.Read(ref _queued);
+
+        public async ValueTask ReserveAsync(int bytes, CancellationToken ct)
+        {
+            while (Full(bytes))
+            {
+                Interlocked.Exchange(ref _waiting, 1);
+                // Re-check after announcing ourselves: the writer may have drained in between, and it
+                // only signals while someone is waiting.
+                if (!Full(bytes)) { Interlocked.Exchange(ref _waiting, 0); break; }
+                await _freed.WaitAsync(ct);
+            }
+            Interlocked.Add(ref _queued, bytes);
+        }
+
+        public void Release(int bytes)
+        {
+            Interlocked.Add(ref _queued, -bytes);
+            if (Interlocked.Exchange(ref _waiting, 0) == 1) _freed.Release();
+        }
+
+        private bool Full(int bytes)
+        {
+            var q = Interlocked.Read(ref _queued);
+            return q > 0 && q + bytes > Interlocked.Read(ref Limit);
+        }
     }
 
     private async Task PumpWsToSslAsync(Stream ssl, CancellationToken ct)
@@ -425,22 +523,27 @@ public sealed class RdpRelaySession
             _host, _port, violation.Feature, violation.Channel);
     }
 
-    // Periodically re-measures the gateway→host RTT leg over the session's own transport path (direct
-    // TCP or connector tunnel — a timed throwaway connect either way; RDP offers no client-initiated
-    // in-band probe, MS-RDPBCGR auto-detect is strictly server-initiated). The browser's quality worker
-    // reads the latest sample via the /ws/rdp-quality endpoint and adds its own browser↔gateway RTT to
-    // show end-to-end latency. 15s cadence keeps the probe connects negligible next to the session.
+    // Periodically re-measures the gateway→host RTT leg. The browser's quality worker reads the latest
+    // sample via the /ws/rdp-quality endpoint and adds its own browser↔gateway RTT to show end-to-end
+    // latency. On a direct TCP path the kernel's RTT estimate for the live session socket is read every
+    // few seconds at no cost. Otherwise (connector tunnel, or a platform without TCP_INFO) the fallback
+    // is a timed throwaway connect over the same path — RDP offers no client-initiated in-band probe —
+    // kept to once a minute because each one is a real connection attempt the host logs.
+    private static readonly TimeSpan LiveRttInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan ProbeRttInterval = TimeSpan.FromSeconds(60);
+
     private async Task SampleHostRttAsync(CancellationToken ct)
     {
-        var transport = _hostTransport ?? new DirectTcpTransport(_logger);
         try
         {
             while (!ct.IsCancellationRequested)
             {
-                var rtt = await transport.ProbeRttAsync(_host, _port, ct);
+                var rtt = _hostTransport.LiveRtt;
+                var live = rtt != null;
+                if (!live) rtt = await _hostTransport.ProbeRttAsync(_host, _port, ct);
                 Interlocked.Exchange(ref _hostRttMicros,
                     rtt is { } r ? (long)(r.TotalMilliseconds * 1000) : -1);
-                await Task.Delay(TimeSpan.FromSeconds(15), ct);
+                await Task.Delay(live ? LiveRttInterval : ProbeRttInterval, ct);
             }
         }
         catch (OperationCanceledException) { }
@@ -471,7 +574,9 @@ public sealed class RdpRelaySession
         var bytes = JsonSerializer.SerializeToUtf8Bytes(payload);
         try
         {
-            await _ws.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct);
+            await _sendLock.WaitAsync(ct);
+            try { await _ws.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct); }
+            finally { _sendLock.Release(); }
         }
         catch (Exception ex)
         {

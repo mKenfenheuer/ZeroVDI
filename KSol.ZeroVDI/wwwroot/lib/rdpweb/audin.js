@@ -57,8 +57,27 @@ function AinWriter() { this.b = []; }
 AinWriter.prototype.u8 = function (v) { this.b.push(v & 0xff); return this; };
 AinWriter.prototype.u16 = function (v) { this.b.push(v & 0xff, (v >> 8) & 0xff); return this; };
 AinWriter.prototype.u32 = function (v) { this.b.push(v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff); return this; };
-AinWriter.prototype.bytes = function (a) { for (let i = 0; i < a.length; i++) this.b.push(a[i] & 0xff); return this; };
-AinWriter.prototype.arr = function () { return new Uint8Array(this.b); };
+// Bulk payloads (camera frames / mic PCM) are spliced in natively at arr() instead of pushed byte by
+// byte; the small header fields before them stay in the array.
+AinWriter.prototype.bytes = function (a) {
+    if (a.length < 64) { for (let i = 0; i < a.length; i++) this.b.push(a[i] & 0xff); return this; }
+    (this._tail || (this._tail = [])).push({ at: this.b.length, data: a instanceof Uint8Array ? a : Uint8Array.from(a) });
+    return this;
+};
+AinWriter.prototype.arr = function () {
+    if (!this._tail) return new Uint8Array(this.b);
+    // Rebuild: header bytes in this.b, with each bulk chunk spliced in at the position it was written.
+    let size = this.b.length;
+    for (const t of this._tail) size += t.data.length;
+    const out = new Uint8Array(size);
+    let src = 0, dst = 0;
+    for (const t of this._tail) {
+        for (; src < t.at; src++) out[dst++] = this.b[src];
+        out.set(t.data, dst); dst += t.data.length;
+    }
+    for (; src < this.b.length; src++) out[dst++] = this.b[src];
+    return out;
+};
 
 // Serialize one WAVEFORMATEX ([MS-RDPEAI] AUDIO_FORMAT, identical to MS-RDPEA): PCM, no extra data.
 function ainSerializeFormat(f) {

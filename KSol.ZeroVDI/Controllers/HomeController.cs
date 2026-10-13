@@ -107,6 +107,24 @@ public class HomeController : Controller
     }
 
     /// <summary>
+    /// Current power state of every resource the user can access, so the dashboard can refresh its
+    /// badges in place instead of showing whatever was true when the page was rendered.
+    /// </summary>
+    [HttpGet]
+    [ResponseCache(Duration = 0, Location = ResponseCacheLocation.None, NoStore = true)]
+    public async Task<IActionResult> PowerStates()
+    {
+        var userId = _userManager.GetUserId(User);
+        if (userId == null) return Unauthorized();
+        var resourceIds = await _access.AccessibleResourceIdsAsync(userId);
+        var states = await _context.RDPResources.AsNoTracking()
+            .Where(r => resourceIds.Contains(r.Id))
+            .Select(r => new { r.Id, r.PowerState })
+            .ToListAsync();
+        return Json(states.ToDictionary(s => s.Id, s => s.PowerState.ToString().ToLowerInvariant()));
+    }
+
+    /// <summary>
     /// In-browser RDP console page for an authorized resource. Renders the HTML5 client that connects
     /// to the WebSocket relay (<c>/ws/rdp/{id}</c>).
     /// </summary>

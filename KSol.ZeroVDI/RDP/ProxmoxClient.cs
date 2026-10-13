@@ -7,6 +7,9 @@ namespace KSol.ZeroVDI.RDP;
 /// <summary>A VM as listed by the Proxmox cluster resources endpoint.</summary>
 public record ProxmoxVm(int VmId, string Node, string Name, string Status);
 
+/// <summary>A VM's state as <c>cluster/resources</c> reports it (see <see cref="ProxmoxClient.GetVmStatesAsync"/>).</summary>
+public record ProxmoxVmState(string Status, string? Lock);
+
 /// <summary>
 /// Minimal Proxmox VE REST client. Each call targets a specific <see cref="ProxmoxBackend"/> and
 /// authenticates with that backend's API token
@@ -472,6 +475,39 @@ public class ProxmoxClient
     }
 
     /// <summary>Returns the qmpstatus ("running", "stopped", "suspended", ...) for a VM, or null.</summary>
+    /// <summary>
+    /// The power state of every QEMU VM in the backend's cluster in ONE request (<c>cluster/resources</c>),
+    /// keyed by VMID (unique cluster-wide). <c>Status</c> is running/stopped; a hibernated VM is stopped
+    /// with <c>Lock</c> "suspended". A VM paused in RAM still reads "running" here — only
+    /// <see cref="GetStatusAsync"/>'s qmpstatus tells it apart. Null if the backend is unreachable.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<int, ProxmoxVmState>?> GetVmStatesAsync(ProxmoxBackend backend, CancellationToken ct = default)
+    {
+        using var client = CreateClient(backend);
+        if (client == null) return null;
+        try
+        {
+            using var doc = await GetJsonAsync(client, "cluster/resources?type=vm", ct);
+            if (doc == null) return null;
+            var states = new Dictionary<int, ProxmoxVmState>();
+            foreach (var item in doc.RootElement.GetProperty("data").EnumerateArray())
+            {
+                if (item.TryGetProperty("type", out var type) && type.GetString() != "qemu") continue;
+                var vmid = item.TryGetProperty("vmid", out var v) ? v.GetInt32() : 0;
+                if (vmid == 0) continue;
+                var status = item.TryGetProperty("status", out var st) ? st.GetString() ?? "" : "";
+                var lck = item.TryGetProperty("lock", out var l) ? l.GetString() : null;
+                states[vmid] = new ProxmoxVmState(status, lck);
+            }
+            return states;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Proxmox[{Backend}]: failed to read VM states", backend.Name);
+            return null;
+        }
+    }
+
     public async Task<string?> GetStatusAsync(ProxmoxBackend backend, string node, int vmid, CancellationToken ct = default)
     {
         using var client = CreateClient(backend);

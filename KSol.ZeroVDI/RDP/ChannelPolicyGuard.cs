@@ -236,33 +236,39 @@ public sealed class ChannelPolicyGuard
     {
         if (chan.Length < 8) return null;
         uint flags = (uint)(chan[4] | (chan[5] << 8) | (chan[6] << 16) | (chan[7] << 24));
-        var chunk = chan.Slice(8).ToArray();
+        ReadOnlySpan<byte> chunk = chan.Slice(8);
         var st = c2s ? _svcC2S : _svcS2C;
 
         if ((flags & CHANNEL_PACKET_COMPRESSED) != 0)
         {
+            // Compressed data must always be inflated: MPPC's history spans packets.
             int type = (int)((flags & 0x000F0000) >> 16);
             if (type > 1) throw new InvalidDataException("unsupported bulk compression type " + type);
             var mppc = type == 1 ? (st.Mppc64 ??= new Mppc(1)) : (st.Mppc8 ??= new Mppc(0));
             int mflags = Mppc.PACKET_COMPRESSED
                 | ((flags & CHANNEL_PACKET_AT_FRONT) != 0 ? Mppc.PACKET_AT_FRONT : 0)
                 | ((flags & CHANNEL_PACKET_FLUSHED) != 0 ? Mppc.PACKET_FLUSHED : 0);
-            chunk = mppc.Decompress(chunk, mflags) ?? throw new InvalidDataException("MPPC inflate failed");
+            chunk = mppc.Decompress(chunk.ToArray(), mflags) ?? throw new InvalidDataException("MPPC inflate failed");
         }
 
         bool first = (flags & CHANNEL_FLAG_FIRST) != 0, last = (flags & CHANNEL_FLAG_LAST) != 0;
-        byte[]? msg;
+        // Only DYNVC CREATE messages matter, and the command sits in a message's first byte. drdynvc also
+        // carries the whole GFX picture stream, so look at that byte before copying or reassembling
+        // anything — everything else is skipped without an allocation.
+        if (first && (chunk.Length == 0 || (chunk[0] >> 4) != 0x01 /* CREATE */)) { st.Parts = null; return null; }
+        ReadOnlySpan<byte> msg;
         if (first && last) msg = chunk;
-        else if (first) { st.Parts = new List<byte>(chunk); msg = null; }
-        else if (st.Parts == null) msg = null;
+        else if (first) { st.Parts = new List<byte>(chunk.ToArray()); return null; }
+        else if (st.Parts == null) return null;
         else
         {
-            st.Parts.AddRange(chunk);
-            if (st.Parts.Count > MaxSvcMessage) { st.Parts = null; msg = null; }
-            else if (last) { msg = st.Parts.ToArray(); st.Parts = null; }
-            else msg = null;
+            st.Parts.AddRange(chunk.ToArray());
+            if (st.Parts.Count > MaxSvcMessage) { st.Parts = null; return null; }
+            if (!last) return null;
+            msg = st.Parts.ToArray();
+            st.Parts = null;
         }
-        if (msg == null || msg.Length < 2) return null;
+        if (msg.Length < 2) return null;
 
         byte hdr = msg[0];
         int cmd = hdr >> 4, cbId = hdr & 0x3;
@@ -281,7 +287,7 @@ public sealed class ChannelPolicyGuard
         {
             // Host → client: DYNVC_CREATE_REQ carries the channel name.
             int end = o; while (end < msg.Length && msg[end] != 0) end++;
-            var name = Encoding.ASCII.GetString(msg, o, end - o);
+            var name = Encoding.ASCII.GetString(msg.Slice(o, end - o));
             _dvcNames[channelId] = name;
             return null;
         }

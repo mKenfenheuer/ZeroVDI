@@ -38,8 +38,11 @@ const CLIENT_PCM_FORMATS = [
     { rate: 22050, bits: 16, channels: 1 },
 ];
 
-// Quality mode ([MS-RDPEA] 2.2.2.10) — HIGH_QUALITY favours fidelity over bandwidth (fine for LAN).
-const HIGH_QUALITY = 0x0002;
+// Quality mode ([MS-RDPEA] 2.2.2.10). DYNAMIC_QUALITY lets the server pick the format from the network
+// conditions it measures (wave-confirm timing), dropping to a lower sample rate on a slow link.
+// HIGH_QUALITY pinned the best format (44.1 kHz stereo PCM, ~1.4 Mbit/s whenever sound plays) even on
+// a link that couldn't carry it, which stole bandwidth from the picture and made the audio stutter.
+const DYNAMIC_QUALITY = 0x0000;
 
 // transport.send(payload Uint8Array) ships the payload on the rdpsnd MCS channel (CHANNEL_PDU_HEADER
 // is added by protocol.js). callbacks: { onLog(msg), onWave(format, pcmUint8Array), onFormats(list) }.
@@ -164,7 +167,7 @@ RdpSnd.prototype._onServerFormats = function (body) {
 
     // Quality Mode PDU ([MS-RDPEA] 2.2.2.10) — must follow the formats PDU.
     const q = new SndWriter();
-    q.u16(HIGH_QUALITY);     // wQualityMode
+    q.u16(DYNAMIC_QUALITY);  // wQualityMode
     q.u16(0);                // Reserved
     this._sendPdu(SNDC_QUALITYMODE, q.arr());
 };

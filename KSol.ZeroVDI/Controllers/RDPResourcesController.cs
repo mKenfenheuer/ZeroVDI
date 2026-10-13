@@ -331,15 +331,7 @@ namespace KSol.ZeroVDI.Controllers
                 };
                 if (resource.DefaultConnectionDefaults != null)
                 {
-                    auth.ConnectionDefaults = new ConnectionDefaults
-                    {
-                        Audio = resource.DefaultConnectionDefaults.Audio,
-                        Clipboard = resource.DefaultConnectionDefaults.Clipboard,
-                        Microphone = resource.DefaultConnectionDefaults.Microphone,
-                        Camera = resource.DefaultConnectionDefaults.Camera,
-                        GfxMode = resource.DefaultConnectionDefaults.GfxMode,
-                        PerformanceFlags = resource.DefaultConnectionDefaults.PerformanceFlags,
-                    };
+                    auth.ConnectionDefaults = resource.DefaultConnectionDefaults.Clone();
                 }
                 _context.RDPResourceUserAuthorizations.Add(auth);
                 await _context.SaveChangesAsync();

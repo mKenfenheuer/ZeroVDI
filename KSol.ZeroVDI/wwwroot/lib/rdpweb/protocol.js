@@ -66,30 +66,40 @@ function rdpGfxMode() {
 function rdpTryGfx() { return rdpGfxMode() !== "off"; }
 
 // ---- small byte writer (grows automatically; big-endian/little-endian helpers) -------------------
-function ByteWriter() {
-    this._bytes = [];
+// Backed by a growable Uint8Array: bulk payloads (camera frames, mic audio, DVC chunks) are copied with
+// one native set() instead of a JS array push per byte — a 640x480 camera frame is ~460 KB and passes
+// through several writers (sample → DVC → MCS → TPKT) on its way out.
+function ByteWriter(capacity) {
+    this._buf = new Uint8Array(capacity || 64);
+    this._len = 0;
 }
-ByteWriter.prototype.u8 = function (v) { this._bytes.push(v & 0xff); return this; };
-ByteWriter.prototype.u16le = function (v) { this._bytes.push(v & 0xff, (v >> 8) & 0xff); return this; };
-ByteWriter.prototype.u16be = function (v) { this._bytes.push((v >> 8) & 0xff, v & 0xff); return this; };
-ByteWriter.prototype.u32le = function (v) {
-    this._bytes.push(v & 0xff, (v >> 8) & 0xff, (v >> 16) & 0xff, (v >> 24) & 0xff); return this;
+ByteWriter.prototype._room = function (n) {
+    if (this._len + n <= this._buf.length) return;
+    let cap = this._buf.length * 2;
+    while (cap < this._len + n) cap *= 2;
+    const next = new Uint8Array(cap);
+    next.set(this._buf.subarray(0, this._len));
+    this._buf = next;
 };
-ByteWriter.prototype.u32be = function (v) {
-    this._bytes.push((v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff); return this;
-};
+ByteWriter.prototype.u8 = function (v) { this._room(1); this._buf[this._len++] = v & 0xff; return this; };
+ByteWriter.prototype.u16le = function (v) { return this.u8(v).u8(v >> 8); };
+ByteWriter.prototype.u16be = function (v) { return this.u8(v >> 8).u8(v); };
+ByteWriter.prototype.u32le = function (v) { return this.u8(v).u8(v >> 8).u8(v >> 16).u8(v >> 24); };
+ByteWriter.prototype.u32be = function (v) { return this.u8(v >> 24).u8(v >> 16).u8(v >> 8).u8(v); };
 ByteWriter.prototype.bytes = function (arr) {
     const a = (arr instanceof Uint8Array) ? arr : new Uint8Array(arr);
-    for (let i = 0; i < a.length; i++) this._bytes.push(a[i]);
+    this._room(a.length);
+    this._buf.set(a, this._len);
+    this._len += a.length;
     return this;
 };
-ByteWriter.prototype.zeros = function (n) { for (let i = 0; i < n; i++) this._bytes.push(0); return this; };
+ByteWriter.prototype.zeros = function (n) { this._room(n); this._buf.fill(0, this._len, this._len + n); this._len += n; return this; };
 ByteWriter.prototype.utf16le = function (s) {
-    for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); this._bytes.push(c & 0xff, (c >> 8) & 0xff); }
+    for (let i = 0; i < s.length; i++) this.u16le(s.charCodeAt(i));
     return this;
 };
-ByteWriter.prototype.length = function () { return this._bytes.length; };
-ByteWriter.prototype.toArray = function () { return new Uint8Array(this._bytes); };
+ByteWriter.prototype.length = function () { return this._len; };
+ByteWriter.prototype.toArray = function () { return this._buf.slice(0, this._len); };
 
 // ---- byte reader over a Uint8Array (little-endian RDP fields) -------------------------------------
 function ByteReader(u8) { this.b = u8; this.o = 0; }
@@ -443,8 +453,9 @@ function clientCoreData(selectedProtocol, width, height, desktopScaleFactor, key
     // (suspected trigger for a 2nd RESET_GRAPHICS). DYNVC_GFX(0x100) + prereqs stay set.
     w.u16le(gfx ? 0x07AF : 0x0001);
     w.zeros(64);         // clientDigProductId[64]
-    // connectionType: MUST be 0 unless VALID_CONNECTION_TYPE is set. The macOS app sends 0x07
-    // (CONNECTION_TYPE_LAN); match it (was 0x06 AUTODETECT). VALID_CONNECTION_TYPE (0x20) is set.
+    // connectionType: MUST be 0 unless VALID_CONNECTION_TYPE is set. 0x07 = CONNECTION_TYPE_AUTODETECT
+    // (0x06 would be LAN), as the macOS app sends: the host then runs network auto-detect and tunes
+    // the session to the measured link instead of assuming a LAN. VALID_CONNECTION_TYPE (0x20) is set.
     w.u8(gfx ? 0x07 : 0x00);
     w.u8(0x00);          // pad
     w.u32le(selectedProtocol >>> 0); // serverSelectedProtocol
@@ -1398,14 +1409,14 @@ RdpProtocol.prototype._handleAutoDetect = function (r) {
     const seq = r.u16le();
     const requestType = r.u16le();
     if (headerTypeId !== 0x00) return true;
-    this._onAutoDetectRequest(seq, requestType);
+    this._onAutoDetectRequest(seq, requestType, r);
     return true;
 };
 
 // Respond to a single Network Auto-Detect Request. We implement the connect-time RTT + bandwidth
 // measurement exchange ([MS-RDPBCGR] 2.2.14.1): RTT requests get an RTT response; a Bandwidth-Stop
 // gets a Bandwidth-Measure-Results; Start/Payload/NetChar-Results need no reply.
-RdpProtocol.prototype._onAutoDetectRequest = function (seq, requestType) {
+RdpProtocol.prototype._onAutoDetectRequest = function (seq, requestType, r) {
     // requestType values per [MS-RDPBCGR] 2.2.14.1.* (and FreeRDP autodetect.c).
     const RTT_CONTINUOUS = 0x0001, RTT_CONNECTTIME = 0x1001;
     const BW_START_CONTINUOUS = 0x0014, BW_START_TUNNEL = 0x0114, BW_START_CONNECTTIME = 0x1014;
@@ -1431,14 +1442,29 @@ RdpProtocol.prototype._onAutoDetectRequest = function (seq, requestType) {
     }
     if (requestType === BW_STOP_CONNECTTIME || requestType === BW_STOP_CONTINUOUS || requestType === BW_STOP_TUNNEL) {
         const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
-        const delta = Math.max(0, Math.round(now - (this._bwStart || now)));
+        // At least 1ms: on a fast LAN the whole burst can land within one timer tick, and a zero
+        // timeDelta leaves the host dividing by zero when it derives the bandwidth.
+        const delta = Math.max(1, Math.round(now - (this._bwStart || now)));
         const respType = (requestType === BW_STOP_CONTINUOUS) ? BW_RESULTS_CONTINUOUS : BW_RESULTS_CONNECTTIME;
         //this._log("RDP: auto-detect bandwidth-measure stop (seq " + seq + ", " + delta + "ms, " + (this._bwBytes || 0) + "B)");
         this._sendAutoDetectBwResults(seq, respType, delta, this._bwBytes || 0);
         this._bwStart = null;
         return;
     }
-    // NetChar Results (0x0840/0x0880/0x08C0) and anything else: informational, no response required.
+    // Network Characteristics Result ([MS-RDPBCGR] 2.2.14.1.5): the HOST's own verdict on the link to us
+    // (it measured RTT/bandwidth over the whole path, browser included). No reply is due, but the values
+    // are the best throughput figure available, so hand them to the UI's quality indicator.
+    //   0x0840: baseRTT, averageRTT    0x0880: bandwidth, averageRTT    0x08C0: baseRTT, bandwidth, averageRTT
+    if ((requestType === 0x0840 || requestType === 0x0880 || requestType === 0x08C0) && r) {
+        const nc = {};
+        if (r.remaining() < (requestType === 0x08C0 ? 12 : 8)) return; // truncated PDU
+        if (requestType === 0x0840) { nc.baseRtt = r.u32le(); nc.averageRtt = r.u32le(); }
+        else if (requestType === 0x0880) { nc.bandwidthKbps = r.u32le(); nc.averageRtt = r.u32le(); }
+        else { nc.baseRtt = r.u32le(); nc.bandwidthKbps = r.u32le(); nc.averageRtt = r.u32le(); }
+        if (this.cb.onNetChar) this.cb.onNetChar(nc);
+        return;
+    }
+    // Anything else: informational, no response required.
     //this._log("RDP: auto-detect request type 0x" + requestType.toString(16) + " (no reply)");
 };
 

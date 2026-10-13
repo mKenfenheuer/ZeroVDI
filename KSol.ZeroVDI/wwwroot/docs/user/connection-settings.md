@@ -10,12 +10,16 @@ settings. Your choices are remembered for next time.
 
 > Pools don't have per-desktop settings here — they use the defaults your administrator configured.
 
+You can also change the settings while connected: click the **gear icon** in the session bar at the
+top of the screen, adjust the options and click **Apply & reconnect**. The desktop reconnects in a
+moment and you stay signed in. Leave **Use these settings next time too** ticked to keep them.
+
 ## What each option does
 
 | Option | What it controls |
 |---|---|
 | **Audio** | Plays sound from the remote desktop through your speakers. |
-| **Clipboard** | Lets you copy and paste text between your computer and the remote desktop. |
+| **Clipboard** | Lets you copy and paste text between your computer and the remote desktop. In Chrome and Edge you can turn on automatic sync in the clipboard panel; otherwise use the panel to send and copy text. |
 | **Microphone** | Makes your microphone available inside the session (e.g. for calls). |
 | **Camera** | Makes your webcam available inside the session. |
 | **Graphics mode** | How the screen is sent to your browser. Leave on the default unless you have a reason to change it. If your browser cannot decode H.264 video, ZeroVDI switches to RemoteFX Progressive by itself. |

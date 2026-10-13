@@ -46,4 +46,10 @@ public class ConnectionDefaults
     /// themes, window drag, menu animations, cursor shadow and cursor blink are all kept).
     /// </summary>
     public int PerformanceFlags { get; set; } = 0x80 | 0x100;
+
+    /// <summary>
+    /// An independent copy of every option. Use this instead of copying fields by hand — hand-written
+    /// copies silently dropped <see cref="HiDpi"/> when it was added.
+    /// </summary>
+    public ConnectionDefaults Clone() => (ConnectionDefaults)MemberwiseClone();
 }

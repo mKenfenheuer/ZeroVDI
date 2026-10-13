@@ -5,6 +5,69 @@ All notable changes to ZeroVDI are recorded here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **HiDPI no longer doubles on reconnect.** After a network drop the console re-derived the session
+  scale from `devicePixelRatio`, ignoring the HiDPI choice: a 200 % session came back with the UI twice
+  as large. The reconnect now reuses the session's HiDPI decision and resolution.
+- **Saved HiDPI preference was ignored.** The console, the dashboard settings dialog and both admin
+  "grant access" paths copied connection defaults field by field and dropped HiDPI. Defaults are now
+  copied with `ConnectionDefaults.Clone()`; the dashboard dialog shows and saves HiDPI.
+- **Turning HiDPI on after a non-HiDPI session had no effect** until the page was reloaded.
+- **Sessions failed when the device policy disables audio.** The console always requested the sound
+  channel, which the gateway's policy guard refuses. It is now requested only when sound (or the
+  microphone, which hosts gate on it) is on and the policy allows it. With sound off, no audio is
+  streamed any more.
+- **Running VMs showed as "Starting…".** The status probe only checked the RDP port after a successful
+  ping, and Windows blocks ping by default. The port is now probed independently, through connectors
+  where needed. A live session counts as Running, and one missed probe no longer downgrades a running
+  desktop. The dashboard refreshes the badges every 15 s instead of showing the state from page load.
+- **Throughput was under-reported on distant links.** The speed test counted the round trip as
+  transfer time (256 KB at 100 Mbit/s over 50 ms RTT read as ~29 Mbit/s). It now subtracts the latency
+  floor, sizes the burst to the measured link (64 KB–4 MB, at most one per 5 s per socket) and starts a
+  few seconds after connect. RTT is a 5-sample median and the quality level changes only after two
+  agreeing samples, so the indicator no longer flickers.
+- **A failed first connect started the auto-reconnect loop** on top of the login form.
+
+### Performance
+- **Less lag on slow links.** The gateway's host→browser queue is bounded in bytes and sized to ~0.5 s
+  of the measured browser drain rate (1 MB floor so a large frame never stalls the host, 4 MB ceiling),
+  instead of a fixed 256 chunks (~4 MB, i.e. ~16 s of backlog on a 2 Mbit/s link). Queued chunks go out
+  as one WebSocket message, and reads use pooled buffers instead of a copy per read.
+- **Remote audio adapts to the link.** The client now asks for dynamic audio quality, so the host picks a
+  lower PCM rate on slow links instead of always streaming 44.1 kHz stereo (~1.4 Mbit/s).
+- **Gateway→host latency without probe connections.** On a direct TCP path it is read from the kernel
+  (`TCP_INFO` / `SIO_TCP_INFO`) for the live session socket every 5 s. The timed-connect fallback
+  (connector paths) runs once a minute instead of every 15 s — each probe is a logged connection attempt
+  on the host.
+- **One Proxmox request per backend per status scan** (`cluster/resources`) instead of one per VM. The
+  per-VM call is only made to tell a VM paused in RAM from one that is booting.
+- **Camera:** frames are produced only when the host asks for one (capped at its fps), scaled on the GPU
+  and converted to NV12 in a worker (`camera-worker.js`). The placeholder frame is converted once per
+  state rather than 30 times a second.
+- **Microphone** captures on the audio thread via an AudioWorklet (`mic-worklet.js`); the deprecated
+  ScriptProcessorNode remains as fallback.
+- **Outgoing packets** (camera frames, mic audio, DVC chunks) are assembled in typed arrays with native
+  copies instead of a JS array push per byte.
+- **Legacy bitmap mode:** a single lookup-table pass converts and flips each tile; wasm scratch buffers
+  and `ImageData` objects are reused.
+- **Device-policy guard** only copies and reassembles DVC create messages; the rest of the drdynvc
+  stream (the GFX picture data) is skipped without an allocation.
+- The speed test sends slices of one shared random block instead of allocating up to 4 MB per test.
+
+### Changed
+- **Auto-reconnect retries after 1 s**, then 2, 4, 8 and every 15 s (was a fixed 15 s first wait), and
+  retries immediately when the browser comes back online. Errors during the loop no longer abort it.
+- **Full screen covers the whole console**, so the session bar, clipboard and reconnect dialogs stay
+  usable. In Chromium the keyboard is locked in full screen: Esc, Alt+Tab and the Windows key go to
+  the remote desktop (hold Esc to leave).
+- **Session settings in the session bar** (gear icon): change display mode, HiDPI, visual quality and
+  devices, then apply with a quick reconnect. The Windows session stays signed in.
+- **Automatic clipboard sync** where the browser allows it (Chromium after a one-time permission):
+  local text is offered to the remote when you return to the tab; remote copies land on your clipboard.
+- The connection-quality tooltip also shows the desktop's own network measurement (RDP network
+  auto-detect). Sound, microphone and camera buttons are disabled with an explanation when the device
+  is off for the session; the clipboard button is hidden when clipboard sync is off.
+
 ---
 
 ## [0.6.44] — 2026-09-13 — Container hardening, CI gate and a test project (audit finding 10)

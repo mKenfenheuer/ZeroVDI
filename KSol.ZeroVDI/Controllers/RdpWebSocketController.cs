@@ -359,10 +359,15 @@ public class RdpWebSocketController : Controller
         }
     }
 
-    // Speed-test burst size: large enough that a fast link's transfer time is measurable above WebSocket
-    // framing/scheduling noise, small enough that running it every ~20s is negligible next to the RDP
-    // stream itself and can't be mistaken for a DoS payload.
-    private const int SpeedTestBurstBytes = 256 * 1024;
+    // Speed-test burst size. The worker asks for a size that takes ~250ms at the last measured rate (so
+    // fast links get a burst big enough to time accurately and slow links aren't saturated for seconds);
+    // the gateway clamps it and enforces a minimum spacing so the endpoint can't be used to pull bulk
+    // traffic out of the gateway.
+    private const int SpeedTestDefaultBytes = 256 * 1024;
+    private const int SpeedTestMinBytes = 64 * 1024;
+    private const int SpeedTestMaxBytes = 4 * 1024 * 1024;
+    private static readonly TimeSpan SpeedTestMinSpacing = TimeSpan.FromSeconds(5);
+    private static readonly byte[] SpeedTestPayload = System.Security.Cryptography.RandomNumberGenerator.GetBytes(SpeedTestMaxBytes);
 
     // GET /ws/rdp-quality/{sessionId}
     //
@@ -398,6 +403,7 @@ public class RdpWebSocketController : Controller
 
         var socket = await HttpContext.WebSockets.AcceptWebSocketAsync();
         var buffer = new byte[1024];
+        var lastSpeedTest = DateTime.MinValue;
         try
         {
             while (socket.State == System.Net.WebSockets.WebSocketState.Open)
@@ -410,7 +416,7 @@ public class RdpWebSocketController : Controller
                 var live = _sessions.Get(sessionId!);
                 if (live == null) break;
 
-                string type; double t; double? seq = null;
+                string type; double t; double? seq = null; int burstBytes = SpeedTestDefaultBytes;
                 try
                 {
                     using var doc = System.Text.Json.JsonDocument.Parse(buffer.AsMemory(0, result.Count));
@@ -420,20 +426,26 @@ public class RdpWebSocketController : Controller
                     if (!doc.RootElement.TryGetProperty("t", out var tEl)) continue;
                     t = tEl.GetDouble();
                     if (doc.RootElement.TryGetProperty("seq", out var seqEl)) seq = seqEl.GetDouble();
+                    if (doc.RootElement.TryGetProperty("bytes", out var bytesEl) && bytesEl.TryGetInt32(out var requested))
+                        burstBytes = Math.Clamp(requested, SpeedTestMinBytes, SpeedTestMaxBytes);
                 }
                 catch (System.Text.Json.JsonException) { continue; }
 
                 if (type == "speedtest")
                 {
+                    if (DateTime.UtcNow - lastSpeedTest < SpeedTestMinSpacing) continue;
+                    lastSpeedTest = DateTime.UtcNow;
                     // Sent as ONE binary frame so the worker's timer covers exactly the transfer, not
                     // JSON parsing overhead. The client echoes t/seq back over a follow-up ping to
                     // correlate; here we just prefix the frame with an 8-byte seq so small races between
                     // concurrent bursts (there aren't any today, but the wire format shouldn't assume it)
                     // can't be misattributed.
-                    var burst = new byte[8 + SpeedTestBurstBytes];
-                    BitConverter.TryWriteBytes(burst.AsSpan(0, 8), (long)(seq ?? 0));
-                    Random.Shared.NextBytes(burst.AsSpan(8));
-                    await socket.SendAsync(burst, System.Net.WebSockets.WebSocketMessageType.Binary, true, HttpContext.RequestAborted);
+                    // The payload is a slice of one shared random block (incompressible, so nothing on
+                    // the path can shrink it), sent as the second fragment of the same message.
+                    var prefix = new byte[8];
+                    BitConverter.TryWriteBytes(prefix, (long)(seq ?? 0));
+                    await socket.SendAsync(prefix, System.Net.WebSockets.WebSocketMessageType.Binary, false, HttpContext.RequestAborted);
+                    await socket.SendAsync(SpeedTestPayload.AsMemory(0, burstBytes), System.Net.WebSockets.WebSocketMessageType.Binary, true, HttpContext.RequestAborted);
                     continue;
                 }
 

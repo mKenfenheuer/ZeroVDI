@@ -574,11 +574,7 @@ namespace KSol.ZeroVDI.Controllers
                 // resource page's Grant behaviour so both entry points behave identically.
                 if (resource.DefaultConnectionDefaults is { } d)
                 {
-                    auth.ConnectionDefaults = new ConnectionDefaults
-                    {
-                        Audio = d.Audio, Clipboard = d.Clipboard, Microphone = d.Microphone,
-                        Camera = d.Camera, GfxMode = d.GfxMode, PerformanceFlags = d.PerformanceFlags,
-                    };
+                    auth.ConnectionDefaults = d.Clone();
                 }
                 _context.RDPResourceUserAuthorizations.Add(auth);
                 await _context.SaveChangesAsync();

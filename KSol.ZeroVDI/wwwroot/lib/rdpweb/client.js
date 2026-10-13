@@ -73,11 +73,6 @@ function Client(websocketURL, canvasID) {
     // non-graceful protocol close). On a drop we emit "reconnecting" instead of "closed" so the UI can
     // keep the last frame on screen and auto-retry; on an intentional close we emit "closed" as before.
     this._intentionalClose = false;
-    // Set for a frame-preserving auto-reconnect (network/protocol drop): tells deinitialize() to KEEP the
-    // established DPI scale + framebuffer resolution instead of resetting them, so the post-active
-    // initial-scale sequence doesn't re-apply the scale on top of the already-scaled framebuffer (which
-    // rendered the reconnected desktop at double size). Cleared once the session goes active again.
-    this._preserveScaleOnReconnect = false;
     // Keys currently held down on the remote (by e.code), released in bulk when the window loses focus.
     this._heldKeys = new Set();
     // Toggle-key mask (TS_SYNC_*) the host was last told about; -1 = never synced this session.
@@ -123,9 +118,6 @@ function Client(websocketURL, canvasID) {
 }
 
 Client.prototype.setStatusCallback = function (cb) { this.statusCb = cb; };
-// Call before a frame-preserving auto-reconnect connect() so the established scale/resolution is kept
-// across the teardown (see _preserveScaleOnReconnect). Ignored for a normal manual reconnect.
-Client.prototype.setPreserveScaleOnReconnect = function (v) { this._preserveScaleOnReconnect = !!v; };
 Client.prototype._status = function (status, message) { if (this.statusCb) this.statusCb(status, message); };
 
 // ---- connection quality (end-to-end RTT + throughput, sampled in quality-worker.js) ----------------
@@ -152,7 +144,7 @@ Client.prototype._startQualityProbe = function () {
             console.warn("quality worker unavailable:", e);
             return;
         }
-        this._qualityWorker.onmessage = function (e) { if (self.qualityCb) self.qualityCb(e.data); };
+        this._qualityWorker.onmessage = function (e) { self._lastQuality = e.data; self._publishQuality(); };
     }
     const url = new URL("/ws/rdp-quality/" + encodeURIComponent(this._gatewaySessionId), window.location.href);
     url.protocol = (window.location.protocol === "https:") ? "wss:" : "ws:";
@@ -166,6 +158,28 @@ Client.prototype._stopQualityProbe = function () {
         this._qualityWorker = null;
     }
     this._gatewaySessionId = null;
+    this._lastQuality = null;
+    this._hostNetChar = null;
+};
+
+// Merge the worker's measurements with the host's own Network Characteristics Result (from RDP network
+// auto-detect, see protocol.js) and hand them to the UI. The host's figure is measured end to end over
+// the real session path, so it is shown alongside the gateway speed test rather than replacing it.
+Client.prototype._onNetChar = function (nc) {
+    this._hostNetChar = Object.assign({}, this._hostNetChar || {}, nc);
+    this._publishQuality();
+};
+
+Client.prototype._publishQuality = function () {
+    if (!this.qualityCb) return;
+    const q = Object.assign({}, this._lastQuality || {});
+    const nc = this._hostNetChar;
+    if (nc) {
+        if (nc.bandwidthKbps) q.hostBandwidthKbps = nc.bandwidthKbps;
+        if (nc.averageRtt != null) q.hostMeasuredRtt = nc.averageRtt;
+    }
+    if (!this._lastQuality && !nc) return;
+    this.qualityCb(q);
 };
 
 // Sizes the canvas backing store to a desktop resolution that fills `wrapEl` in *device* pixels, so
@@ -175,7 +189,7 @@ Client.prototype._stopQualityProbe = function () {
 //
 // RDP desktop dimensions must be even (bitmap rows are 16bpp; widths are safest as multiples of 4),
 // and are clamped to the [MS-RDPBCGR] valid range (200..8192 px per axis for typical hosts).
-Client.prototype.chooseDesktopSize = function (wrapEl, hiDpi) {
+Client.prototype.chooseDesktopSize = function (wrapEl, hiDpi, fresh) {
     // Match the remote desktop resolution to the console panel size in DEVICE pixels (CSS × dpr), so the
     // host's framebuffer is 1:1 with the physical display — crisp, no browser upscaling. The display DPI
     // is ALSO carried as the RDP DesktopScaleFactor (see _scaleForSession / the CS_CORE handshake) so
@@ -187,12 +201,18 @@ Client.prototype.chooseDesktopSize = function (wrapEl, hiDpi) {
     // The flag is passed explicitly at connect (from the console popup) and remembered as _hiDpi so
     // later live resizes (requestResize/maybeResize, which call without it) reuse the session's choice.
     if (hiDpi === undefined) hiDpi = !!this._hiDpi;
+    // The canvas only tells us the panel's device-pixel ratio if the PREVIOUS session was HiDPI too: after
+    // a non-HiDPI session it measures 1:1, so turning HiDPI on for the next connect would have silently
+    // stayed at 1x. A fresh connect (`fresh`) also re-probes, so moving the window to another display
+    // between sessions picks up that display's ratio.
+    const measurable = !!this._hiDpi && !fresh;
+    if (hiDpi && !measurable) this._probedDpr = 0;
     this._hiDpi = !!hiDpi;
     // HiDPI is capped at 2x and at 4K: a 5K Retina panel at its native 2x would request a 5120x2880
     // desktop — four times the decode/composite work of 1440p per frame — for a sharpness gain no
     // current panel shows. The scale factor is derived from the ratio actually applied (scaleForSize),
     // so a capped resolution still gets a consistent DesktopScaleFactor.
-    const dpr = hiDpi ? Math.min(2, this.panelPixelRatio(wrapEl)) : 1;
+    const dpr = hiDpi ? Math.min(2, measurable ? this.panelPixelRatio(wrapEl) : this.probeDevicePixelRatio()) : 1;
     const cssW = Math.max(1, Math.floor(wrapEl.clientWidth));
     const cssH = Math.max(1, Math.floor(wrapEl.clientHeight));
     let w = Math.round(cssW * dpr);
@@ -294,6 +314,25 @@ Client.prototype.applyDesktopSize = function (wrapEl, size) {
     this._fit(wrapEl);
 };
 
+// Sizes the session for an automatic reconnect after a network drop. When the viewport is unchanged the
+// canvas is left alone — assigning canvas.width/height blanks it, and the last frame should stay visible
+// while we reconnect — but the session DPI scale is ALWAYS re-derived from the size we will request (the
+// session's HiDPI choice applied to the current panel). It used to be left at 0 and then re-read from
+// window.devicePixelRatio in connect(), which ignored HiDPI-off and doubled the remote UI (a 1x desktop
+// at 200%, or 200% stacked on a session that already ran at 200%). Returns true if the canvas resized.
+Client.prototype.prepareReconnect = function (wrapEl, hiDpi) {
+    const size = this.chooseDesktopSize(wrapEl, hiDpi);
+    if (size.width !== this.canvas.width || size.height !== this.canvas.height) {
+        this.applyDesktopSize(wrapEl, size);
+        return true;
+    }
+    this._wrapEl = wrapEl;
+    this._appliedW = size.width;
+    this._appliedH = size.height;
+    this._sessionScale = this.scaleForSize(size);
+    return false;
+};
+
 // Fits the canvas on screen. The backing store is the host's framebuffer size (the device-pixel
 // resolution from chooseDesktopSize). We scale that to FIT the wrapper while preserving aspect ratio
 // (letterbox) so it always fills the panel regardless of devicePixelRatio — the old "cssSize =
@@ -321,7 +360,11 @@ Client.prototype.connect = function (creds) {
 
     // _sessionScale was captured in applyDesktopSize (derived from the chosen native/logical ratio);
     // fall back to a fresh derivation here in case connect() is ever called without it.
-    if (!this._sessionScale) this._sessionScale = this.scaleForSize(null);
+    if (!this._sessionScale) this._sessionScale = this._hiDpi ? this.scaleForSize(null) : 100;
+
+    // A previous attempt may still be pending (an auto-reconnect retry while the last one hangs). Drop it
+    // with its handlers detached: its late onclose would otherwise run deinitialize() over THIS session.
+    this._dropSocket();
 
     const url = new URL(this.websocketURL, window.location.href);
     url.protocol = (window.location.protocol === "https:") ? "wss:" : "ws:";
@@ -369,6 +412,16 @@ Client.prototype.connect = function (creds) {
     this.socket.onclose = this.deinitialize;
 };
 
+// Abandon the current socket without running the teardown (no session was active on it).
+Client.prototype._dropSocket = function () {
+    const s = this.socket;
+    if (!s) return;
+    s.onclose = null; s.onerror = null; s.onmessage = null; s.onopen = null;
+    try { s.close(); } catch (e) { /* ignore */ }
+    this.socket = null;
+    this.proto = null;
+};
+
 Client.prototype._onControlFrame = function (text) {
     let msg;
     try { msg = JSON.parse(text); } catch (e) { console.warn("bad control frame:", text); return; }
@@ -398,6 +451,10 @@ Client.prototype._onControlFrame = function (text) {
             this.proto = null;
             this.connected = false;
             this._handshakeDone = false;
+            // The redirected leg is a brand-new RDP session: it needs its own initial monitor layout.
+            clearTimeout(this._scaleStepTimer);
+            this._scaleStep = undefined;
+            this._initialScaleApplied = false;
             // CRITICAL: detach the OLD socket's handlers before closing it. Otherwise its (possibly late)
             // onclose=deinitialize fires after we've started the reconnect and tears down the NEW session.
             var old = this.socket;
@@ -551,6 +608,7 @@ Client.prototype._startProtocol = function () {
         onClose: function (graceful, m) { self._onProtocolClose(graceful, m); },
         onLog: function (m) { if(window.RDP_LOG >= 1) console.log("rdp:", m); },
         onResize: function (w, h) { self._onRemoteResize(w, h); },
+        onNetChar: function (nc) { self._onNetChar(nc); },
         onDisplayControlReady: function () { self._displayControlReady = true; self._applyInitialScale(); },
         onAudio: function (fmt, pcm) { self._playPcm(fmt, pcm); },
         onMicOpen: function (fmt) { self._startMicCapture(fmt); },
@@ -716,38 +774,63 @@ Client.prototype._startMicCapture = function (fmt) {
         });
 };
 
-// Wire the capture stream through a ScriptProcessor that emits resampled 16-bit PCM each callback.
+// Wire the capture stream into a capture node that hands us mono Float32 blocks; each block is resampled
+// to the host's format and shipped (_onMicBlock). Prefers an AudioWorklet (mic-worklet.js), which
+// captures on the audio thread so a busy main thread can't drop audio; falls back to the deprecated
+// ScriptProcessorNode where AudioWorklet is unavailable.
+const RDP_MIC_WORKLET_URL = (typeof document !== "undefined" && document.currentScript && document.currentScript.src)
+    ? new URL("mic-worklet.js", document.currentScript.src).toString()
+    : "mic-worklet.js";
+
 Client.prototype._buildMicGraph = function (stream, fmt) {
     const self = this;
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
     // A dedicated capture context (separate from playback) so its rate/lifecycle is independent.
-    this._micCtx = new AC();
-    const src = this._micCtx.createMediaStreamSource(stream);
-    // 4096-frame buffer ≈ 85ms at 48kHz — low enough latency, large enough to be efficient. We resample
-    // from the context's native rate to fmt.rate in the callback.
-    const node = this._micCtx.createScriptProcessor(4096, 1, 1);
-    this._micNode = node;
-    this._micResampleFrac = 0; // fractional read position carried across callbacks for clean resampling
-
-    node.onaudioprocess = function (e) {
-        if (!self.proto || !self.proto.micFormat()) return; // channel closed
-        let input = e.inputBuffer.getChannelData(0);          // mono capture (Float32, -1..1)
-        // Muted → keep the stream flowing but silent. Dropping chunks entirely starves the host's
-        // capture pipeline (it can freeze/repeat the last audio); instead resample a zeroed block so we
-        // ship correctly-sized SILENT PCM at the same cadence as live audio.
-        if (self.micMuted) input = new Float32Array(input.length);
-        const inRate = self._micCtx.sampleRate;
-        const pcm = self._resampleToPcm(input, inRate, fmt);
-        if (pcm && pcm.length) self.proto.sendMicPcm(pcm);
-    };
-    src.connect(node);
-    // ScriptProcessor only fires while connected to the destination; route through a muted gain so we
+    const ctx = new AC();
+    this._micCtx = ctx;
+    this._micFmt = fmt;
+    this._micResampleFrac = 0; // fractional read position carried across blocks for clean resampling
+    const src = ctx.createMediaStreamSource(stream);
+    // Capture nodes only run while connected to the destination; route through a muted gain so we
     // don't echo the mic to the local speakers.
-    const sink = this._micCtx.createGain();
+    const sink = ctx.createGain();
     sink.gain.value = 0;
-    node.connect(sink);
-    sink.connect(this._micCtx.destination);
+    sink.connect(ctx.destination);
+
+    function useScriptProcessor() {
+        // 4096-frame buffer ≈ 85ms at 48kHz — low enough latency, large enough to be efficient.
+        const node = ctx.createScriptProcessor(4096, 1, 1);
+        node.onaudioprocess = function (e) { self._onMicBlock(e.inputBuffer.getChannelData(0)); };
+        self._micNode = node;
+        src.connect(node);
+        node.connect(sink);
+    }
+
+    if (!ctx.audioWorklet || typeof AudioWorkletNode === "undefined") { useScriptProcessor(); return; }
+    ctx.audioWorklet.addModule(RDP_MIC_WORKLET_URL).then(function () {
+        if (self._micCtx !== ctx) return; // capture stopped while the module loaded
+        const node = new AudioWorkletNode(ctx, "rdp-mic-capture", { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1 });
+        node.port.onmessage = function (e) { self._onMicBlock(e.data); };
+        self._micNode = node;
+        src.connect(node);
+        node.connect(sink);
+    }).catch(function (err) {
+        if (self._micCtx !== ctx) return;
+        console.warn("mic: AudioWorklet unavailable, using ScriptProcessor:", err);
+        useScriptProcessor();
+    });
+};
+
+// One captured mono block (Float32, -1..1) → resampled PCM to the host.
+Client.prototype._onMicBlock = function (input) {
+    if (!this.proto || !this.proto.micFormat() || !this._micCtx) return; // channel closed
+    // Muted → keep the stream flowing but silent. Dropping chunks entirely starves the host's capture
+    // pipeline (it can freeze/repeat the last audio); instead resample a zeroed block so we ship
+    // correctly-sized SILENT PCM at the same cadence as live audio.
+    if (this.micMuted) input = new Float32Array(input.length);
+    const pcm = this._resampleToPcm(input, this._micCtx.sampleRate, this._micFmt);
+    if (pcm && pcm.length) this.proto.sendMicPcm(pcm);
 };
 
 // Linearly resample a mono Float32 block from `inRate` to fmt.rate and quantize to interleaved PCM in
@@ -787,33 +870,37 @@ Client.prototype._resampleToPcm = function (input, inRate, fmt) {
 
 // Stop capturing and release the microphone (host closed the channel, or we disconnected).
 Client.prototype._stopMicCapture = function () {
-    if (this._micNode) { try { this._micNode.disconnect(); this._micNode.onaudioprocess = null; } catch (e) {} this._micNode = null; }
+    if (this._micNode) {
+        try {
+            this._micNode.disconnect();
+            this._micNode.onaudioprocess = null;
+            if (this._micNode.port) this._micNode.port.onmessage = null;
+        } catch (e) {}
+        this._micNode = null;
+    }
     if (this._micCtx) { try { this._micCtx.close(); } catch (e) {} this._micCtx = null; }
     if (this._micStream) { this._micStream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} }); this._micStream = null; }
     this._micResampleFrac = 0;
 };
 
 // ---- camera capture (getUserMedia video → NV12 frames upstream) ----------------------------------
-// The host started a camera stream at media type `mt` {width, height, fps}. We set up the capture
-// canvas + frame loop IMMEDIATELY (so the remote app always gets a steady feed) and acquire the webcam
-// in parallel. Until the webcam is live — or if it's paused, denied, or absent — the loop renders a
-// placeholder frame (camera/permission icon + explanatory text) instead of the live video. Each frame
-// is converted to NV12 so the host needs no decoder. The RDPECAM device handler pulls samples on demand
-// (_onCameraSampleNeeded), answered with the latest frame.
+// The host started a camera stream at media type `mt` {width, height, fps}. The RDPECAM device handler
+// PULLS samples (_onCameraSampleNeeded); each request is answered with one freshly captured frame, at
+// most mt.fps per second. Nothing is captured while the host isn't asking, so an idle camera channel
+// costs no CPU. Until the webcam is live — or if it's paused, denied, or absent — a placeholder frame
+// (camera/permission icon + explanatory text) is sent instead; it only changes with the camera state,
+// so it is rendered and converted once per state rather than on every frame. Live frames are scaled on
+// the GPU (createImageBitmap) and converted to NV12 in camera-worker.js, off the main thread; browsers
+// without OffscreenCanvas in workers fall back to converting here.
+const RDP_CAMERA_WORKER_URL = (typeof document !== "undefined" && document.currentScript && document.currentScript.src)
+    ? new URL("camera-worker.js", document.currentScript.src).toString()
+    : "camera-worker.js";
+
 Client.prototype._startCameraCapture = function (mt) {
     const self = this;
     this._camMt = mt;
-    // Capture canvas + loop are independent of whether a webcam stream exists, so placeholder frames
-    // can be produced from the very first SampleRequest. (Re)create only once.
-    if (!this._camCanvas) {
-        const canvas = document.createElement("canvas");
-        canvas.width = mt.width; canvas.height = mt.height;
-        this._camCanvas = canvas;
-        this._camCtx = canvas.getContext("2d", { willReadFrequently: true });
-        this._camLastFrame = null;
-        const fps = Math.max(1, Math.min(30, mt.fps || 15));
-        this._camTimer = setInterval(function () { self._captureCameraFrame(); }, Math.round(1000 / fps));
-    }
+    this._camGen = (this._camGen || 0) + 1; // invalidates conversions still in flight from a previous stream
+    if (this._camSamplePending) this._pumpCamera();
 
     if (this._camStream || this._camStarting) return; // webcam already acquired / acquiring
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -852,23 +939,107 @@ Client.prototype._startCameraCapture = function (mt) {
         });
 };
 
-// Draw the current source (live video, or a placeholder when paused/denied/absent/not-ready) to the
-// canvas and convert to NV12. Stored as the latest sample; if the host already asked, answer now.
+// Capture the next frame if the host is waiting for one, nothing is in flight, and the fps budget
+// allows it; otherwise re-arm for when it does.
+Client.prototype._pumpCamera = function () {
+    const mt = this._camMt;
+    if (!mt || !this._camSamplePending || this._camBusy || this._camWaitTimer) return;
+    const interval = 1000 / Math.max(1, Math.min(30, mt.fps || 15));
+    const wait = (this._camLastAt || 0) + interval - performance.now();
+    if (wait > 1) {
+        const self = this;
+        this._camWaitTimer = setTimeout(function () { self._camWaitTimer = 0; self._pumpCamera(); }, wait);
+        return;
+    }
+    this._camLastAt = performance.now();
+    this._captureCameraFrame();
+};
+
+Client.prototype._deliverCameraFrame = function (gen, nv12) {
+    this._camBusy = false;
+    if (gen !== this._camGen || !this._camMt || !nv12) { this._pumpCamera(); return; } // stream changed meanwhile
+    // A request that arrived while this frame was being made still needs its own (newer) frame.
+    this._camSamplePending = !!this._camMoreRequested;
+    this._camMoreRequested = false;
+    if (this.proto) this.proto.sendCameraFrame(nv12);
+    if (this._camSamplePending) this._pumpCamera();
+};
+
 Client.prototype._captureCameraFrame = function () {
-    if (!this._camCtx) return;
-    const cv = this._camCanvas;
-    const live = this._camVideo && this._camVideo.videoWidth && !this.cameraPaused && this._camState === "live";
-    if (live) {
-        this._camCtx.drawImage(this._camVideo, 0, 0, cv.width, cv.height);
-    } else {
-        this._drawCameraPlaceholder(this._camCtx, cv.width, cv.height);
+    const self = this, mt = this._camMt, gen = this._camGen;
+    const w = mt.width, h = mt.height;
+    const video = this._camVideo;
+    const live = video && video.videoWidth && !this.cameraPaused && this._camState === "live";
+    this._camBusy = true;
+
+    if (!live) {
+        // Placeholder: identical for a given state and size, so convert once and reuse.
+        const key = (this.cameraPaused ? "paused" : (this._camState || "off")) + ":" + w + "x" + h;
+        if (!this._camPlaceholder || this._camPlaceholder.key !== key) {
+            const ctx = this._cameraScratchCtx(w, h);
+            this._drawCameraPlaceholder(ctx, w, h);
+            this._camPlaceholder = { key: key, nv12: this._rgbaToNv12(ctx.getImageData(0, 0, w, h).data, w, h) };
+        }
+        this._deliverCameraFrame(gen, this._camPlaceholder.nv12);
+        return;
     }
-    const img = this._camCtx.getImageData(0, 0, cv.width, cv.height);
-    this._camLastFrame = this._rgbaToNv12(img.data, cv.width, cv.height);
-    if (this._camSamplePending && this.proto) {
-        this._camSamplePending = false;
-        this.proto.sendCameraFrame(this._camLastFrame);
+
+    const worker = this._cameraWorker();
+    if (worker && typeof createImageBitmap === "function") {
+        createImageBitmap(video, { resizeWidth: w, resizeHeight: h, resizeQuality: "low" })
+            .then(function (bitmap) {
+                const id = (self._camReqId = (self._camReqId || 0) + 1);
+                self._camReqGen = gen;
+                worker.postMessage({ id: id, bitmap: bitmap, width: w, height: h }, [bitmap]);
+            })
+            .catch(function () { self._captureCameraFrameInline(gen, video, w, h); });
+        return;
     }
+    this._captureCameraFrameInline(gen, video, w, h);
+};
+
+// Main-thread fallback (no worker/OffscreenCanvas support).
+Client.prototype._captureCameraFrameInline = function (gen, video, w, h) {
+    const ctx = this._cameraScratchCtx(w, h);
+    ctx.drawImage(video, 0, 0, w, h);
+    this._deliverCameraFrame(gen, this._rgbaToNv12(ctx.getImageData(0, 0, w, h).data, w, h));
+};
+
+Client.prototype._cameraScratchCtx = function (w, h) {
+    if (!this._camCanvas || this._camCanvas.width !== w || this._camCanvas.height !== h) {
+        this._camCanvas = document.createElement("canvas");
+        this._camCanvas.width = w; this._camCanvas.height = h;
+        this._camCtx = this._camCanvas.getContext("2d", { willReadFrequently: true });
+    }
+    return this._camCtx;
+};
+
+Client.prototype._cameraWorker = function () {
+    if (this._camWorker !== undefined) return this._camWorker;
+    this._camWorker = null;
+    if (typeof Worker === "undefined" || typeof OffscreenCanvas === "undefined") return null;
+    try {
+        const self = this;
+        const worker = new Worker(RDP_CAMERA_WORKER_URL);
+        worker.onmessage = function (e) {
+            const m = e.data;
+            if (m.id !== self._camReqId) return;
+            if (m.error) {
+                // This browser can't convert in a worker after all: use the main thread from now on.
+                console.warn("camera worker failed, converting on the main thread:", m.error);
+                self._camWorker = null;
+                worker.terminate();
+                self._camBusy = false;
+                self._pumpCamera();
+                return;
+            }
+            self._deliverCameraFrame(self._camReqGen, m.nv12);
+        };
+        this._camWorker = worker;
+    } catch (e) {
+        this._camWorker = null;
+    }
+    return this._camWorker;
 };
 
 // Render a placeholder frame explaining why there's no live video: a camera (or permission) glyph and
@@ -940,25 +1111,22 @@ Client.prototype._rgbaToNv12 = function (rgba, w, h) {
     return out;
 };
 
-// The RDPECAM device handler needs a frame. Answer with the latest captured frame if we have one;
-// otherwise mark a pending request that the next captured frame will satisfy.
+// The RDPECAM device handler needs a frame: capture one now (or as soon as the fps budget allows).
 Client.prototype._onCameraSampleNeeded = function (idx) {
-    if (this._camLastFrame && this.proto) {
-        const frame = this._camLastFrame;
-        this._camLastFrame = null; // one sample per captured frame (avoid resending a stale image)
-        this.proto.sendCameraFrame(frame);
-    } else {
-        this._camSamplePending = true;
-    }
+    if (this._camBusy) this._camMoreRequested = true;
+    this._camSamplePending = true;
+    this._pumpCamera();
 };
 
 // Stop capturing and release the webcam (host stopped the stream, or we disconnected).
 Client.prototype._stopCameraCapture = function () {
-    if (this._camTimer) { clearInterval(this._camTimer); this._camTimer = null; }
+    if (this._camWaitTimer) { clearTimeout(this._camWaitTimer); this._camWaitTimer = 0; }
+    this._camGen = (this._camGen || 0) + 1; // drop conversions still in flight
     if (this._camVideo) { try { this._camVideo.pause(); this._camVideo.srcObject = null; } catch (e) {} this._camVideo = null; }
     if (this._camStream) { this._camStream.getTracks().forEach(function (t) { try { t.stop(); } catch (e) {} }); this._camStream = null; }
-    this._camCanvas = null; this._camCtx = null; this._camLastFrame = null;
-    this._camSamplePending = false; this._camStarting = false; this._camState = null;
+    this._camCanvas = null; this._camCtx = null; this._camPlaceholder = null; this._camMt = null;
+    this._camSamplePending = false; this._camMoreRequested = false; this._camBusy = false;
+    this._camStarting = false; this._camState = null;
 };
 
 // ---- clipboard sync ------------------------------------------------------------------------------
@@ -1125,7 +1293,7 @@ Client.prototype._advanceScaleStep = function () {
 // change resolution, never scale — see _applyInitialScale for why re-reading dpr per resize is unsafe.
 Client.prototype._scaleForSession = function () {
     if (this._sessionScale) return this._sessionScale;
-    return this.desktopScaleForDpr(window.devicePixelRatio || 1);
+    return this._hiDpi ? this.desktopScaleForDpr(this.probeDevicePixelRatio()) : 100;
 };
 
 Client.prototype._onActive = function () {
@@ -1141,8 +1309,8 @@ Client.prototype._onActive = function () {
         return;
     }
     this.connected = true;
+    this._sessionWasActive = true;         // a later unexpected close is a drop worth reconnecting
     this._activeSince = performance.now(); // for maybeResize's settle guard
-    this._preserveScaleOnReconnect = false; // reconnect succeeded; a later drop re-arms it via the setter
     FF("session ACTIVE (_onActive)");
     this._status("ready", null);
     this._startQualityProbe();
@@ -1192,19 +1360,10 @@ Client.prototype.deinitialize = function () {
     // Stop any in-flight initial-scale sequence.
     clearTimeout(this._scaleStepTimer);
     this._scaleStep = undefined;
-    if (this._preserveScaleOnReconnect) {
-        // Frame-preserving auto-reconnect (network/protocol drop): the canvas keeps its device-pixel
-        // resolution and the host reconnects to that SAME resolution, so the DPI scale is already in
-        // effect. KEEP _sessionScale and mark the initial-scale sequence done so the post-active step
-        // machine does NOT re-send a monitor layout — re-applying the scale on top of an already-scaled
-        // framebuffer is what made the reconnected UI render at double size.
-        this._initialScaleApplied = true;
-    } else {
-        // Normal reconnect (manual login re-runs applyDesktopSize): reset so the DPI scale is re-derived
-        // and re-applied from scratch (otherwise _initialScaleApplied stays set → session stuck at 100%).
-        this._initialScaleApplied = false;
-        this._sessionScale = 0;
-    }
+    // Every new session re-derives its DPI scale (applyDesktopSize / prepareReconnect) and re-sends the
+    // initial monitor layout — the layout carries an absolute scale, so repeating it can't stack.
+    this._initialScaleApplied = false;
+    this._sessionScale = 0;
 
     this.connected = false;
 
@@ -1228,13 +1387,17 @@ Client.prototype.deinitialize = function () {
     //  - Network/protocol drop (WebSocket died mid-session, or a non-graceful protocol close): the
     //    desktop is probably still alive → emit "reconnecting" so the UI keeps the last frame and starts
     //    its own countdown + auto-retry loop. It re-drives connect() on this same Client to reconnect.
-    if (this._intentionalClose) {
+    //  - A connect that never reached an active session (gateway refused, host unreachable, a failed
+    //    reconnect attempt) is "closed" too: there is no live desktop to get back to, and the UI decides
+    //    whether to retry. Reporting it as "reconnecting" started a retry loop over the login form.
+    if (this._intentionalClose || !this._sessionWasActive) {
         // Surface why the session ended (host logoff/disconnect reason) if the protocol gave us one; the
         // UI shows it on the login form. Cleared after so a later manual reconnect/close starts clean.
         this._status("closed", this._closeReason || null);
     } else {
         this._status("reconnecting", this._closeReason || null);
     }
+    this._sessionWasActive = false;
     this._intentionalClose = false;
     this._closeReason = null;
     this._protocolClosed = false;
@@ -1312,55 +1475,98 @@ Client.prototype._dispatchUpdate = function (updateCode, header, payload) {
     // SYNCHRONIZE / ORDERS / SURFCMDS / PALETTE: not rendered in v1.
 };
 
+// RGB565 → RGBA lookup (65536 entries, little-endian packed A|B|G|R so one Uint32 store writes a pixel).
+// Built once; replaces a per-pixel function call with bit twiddling in the legacy bitmap path.
+let RGB565_TO_RGBA32 = null;
+function rgb565Lut() {
+    if (RGB565_TO_RGBA32) return RGB565_TO_RGBA32;
+    const lut = new Uint32Array(65536);
+    for (let pel = 0; pel < 65536; pel++) {
+        let r = (pel & 0xF800) >> 11, g = (pel & 0x7E0) >> 5, b = pel & 0x1F;
+        r = (r << 3) | (r >> 2); g = (g << 2) | (g >> 4); b = (b << 3) | (b >> 2);
+        lut[pel] = (0xFF000000 | (b << 16) | (g << 8) | r) >>> 0;
+    }
+    return (RGB565_TO_RGBA32 = lut);
+}
+
+// Bitmap rows arrive bottom-up as 16bpp RGB565. Convert straight into a top-down RGBA ImageData in a
+// single pass (the flip is just the destination row order) — no intermediate copies.
+function rgb565BottomUpToImage(src, w, h, img) {
+    const lut = rgb565Lut();
+    const out = new Uint32Array(img.data.buffer, img.data.byteOffset, w * h);
+    for (let y = 0; y < h; y++) {
+        let s = (h - 1 - y) * w * 2;
+        let d = y * w;
+        const end = d + w;
+        while (d < end) { out[d++] = lut[src[s] | (src[s + 1] << 8)]; s += 2; }
+    }
+}
+
+// Reused per-size ImageData (bitmap updates come in a handful of tile sizes, mostly 64x64).
+Client.prototype._bitmapImage = function (w, h) {
+    const cache = this._bitmapImages || (this._bitmapImages = new Map());
+    const key = w * 65536 + h;
+    let img = cache.get(key);
+    if (!img) {
+        if (cache.size >= 16) cache.clear();
+        img = new ImageData(w, h);
+        cache.set(key, img);
+    }
+    return img;
+};
+
+// Grow-only scratch allocations in the RLE wasm heap, reused across rectangles instead of a
+// malloc/free pair per tile.
+Client.prototype._rleScratch = function (inLen, outLen) {
+    const st = this._rle || (this._rle = { inPtr: 0, inCap: 0, outPtr: 0, outCap: 0 });
+    if (st.inCap < inLen) {
+        if (st.inPtr) Module._free(st.inPtr);
+        st.inCap = Math.max(inLen, 64 * 1024);
+        st.inPtr = Module._malloc(st.inCap);
+    }
+    if (st.outCap < outLen) {
+        if (st.outPtr) Module._free(st.outPtr);
+        st.outCap = Math.max(outLen, 64 * 1024);
+        st.outPtr = Module._malloc(st.outCap);
+    }
+    return st;
+};
+
 Client.prototype.handleBitmap = function (r) {
     const bitmap = parseBitmapUpdate(r);
 
     bitmap.rectangles.forEach((bitmapData) => {
-        const size = bitmapData.width * bitmapData.height;
-        const rowDelta = bitmapData.width * 2;
-        const resultSize = size * 2;
+        const w = bitmapData.width, h = bitmapData.height;
+        const rowDelta = w * 2;
+        const resultSize = w * h * 2;
+        const img = this._bitmapImage(w, h);
 
         if (!bitmapData.isCompressed()) {
-            let rgb = new Uint8ClampedArray(bitmapData.bitmapDataStream);
-            let rgba = new Uint8ClampedArray(size * 4);
-            flipV(rgb, bitmapData.width, bitmapData.height);
-            rgb2rgba(rgb, resultSize, rgba);
-            this.ctx.putImageData(new ImageData(rgba, bitmapData.width, bitmapData.height), bitmapData.destLeft, bitmapData.destTop);
+            rgb565BottomUpToImage(new Uint8Array(bitmapData.bitmapDataStream), w, h, img);
+            this.ctx.putImageData(img, bitmapData.destLeft, bitmapData.destTop);
             return;
         }
 
         // Compressed (interleaved RLE) — decompress via the wasm module. Background/FgBg runs on the
         // FIRST scanline read the "previous row" at (pbDest - rowDelta), i.e. `rowDelta` bytes BEFORE
-        // the destination. Allocate a one-row zero pad in front and decode into outputPtr = padded +
-        // rowDelta so that prior-row read is guaranteed zero (the MS RLE reference's implicit all-zero
-        // first previous-line).
+        // the destination. Decode into outputPtr = padded + rowDelta behind a zeroed row so that prior-row
+        // read is guaranteed zero (the MS RLE reference's implicit all-zero first previous-line).
         const srcBytes = new Uint8Array(bitmapData.bitmapDataStream);
-        const inputPtr = Module._malloc(srcBytes.length);
-        const padded = Module._malloc(resultSize + rowDelta);
-        const outputPtr = padded + rowDelta;
-        new Uint8Array(Module.HEAPU8.buffer, inputPtr, srcBytes.length).set(srcBytes);
-        new Uint8Array(Module.HEAPU8.buffer, padded, resultSize + rowDelta).fill(0);
+        const st = this._rleScratch(srcBytes.length, resultSize + rowDelta);
+        const outputPtr = st.outPtr + rowDelta;
+        Module.HEAPU8.set(srcBytes, st.inPtr);
+        Module.HEAPU8.fill(0, st.outPtr, st.outPtr + resultSize + rowDelta);
 
         const ok = Module.ccall("RleDecompress", "number",
             ["number", "number", "number", "number"],
             // srcBytes.length, NOT bitmapData.bitmapLength: when a TS_CD_HEADER is present,
             // bitmapLength includes its 8 bytes and would make the decoder run past the input.
-            [inputPtr, srcBytes.length, outputPtr, rowDelta]);
-        if (!ok) {
-            Module._free(inputPtr);
-            Module._free(padded);
-            return;
-        }
+            [st.inPtr, srcBytes.length, outputPtr, rowDelta]);
+        if (!ok) return;
 
-        let rgb = new Uint8ClampedArray(resultSize);
-        rgb.set(new Uint8Array(Module.HEAPU8.buffer, outputPtr, resultSize));
-        let rgba = new Uint8ClampedArray(size * 4);
-        flipV(rgb, bitmapData.width, bitmapData.height);
-        rgb2rgba(rgb, resultSize, rgba);
-        this.ctx.putImageData(new ImageData(rgba, bitmapData.width, bitmapData.height), bitmapData.destLeft, bitmapData.destTop);
-
-        Module._free(inputPtr);
-        Module._free(padded);
+        // Read the decoded pixels straight out of the wasm heap (re-read HEAPU8: memory may have grown).
+        rgb565BottomUpToImage(Module.HEAPU8.subarray(outputPtr, outputPtr + resultSize), w, h, img);
+        this.ctx.putImageData(img, bitmapData.destLeft, bitmapData.destTop);
     });
 };
 

@@ -19,18 +19,10 @@
     var defaults = ViewData["Defaults"] as ConnectionDefaults ?? new ConnectionDefaults();
     var recordingNotice = ViewData["RecordingNotice"] is true;
 
-    // Admin-enforced device policy: clamp the starting values and lock the corresponding checkboxes so a
-    // disabled feature can't be (re-)enabled here. The relay clamps too, so this is purely UX.
+    // Admin-enforced device policy: lock the corresponding checkboxes so a disabled feature can't be
+    // (re-)enabled here. HomeController.Console already clamped `defaults` to the policy (re-building
+    // them here field by field used to drop the saved HiDPI choice).
     var devicePolicy = ViewData["DevicePolicy"] as DevicePolicy ?? new DevicePolicy();
-    defaults = new ConnectionDefaults
-    {
-        Audio = DevicePolicy.Clamp(devicePolicy.Audio, defaults.Audio),
-        Clipboard = DevicePolicy.Clamp(devicePolicy.Clipboard, defaults.Clipboard),
-        Microphone = DevicePolicy.Clamp(devicePolicy.Microphone, defaults.Microphone),
-        Camera = DevicePolicy.Clamp(devicePolicy.Camera, defaults.Camera),
-        GfxMode = defaults.GfxMode,
-        PerformanceFlags = defaults.PerformanceFlags,
-    };
 }
 <!DOCTYPE html>
 <html lang="en">
@@ -224,6 +216,15 @@
         .btn-session-control:hover {
             background-color: rgba(255, 255, 255, 0.1);
         }
+        .btn-session-control:disabled { opacity: .4; cursor: not-allowed; background: transparent; }
+
+        /* In-session settings panel: the same option editor as the login card's "Session options" (the
+           node is moved here while the panel is open), plus Apply & reconnect. */
+        #settings-overlay {
+            position: fixed; inset: 0; z-index: 45; display: none;
+            align-items: center; justify-content: center; background: rgba(0,0,0,.55);
+        }
+        #settings-overlay.show { display: flex; }
 
         .fa-red {
             color: #f00;
@@ -336,14 +337,15 @@
         </span>
         <span id="floatbar-controls">
             <button class="btn-session-control" id="btn-clip" type="button"
-                    title="Clipboard — sync text with the remote session"><i class="fa-solid fa-clipboard"></i></button>
+                    title="Clipboard — sync text with the remote session" aria-label="Clipboard"><i class="fa-solid fa-clipboard"></i></button>
             <button class="btn-session-control" id="btn-cad" type="button"
-                    title="Send Ctrl+Alt+Del to the remote session"><i class="fa-solid fa-keyboard"></i></button>
-            <button class="btn-session-control" id="btn-fullscreen" type="button"><i class="fa-solid fa-expand"></i></button>
-            <button class="btn-session-control" id="btn-mute" type="button" actiontitle="Mute / unmute remote sound"><i class="fa-solid fa-volume"></i></button>
-            <button class="btn-session-control fa-red" id="btn-disable-video" type="button"><i class="fa-solid fa-video-slash"></i></button>
-            <button class="btn-session-control fa-red" id="btn-disable-microphone" type="button"><i class="fa-solid fa-microphone-slash"></i></button>
-            <button class="btn-session-control fa-red" id="btn-disconnect" type="button" disabled><i class="fa-solid fa-link-slash"></i></button>
+                    title="Send Ctrl+Alt+Del to the remote session" aria-label="Send Ctrl+Alt+Del"><i class="fa-solid fa-keyboard"></i></button>
+            <button class="btn-session-control" id="btn-fullscreen" type="button" title="Full screen" aria-label="Full screen"><i class="fa-solid fa-expand"></i></button>
+            <button class="btn-session-control" id="btn-mute" type="button" title="Mute remote sound" aria-label="Mute remote sound"><i class="fa-solid fa-volume"></i></button>
+            <button class="btn-session-control fa-red" id="btn-disable-video" type="button" title="Camera off" aria-label="Camera"><i class="fa-solid fa-video-slash"></i></button>
+            <button class="btn-session-control fa-red" id="btn-disable-microphone" type="button" title="Microphone off" aria-label="Microphone"><i class="fa-solid fa-microphone-slash"></i></button>
+            <button class="btn-session-control" id="btn-settings" type="button" title="Session settings" aria-label="Session settings"><i class="fa-solid fa-gear"></i></button>
+            <button class="btn-session-control fa-red" id="btn-disconnect" type="button" title="Disconnect" aria-label="Disconnect" disabled><i class="fa-solid fa-link-slash"></i></button>
         </span>
     </div>
 
@@ -366,6 +368,29 @@
                 <button class="btn-secondary" type="button" id="clip-copy">Copy</button>
                 <button class="btn-ghost" type="button" id="clip-close">Close</button>
                 <span class="clip-hint text-success" id="clip-hint"></span>
+            </div>
+            <div id="clip-auto" class="hidden mt-3 pt-3 border-t border-border text-xs text-muted-foreground">
+                <span>Let the browser sync your clipboard automatically: text you copy locally is offered to the remote when you return to this tab, and text copied remotely lands on your clipboard.</span>
+                <button class="btn-secondary mt-2" type="button" id="clip-auto-enable">Enable automatic sync</button>
+            </div>
+        </div>
+    </div>
+
+    @* In-session settings — opened from the floatbar gear. Display mode, HiDPI, the visual-quality flags
+       and the device channels are negotiated at connect, so changes apply by reconnecting (the Windows
+       session itself stays signed in). *@
+    <div id="settings-overlay">
+        <div class="card-surface p-5 w-[30rem] max-w-[92vw] max-h-[90vh] overflow-y-auto">
+            <h6 class="text-base font-semibold mb-1">Session settings</h6>
+            <p class="text-xs text-muted-foreground mb-4">Changes take effect after a quick reconnect — your desktop session stays signed in.</p>
+            <div id="settings-slot"></div>
+            <label class="flex items-center gap-2 text-sm cursor-pointer mt-4">
+                <input class="form-check" type="checkbox" id="settings-remember" checked />
+                <span>Use these settings next time too</span>
+            </label>
+            <div class="flex items-center gap-2 mt-4">
+                <button class="btn-primary" type="button" id="settings-apply"><i class="ri-refresh-line"></i> Apply &amp; reconnect</button>
+                <button class="btn-ghost" type="button" id="settings-cancel">Cancel</button>
             </div>
         </div>
     </div>
@@ -390,7 +415,7 @@
         <div id="reconnecting-card" class="card-surface p-6 w-80 max-w-[90vw] text-center">
             <div id="reconnecting-spinner" class="mx-auto mb-3"></div>
             <h5 class="text-base font-semibold mb-1">Trying to reconnect…</h5>
-            <div class="text-sm text-muted-foreground min-h-[1.2em] mb-1">Connection lost. Attempting to restore your session.</div>
+            <div id="reconnecting-msg" class="text-sm text-muted-foreground min-h-[1.2em] mb-1">Connection lost. Attempting to restore your session.</div>
             <div id="reconnecting-countdown" class="text-sm text-muted-foreground mb-4">Giving up in <span id="reconnecting-secs">--</span>s</div>
             <div class="flex gap-2">
                 <button class="btn-primary flex-1 justify-center" type="button" id="btn-retry-now"><i class="ri-refresh-line"></i> Retry now</button>
@@ -438,7 +463,9 @@
                                 ["DevicePolicy"] = devicePolicy,
                             };
                         }
-                        <partial name="_ConnectionDefaultsEditor" model="defaults" view-data="consoleVd" />
+                        <div id="session-options">
+                            <partial name="_ConnectionDefaultsEditor" model="defaults" view-data="consoleVd" />
+                        </div>
                     </div>
                 </details>
 
@@ -524,6 +551,7 @@
             var btnDisableMic = document.getElementById("btn-disable-microphone");
             var btnDisableVideo = document.getElementById("btn-disable-video");
             var btnClip = document.getElementById("btn-clip");
+            var btnSettings = document.getElementById("btn-settings");
             var clipOverlay = document.getElementById("clip-overlay");
             var clipText = document.getElementById("clip-text");
             var clipHint = document.getElementById("clip-hint");
@@ -578,66 +606,81 @@
                 floatbar.classList.add("hidden");
                 hideRecording();
                 clipOverlay.classList.remove("show"); // hide the clipboard popup when the session ends
+                closeSettings(true); // unapplied edits must not leak into the next connect
+                // An "error" status is usually followed by the socket's "closed" without a message —
+                // keep the error text the first one put up instead of blanking it.
                 if (window.RDP_AUTOCONNECT) {
-                    reconnectMsg.textContent = message || "";
+                    if (message || !reconnectOverlay.classList.contains("show")) reconnectMsg.textContent = message || "";
                     reconnectOverlay.classList.add("show");
                 } else {
-                    loginError.textContent = message || "";
+                    if (message || loginOverlay.style.display !== "flex") loginError.textContent = message || "";
                     loginOverlay.classList.remove("hidden");
                     loginOverlay.style.display = "flex";
                 }
             }
 
             // ---- auto-reconnect on network/protocol drop ----------------------------------------------
-            // A drop (WebSocket died, ungraceful close) surfaces as the client's "reconnecting" status —
-            // distinct from a graceful host disconnect ("closed"). We keep the last desktop frame on the
-            // canvas, show a countdown to a hard deadline, and re-attempt connect() every RETRY_EVERY ms
-            // until either the session comes back ("ready" cancels us) or the deadline passes (declare the
-            // connection dead → fall back to the normal reset/login flow).
+            // A drop (WebSocket died, ungraceful close) of a LIVE session surfaces as the client's
+            // "reconnecting" status — distinct from a graceful host disconnect ("closed"). We keep the
+            // last desktop frame on the canvas, show a countdown to a hard deadline, and re-attempt
+            // connect() with a short backoff (1s, 2s, 4s, 8s, then every 15s) until either the session
+            // comes back ("ready" cancels us) or the deadline passes (declare the connection dead → fall
+            // back to the normal reset/login flow). A brief network blip is thus healed within ~1-3s
+            // instead of the user staring at a frozen frame for a fixed 15s first wait.
             var RECONNECT_DEADLINE_MS = 120000; // give up after 2 min of no successful reconnect
-            var RETRY_EVERY_MS = 15000;
+            var RETRY_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000];
+            var ATTEMPT_WATCHDOG_MS = 20000;    // an attempt that neither succeeds nor fails by then is retried
             var lastCreds = null;               // creds from the most recent connect(), replayed on retry
             var reconnectDeadline = 0;          // performance.now() timestamp when we declare it dead
             var reconnectTickTimer = null;      // 1s countdown UI tick
-            var reconnectRetryTimer = null;     // 15s interval firing each connect() retry attempt
+            var reconnectRetryTimer = null;     // next attempt (or the in-flight attempt's watchdog)
+            var reconnectAttempt = 0;
             var reconnectActive = false;
+            var reconnectingMsg = document.getElementById("reconnecting-msg");
+            var RECONNECTING_DEFAULT_MSG = reconnectingMsg.textContent;
 
             function clearReconnectTimers() {
                 if (reconnectTickTimer) { clearInterval(reconnectTickTimer); reconnectTickTimer = null; }
-                if (reconnectRetryTimer) { clearInterval(reconnectRetryTimer); reconnectRetryTimer = null; }
+                if (reconnectRetryTimer) { clearTimeout(reconnectRetryTimer); reconnectRetryTimer = null; }
+            }
+
+            // Queue the next attempt on the backoff schedule (replacing any pending timer/watchdog).
+            function scheduleReconnectAttempt() {
+                if (!reconnectActive) return;
+                if (reconnectRetryTimer) clearTimeout(reconnectRetryTimer);
+                var delay = RETRY_BACKOFF_MS[Math.min(reconnectAttempt, RETRY_BACKOFF_MS.length - 1)];
+                reconnectAttempt++;
+                reconnectRetryTimer = setTimeout(runReconnectAttempt, delay);
+            }
+            function runReconnectAttempt() {
+                reconnectRetryTimer = null;
+                if (!reconnectActive) return;
+                attemptReconnect();
+                reconnectRetryTimer = setTimeout(scheduleReconnectAttempt, ATTEMPT_WATCHDOG_MS);
             }
 
             // Fully exit the reconnect state (session restored, gave up, or user cancelled).
             function stopReconnecting() {
                 reconnectActive = false;
+                reconnectAttempt = 0;
                 clearReconnectTimers();
                 reconnectingOverlay.classList.remove("show");
+                reconnectingMsg.textContent = RECONNECTING_DEFAULT_MSG;
             }
 
-            // Fire one reconnect attempt: re-size the canvas to the current viewport (it may have changed)
-            // and re-drive connect() with the same credentials. A failed attempt re-enters "reconnecting"
-            // (client emits it again on the socket close), which is harmless — the loop keeps its deadline.
+            // Fire one reconnect attempt with the same credentials and options. prepareReconnect() keeps
+            // the canvas (and the last frame on it) untouched unless the viewport changed, and re-derives
+            // the DPI scale from the session's HiDPI choice — so a reconnect lands at the same scale the
+            // session had (it used to re-read devicePixelRatio and come back at double scale).
             function attemptReconnect() {
                 if (!reconnectActive || !lastCreds) return;
-                // Re-size ONLY when the viewport actually changed. Assigning canvas.width/height (which
-                // applyDesktopSize does unconditionally) resets the canvas bitmap to blank — that would
-                // wipe the last frame we're deliberately keeping on screen during the reconnect. So we
-                // compare first and leave the canvas (and its preserved frame) untouched when unchanged.
-                // Preserve the established scale/resolution UNLESS the viewport actually changed. Resizing
-                // re-derives a fresh scale (fine); keeping the frame means the framebuffer is already
-                // scaled, so the client must NOT re-apply the scale on top of it (that doubled the UI).
-                var resized = false;
-                try {
-                    var hidpiCb = document.getElementById("opt-hidpi");
-                    var hiDpi = !!(hidpiCb && hidpiCb.checked);
-                    var size = client.chooseDesktopSize(screenWrap, hiDpi);
-                    if (size && (size.width !== canvas.width || size.height !== canvas.height)) {
-                        client.applyDesktopSize(screenWrap, size);
-                        resized = true;
-                    }
-                } catch (e) { /* keep the previous size if sizing throws */ }
-                client.setPreserveScaleOnReconnect(!resized);
+                try { client.prepareReconnect(screenWrap, isHiDpiChecked()); }
+                catch (e) { /* keep the previous size if sizing throws */ }
                 client.connect(lastCreds);
+            }
+            function isHiDpiChecked() {
+                var hidpiCb = document.getElementById("opt-hidpi");
+                return !!(hidpiCb && hidpiCb.checked);
             }
 
             function updateReconnectCountdown() {
@@ -647,6 +690,7 @@
                     // Deadline reached: the connection is dead for real. Drop out of the reconnect state
                     // and fall back to the normal disconnected UI (login form or SSO reconnect popup).
                     stopReconnecting();
+                    client.disconnect(); // abandon an attempt that may still be in flight
                     resetConsole("Reconnection timed out — the connection was lost.");
                 }
             }
@@ -656,21 +700,28 @@
             // the existing loop running without resetting the deadline.
             function startReconnecting() {
                 if (!lastCreds) { resetConsole("Connection lost."); return; } // nothing to retry with
+                closeSettings(true); // unapplied edits must not leak into the next connect
+                clipOverlay.classList.remove("show");
                 reconnectingOverlay.classList.add("show");
-                if (reconnectActive) return; // already looping — a failed attempt re-fired "reconnecting"
+                if (reconnectActive) { scheduleReconnectAttempt(); return; } // an attempt failed → next one
                 reconnectActive = true;
+                reconnectAttempt = 0;
                 reconnectDeadline = performance.now() + RECONNECT_DEADLINE_MS;
                 updateReconnectCountdown();
                 reconnectTickTimer = setInterval(updateReconnectCountdown, 1000);
-                // First retry after RETRY_EVERY_MS (the drop just happened; give the network a moment),
-                // then keep retrying on the same cadence. Each attempt's own failure won't stack timers.
-                reconnectRetryTimer = setInterval(function () {
-                    if (reconnectActive) attemptReconnect();
-                }, RETRY_EVERY_MS);
+                scheduleReconnectAttempt();
             }
 
             btnRetryNow.addEventListener("click", function () {
-                if (reconnectActive) attemptReconnect(); // immediate attempt; loop + deadline keep running
+                if (!reconnectActive) return;
+                if (reconnectRetryTimer) clearTimeout(reconnectRetryTimer);
+                runReconnectAttempt(); // immediate attempt; deadline keeps running
+            });
+            // The browser regained network: don't wait out the backoff.
+            window.addEventListener("online", function () {
+                if (!reconnectActive) return;
+                if (reconnectRetryTimer) clearTimeout(reconnectRetryTimer);
+                runReconnectAttempt();
             });
             btnGiveUp.addEventListener("click", function () {
                 stopReconnecting();
@@ -691,13 +742,22 @@
                 // q.rtt is the END-TO-END round trip (browser ↔ gateway ↔ desktop); the tooltip breaks
                 // it down per leg so a slow reading is attributable (user's link vs. datacenter path).
                 var rttText = (q.rtt != null) ? Math.round(q.rtt) + "ms" : "";
-                var kbpsText = (q.kbps != null) ? (q.kbps >= 1024 ? (q.kbps / 1024).toFixed(1) + "Mbps" : Math.round(q.kbps) + "kbps") : "";
+                var kbpsText = (q.kbps != null) ? fmtKbps(q.kbps) : "";
                 qualityLabel.textContent = [rttText, kbpsText].filter(Boolean).join(" · ");
                 var legs = [];
                 if (q.browserRtt != null) legs.push("You ↔ gateway: " + Math.round(q.browserRtt) + " ms");
                 legs.push("Gateway ↔ desktop: " + (q.hostRtt != null ? Math.round(q.hostRtt) + " ms" : "measuring…"));
+                if (q.kbps != null) legs.push("Throughput to you: " + fmtKbps(q.kbps));
+                // The desktop's own network auto-detect result (measured over the real session path).
+                if (q.hostBandwidthKbps || q.hostMeasuredRtt != null) {
+                    legs.push("Measured by the desktop: " + [
+                        q.hostBandwidthKbps ? fmtKbps(q.hostBandwidthKbps) : null,
+                        q.hostMeasuredRtt != null ? q.hostMeasuredRtt + " ms" : null
+                    ].filter(Boolean).join(" · "));
+                }
                 qualityEl.title = "Connection quality (end-to-end)\n" + legs.join("\n");
             });
+            function fmtKbps(k) { return k >= 1024 ? (k / 1024).toFixed(1) + " Mbps" : Math.round(k) + " kbps"; }
 
             client.setStatusCallback(function (status, message) {
                 switch (status) {
@@ -705,9 +765,11 @@
                         break;
                     case "ready":
                         loginOverlay.style.display = "none";
+                        loginError.textContent = "";
                         reconnectOverlay.classList.remove("show");
                         stopReconnecting(); // a reconnect attempt succeeded: leave the countdown state
                         btnDisconnect.disabled = false;
+                        reflectSessionControls();
                         showBar();          // reveal the floating bar on connect, then auto-hide
                         scheduleAutoHide();
                         showRecording();    // red frame + recording banner (no-op when not notifying)
@@ -718,8 +780,15 @@
                         startReconnecting();
                         break;
                     case "error":
-                        // A hard error (bad creds, host unreachable) — end any reconnect loop and fall
-                        // back to the login/reconnect UI; retrying wouldn't heal this.
+                        // During the reconnect loop an error is just a failed attempt (the host may be
+                        // mid-reboot, the gateway briefly unreachable): show why and let the loop retry —
+                        // the socket close that follows ("closed") schedules the next attempt.
+                        if (reconnectActive) {
+                            if (message) reconnectingMsg.textContent = message;
+                            break;
+                        }
+                        // A hard error (bad creds, host unreachable) on a fresh connect — fall back to
+                        // the login/reconnect UI; retrying wouldn't heal this.
                         stopReconnecting();
                         // For SSO/auto-connect, resetConsole() shows the Reconnect popup (with the error
                         // as its message); for a manual session it re-shows the login form.
@@ -737,6 +806,11 @@
                         }
                         break;
                     case "closed":
+                        // Settings were applied: the old session closed on purpose, start the new one.
+                        // (Next tick: this status fires from inside the client's teardown.)
+                        if (pendingApply) { pendingApply = false; setTimeout(submitLoginForm, 0); break; }
+                        // A reconnect attempt that never got going: try again on the backoff schedule.
+                        if (reconnectActive) { startReconnecting(); break; }
                         // Session ended (user disconnect or server drop): reset the screen to black and
                         // offer a way to reconnect. `message`, when present, is the host's disconnect
                         // reason (logoff, admin disconnect, timeout) — show it so the user knows why.
@@ -766,35 +840,35 @@
                     if (invert ? !cb.checked : cb.checked) perf |= bit;
                 });
 
-                client.setAudioEnabled(true);
-                client.setMuted(document.getElementById("opt-audio").checked);
-                var muted = !(client.muted);
-                client.setMuted(muted);
-                if(muted) {
-                    btnMute.classList.add("fa-red");
-                } else {
-                    btnMute.classList.remove("fa-red");
-                }
-                btnMute.innerHTML = muted ? '<i class="fa-solid fa-volume-xmark"></i>' : '<i class="fa-solid fa-volume"></i>';
+                // Remote sound. The sound channel is requested when sound is on — and also when only
+                // the microphone is on, because hosts gate the microphone channel on the sound channel's
+                // presence; in that case playback simply starts muted. It is never requested when the
+                // admin policy disables audio (a locked-off checkbox): the gateway refuses any session
+                // that asks for a policy-disabled channel, so requesting it unconditionally (as before)
+                // made every connect fail under that policy — and with sound switched off it streamed
+                // audio nobody listened to.
+                var audioCb = document.getElementById("opt-audio");
+                var micCb = document.getElementById("opt-microphone");
+                var audioOn = audioCb.checked;
+                var audioAllowed = !(audioCb.disabled && !audioCb.checked);
+                var micOn = micCb.checked;
+                client.setAudioEnabled(audioAllowed && (audioOn || micOn));
+                client.setMuted(!audioOn);
 
                 client.setClipboardEnabled(document.getElementById("opt-clipboard").checked);
 
                 // Microphone redirection must be decided BEFORE connect (the AUDIO_INPUT DVC is only
                 // accepted if enabled at handshake time). The floatbar mic button then mutes/unmutes
-                // capture at runtime. Reflect the initial state on the button.
-                var micOn = document.getElementById("opt-microphone").checked;
+                // capture at runtime.
                 client.setMicrophoneEnabled(micOn);
                 client.setMicMuted(!micOn);
-                btnDisableMic.classList.toggle("fa-red", !micOn);
-                btnDisableMic.innerHTML = micOn ? '<i class="fa-solid fa-microphone"></i>' : '<i class="fa-solid fa-microphone-slash"></i>';
 
                 // Camera redirection — same pattern: decided before connect (the RDPECAM DVCs are only
                 // accepted when enabled at handshake); the floatbar video button pauses/resumes at runtime.
                 var camOn = document.getElementById("opt-camera").checked;
                 client.setCameraEnabled(camOn);
                 client.setCameraPaused(!camOn);
-                btnDisableVideo.classList.toggle("fa-red", !camOn);
-                btnDisableVideo.innerHTML = camOn ? '<i class="fa-solid fa-video"></i>' : '<i class="fa-solid fa-video-slash"></i>';
+                reflectSessionControls();
 
                 // Create/resume the AudioContext now, inside this user gesture — browsers block audio
                 // that starts without one, and the first wave arrives long after the click.
@@ -839,8 +913,10 @@
                 }
 
                 // Pick a desktop resolution that fills the visible area in *device* pixels (crisp on
-                // HiDPI), bake it into the handshake by sizing the canvas before connecting.
-                var size = client.chooseDesktopSize(screenWrap, hiDpi);
+                // HiDPI), bake it into the handshake by sizing the canvas before connecting. `fresh`:
+                // an explicit connect re-probes the display's pixel ratio (HiDPI may have just been
+                // switched on, or the window moved to another screen since the last session).
+                var size = client.chooseDesktopSize(screenWrap, hiDpi, true);
                 client.applyDesktopSize(screenWrap, size);
                 // Remember the creds so a network/protocol drop can silently replay connect() (see the
                 // auto-reconnect controller). For an SSO/auto-connect session these come from the hidden
@@ -855,9 +931,12 @@
             btnReconnect.addEventListener("click", function () {
                 reconnectOverlay.classList.remove("show");
                 reconnectMsg.textContent = "";
+                submitLoginForm();
+            });
+            function submitLoginForm() {
                 var form = document.getElementById("login-form");
                 if (form.requestSubmit) form.requestSubmit(); else form.dispatchEvent(new Event("submit", { cancelable: true }));
-            });
+            }
             // Ctrl+Alt+Del is intercepted by the local OS before the page ever sees it, so the only way
             // to reach the remote Windows security screen (lock, change password, Task Manager) is to
             // synthesise the sequence. Drop focus afterwards so a following Space/Enter doesn't re-fire
@@ -866,47 +945,127 @@
                 client.sendCtrlAltDel();
                 btnCad.blur();
             });
+
+            // ---- full screen ---------------------------------------------------------------------------
+            // Fullscreen the whole page, not just #screen-wrap: only the fullscreen element's subtree is
+            // rendered, so fullscreening the canvas wrapper hid the floatbar, the clipboard/settings
+            // panels and the reconnect overlays. In fullscreen we also ask for a keyboard lock (Chromium)
+            // so Esc, Alt+Tab, Win and browser shortcuts like Ctrl+W reach the remote desktop instead of
+            // the local machine; holding Esc still leaves fullscreen.
+            function exitFullscreen() {
+                if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(function () {});
+            }
             btnFullscreen.addEventListener("click", function () {
-                if (!document.fullscreenElement) {
-                    (screenWrap.requestFullscreen ? screenWrap.requestFullscreen() : Promise.reject()).catch(function () {});
-                } else {
-                    document.exitFullscreen();
-                }
+                if (document.fullscreenElement) { exitFullscreen(); return; }
+                var root = document.documentElement;
+                if (!root.requestFullscreen) return;
+                root.requestFullscreen({ navigationUI: "hide" }).then(function () {
+                    if (navigator.keyboard && navigator.keyboard.lock) navigator.keyboard.lock().catch(function () {});
+                }).catch(function () {});
+                btnFullscreen.blur();
             });
+            document.addEventListener("fullscreenchange", function () {
+                var fs = !!document.fullscreenElement;
+                if (!fs && navigator.keyboard && navigator.keyboard.unlock) navigator.keyboard.unlock();
+                btnFullscreen.innerHTML = fs ? '<i class="fa-solid fa-compress"></i>' : '<i class="fa-solid fa-expand"></i>';
+                btnFullscreen.title = fs ? "Exit full screen (hold Esc)" : "Full screen";
+            });
+
+            // ---- sound / microphone / camera toggles ---------------------------------------------------
+            // Reflect the session's device state on the floatbar. A toggle whose channel wasn't negotiated
+            // this session (option off, or locked by policy) is disabled with an explanation instead of
+            // looking clickable and silently doing nothing.
+            function setToggle(btn, on, onIcon, offIcon, onTitle, offTitle, available, unavailableTitle) {
+                btn.disabled = !available;
+                btn.classList.toggle("fa-red", !on);
+                btn.innerHTML = '<i class="fa-solid ' + (on ? onIcon : offIcon) + '"></i>';
+                btn.title = available ? (on ? onTitle : offTitle) : unavailableTitle;
+            }
+            function reflectSessionControls() {
+                setToggle(btnMute, !client.muted, "fa-volume", "fa-volume-xmark",
+                    "Mute remote sound", "Unmute remote sound", !!client.audioEnabled,
+                    "Remote sound is off for this session (Session settings)");
+                setToggle(btnDisableMic, !client.micMuted, "fa-microphone", "fa-microphone-slash",
+                    "Mute microphone", "Unmute microphone", !!client.microphoneEnabled,
+                    "Microphone is off for this session (Session settings)");
+                setToggle(btnDisableVideo, !client.cameraPaused, "fa-video", "fa-video-slash",
+                    "Pause camera", "Resume camera", !!client.cameraEnabled,
+                    "Camera is off for this session (Session settings)");
+                // Without the clipboard channel the panel can't send or receive anything.
+                btnClip.style.display = client.clipboardEnabled ? "" : "none";
+            }
             btnMute.addEventListener("click", function () {
-                var muted = !(client.muted);
-                client.setMuted(muted);
-                if(muted) {
-                    btnMute.classList.add("fa-red");
-                } else {
-                    btnMute.classList.remove("fa-red");
-                }
-                btnMute.innerHTML = muted ? '<i class="fa-solid fa-volume-xmark"></i>' : '<i class="fa-solid fa-volume"></i>';
+                if (!client.audioEnabled) return;
+                if (client.muted) client.primeAudio(); // unmuting is a user gesture: make sure audio can play
+                client.setMuted(!client.muted);
+                reflectSessionControls();
             });
-            // Floatbar mic button: mute/unmute capture at runtime. (Whether the AUDIO_INPUT channel
-            // exists at all is decided at connect from the "Microphone" option.) If the channel wasn't
-            // enabled this session, the button just stays in the muted/slashed state.
             btnDisableMic.addEventListener("click", function () {
                 if (!client.microphoneEnabled) return; // no mic channel this session
-                var muted = !(client.micMuted);
-                client.setMicMuted(muted);
-                btnDisableMic.classList.toggle("fa-red", muted);
-                btnDisableMic.innerHTML = muted ? '<i class="fa-solid fa-microphone-slash"></i>' : '<i class="fa-solid fa-microphone"></i>';
+                client.setMicMuted(!client.micMuted);
+                reflectSessionControls();
             });
-            // Floatbar video button: pause/resume the camera feed at runtime (sends black frames while
-            // paused). Whether the camera channel exists at all is decided at connect from the "Camera"
-            // option; if it wasn't enabled this session the button stays in the slashed state.
             btnDisableVideo.addEventListener("click", function () {
                 if (!client.cameraEnabled) return; // no camera channel this session
-                var paused = !(client.cameraPaused);
-                client.setCameraPaused(paused);
-                btnDisableVideo.classList.toggle("fa-red", paused);
-                btnDisableVideo.innerHTML = paused ? '<i class="fa-solid fa-video-slash"></i>' : '<i class="fa-solid fa-video"></i>';
+                client.setCameraPaused(!client.cameraPaused);
+                reflectSessionControls();
+            });
+
+            // ---- in-session settings -----------------------------------------------------------------
+            // The option editor lives in the login card ("Session options"). While the settings panel is
+            // open the same DOM node is moved into it, so there is exactly one set of inputs (the connect
+            // handler reads them by id) and the login card always shows what the session actually uses.
+            // Cancel restores the values from when the panel opened; Apply reconnects with the new ones.
+            var settingsOverlay = document.getElementById("settings-overlay");
+            var settingsSlot = document.getElementById("settings-slot");
+            var sessionOptions = document.getElementById("session-options");
+            var sessionOptionsHome = sessionOptions.parentNode;
+            var settingsSnapshot = null;
+            var pendingApply = false;
+            function snapshotOptions() {
+                return Array.prototype.map.call(sessionOptions.querySelectorAll("input, select"), function (el) {
+                    return { el: el, checked: el.checked, value: el.value };
+                });
+            }
+            function openSettings() {
+                if (!client.connected) return;
+                settingsSnapshot = snapshotOptions();
+                settingsSlot.appendChild(sessionOptions);
+                settingsOverlay.classList.add("show");
+                var first = sessionOptions.querySelector("input:not([disabled]), select");
+                if (first) first.focus();
+            }
+            function closeSettings(restore) {
+                if (!settingsOverlay.classList.contains("show")) return;
+                if (restore && settingsSnapshot) {
+                    settingsSnapshot.forEach(function (s) { s.el.checked = s.checked; s.el.value = s.value; });
+                }
+                settingsSnapshot = null;
+                sessionOptionsHome.appendChild(sessionOptions);
+                settingsOverlay.classList.remove("show");
+            }
+            btnSettings.addEventListener("click", function () {
+                if (settingsOverlay.classList.contains("show")) closeSettings(true); else openSettings();
+            });
+            document.getElementById("settings-cancel").addEventListener("click", function () { closeSettings(true); });
+            settingsOverlay.addEventListener("mousedown", function (e) { if (e.target === settingsOverlay) closeSettings(true); });
+            settingsOverlay.addEventListener("keydown", function (e) { if (e.key === "Escape") { e.preventDefault(); closeSettings(true); } });
+            document.getElementById("settings-apply").addEventListener("click", function () {
+                // The connect handler persists the options when "Remember these settings" is ticked;
+                // never re-store credentials from here (for SSO sessions the form only holds placeholders).
+                document.getElementById("opt-remember-settings").checked = document.getElementById("settings-remember").checked;
+                var storeCreds = document.getElementById("opt-store-creds");
+                if (storeCreds) storeCreds.checked = false;
+                closeSettings(false);
+                // Disconnect on purpose; the "closed" status then re-runs the connect handler with the
+                // new options (see pendingApply). The Windows session stays signed in across this.
+                pendingApply = true;
+                client.disconnect();
             });
             // ---- clipboard overlay -------------------------------------------------------------------
-            // Browser clipboard autosync is unfeasible (per-read gesture + permission), so clipboard
-            // sync is manual: a popup textarea. The remote's copied text is pushed into the box, and the
-            // box's contents are sent to the remote on "Send to remote".
+            // Clipboard sync always works manually through this popup: the remote's copied text is pushed
+            // into the box, and the box's contents are sent to the remote on "Send to remote".
+            // On top of that, automatic sync where the browser allows it (see autoClip below).
             function setClipHint(msg, muted) {
                 clipHint.textContent = msg || "";
                 clipHint.classList.toggle("muted", !!muted);
@@ -927,7 +1086,57 @@
                 if (clipOverlay.classList.contains("show")) {
                     setClipHint("Received from remote", true);
                 }
+                autoClipFromRemote(text);
             });
+
+            // ---- automatic clipboard sync (where the browser allows it) ------------------------------
+            // Reading the local clipboard needs the "clipboard-read" permission (Chromium); once granted,
+            // the page may read it whenever it has focus. So: whenever the user comes back to this tab
+            // (after copying something in another app) we read the clipboard and offer new text to the
+            // remote — it is there before they press Ctrl+V. Remote copies are written to the local
+            // clipboard while the page has focus (Chromium and Firefox allow that right after the
+            // Ctrl+C keystroke). Browsers without these APIs just keep the manual panel.
+            var clipAuto = document.getElementById("clip-auto");
+            var lastLocalClip = null; // the last text exchanged with the local clipboard (echo guard)
+            var clipReadState = "unsupported";
+            function canReadClipboard() { return !!(navigator.clipboard && navigator.clipboard.readText); }
+            function refreshClipPermission() {
+                if (!canReadClipboard() || !navigator.permissions || !navigator.permissions.query) {
+                    clipReadState = "unsupported"; return;
+                }
+                navigator.permissions.query({ name: "clipboard-read" }).then(function (st) {
+                    clipReadState = st.state;
+                    clipAuto.classList.toggle("hidden", st.state !== "prompt");
+                    st.onchange = function () { clipReadState = st.state; clipAuto.classList.toggle("hidden", st.state !== "prompt"); };
+                }).catch(function () { clipReadState = "unsupported"; });
+            }
+            function pullLocalClipboard() {
+                if (clipReadState !== "granted" || !client.connected || !client.clipboardEnabled) return;
+                if (!document.hasFocus()) return;
+                navigator.clipboard.readText().then(function (text) {
+                    if (!text || text === lastLocalClip) return;
+                    lastLocalClip = text;
+                    clipText.value = text;
+                    client.sendClipboardText(text);
+                }).catch(function () { /* focus lost or permission revoked */ });
+            }
+            function autoClipFromRemote(text) {
+                if (!text || !navigator.clipboard || !navigator.clipboard.writeText || !document.hasFocus()) return;
+                navigator.clipboard.writeText(text).then(function () { lastLocalClip = text; })
+                    .catch(function () { /* no permission/activation — the manual panel still has it */ });
+            }
+            document.getElementById("clip-auto-enable").addEventListener("click", function () {
+                // A click is the user gesture the permission prompt needs.
+                navigator.clipboard.readText().then(function (text) {
+                    clipReadState = "granted";
+                    clipAuto.classList.add("hidden");
+                    setClipHint("Automatic sync is on", true);
+                    if (text && text !== lastLocalClip) { lastLocalClip = text; clipText.value = text; client.sendClipboardText(text); }
+                }).catch(function () { setClipHint("Clipboard access was blocked by the browser", true); });
+            });
+            window.addEventListener("focus", pullLocalClipboard);
+            document.addEventListener("visibilitychange", function () { if (!document.hidden) pullLocalClipboard(); });
+            refreshClipPermission();
 
             btnClip.addEventListener("click", function () {
                 if (clipOverlay.classList.contains("show")) closeClip(); else openClip();

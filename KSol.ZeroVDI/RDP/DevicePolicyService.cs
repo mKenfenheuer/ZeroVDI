@@ -53,16 +53,12 @@ public sealed class DevicePolicyService
     public ConnectionDefaults Apply(ConnectionDefaults requested)
     {
         var p = Get();
-        return new ConnectionDefaults
-        {
-            Audio = DevicePolicy.Clamp(p.Audio, requested.Audio),
-            Clipboard = DevicePolicy.Clamp(p.Clipboard, requested.Clipboard),
-            Microphone = DevicePolicy.Clamp(p.Microphone, requested.Microphone),
-            Camera = DevicePolicy.Clamp(p.Camera, requested.Camera),
-            // Display/performance are not policy-controlled; pass through unchanged.
-            GfxMode = requested.GfxMode,
-            HiDpi = requested.HiDpi,
-            PerformanceFlags = requested.PerformanceFlags,
-        };
+        // Display/performance options are not policy-controlled; Clone carries them through unchanged.
+        var clamped = requested.Clone();
+        clamped.Audio = DevicePolicy.Clamp(p.Audio, requested.Audio);
+        clamped.Clipboard = DevicePolicy.Clamp(p.Clipboard, requested.Clipboard);
+        clamped.Microphone = DevicePolicy.Clamp(p.Microphone, requested.Microphone);
+        clamped.Camera = DevicePolicy.Clamp(p.Camera, requested.Camera);
+        return clamped;
     }
 }
