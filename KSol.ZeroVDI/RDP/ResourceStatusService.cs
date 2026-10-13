@@ -177,7 +177,9 @@ public class ResourceStatusService : BackgroundService
         // independently of ping: Windows blocks ICMP echo by default, so gating the port check on a
         // successful ping left every running Windows VM stuck at "Starting". The port probe goes through
         // the path selector so hosts reachable only via a connector are seen too (direct TCP from the
-        // gateway can't reach them).
+        // gateway can't reach them). Its direct probe is RdpPortProbe, never a bare connect-and-close —
+        // this runs every 15 s against every host, and a bare connect locks a GNOME Remote Desktop 50.0
+        // host out of the gateway.
         var pingOk = false;
         var rdpOk = false;
         if (!string.IsNullOrEmpty(res.IpAddress))

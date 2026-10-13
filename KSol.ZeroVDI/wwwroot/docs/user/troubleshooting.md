@@ -44,10 +44,14 @@ rejected, double-check them with whoever manages that desktop.
 - Allow the browser permission prompt. If you denied it before, re-allow it from the address-bar
   padlock and reconnect.
 
-## The screen froze or went black
+## The screen froze, or it says "Reconnecting…"
 
-Your network may have dropped. Close the console tab and click **Connect** again from the
-dashboard — your session is usually still running where you left it.
+A network blip drops the connection to the desktop, not the desktop itself. ZeroVDI notices and
+reconnects on its own: the last frame stays on screen behind a **Reconnecting…** overlay while it
+retries for up to two minutes. **Retry now** skips the wait.
+
+Your Windows or Linux session keeps running throughout, so your apps and windows are exactly where you
+left them. If it gives up, close the console tab and click **Connect** again from the dashboard.
 
 ## "The desktop's security certificate has changed"
 
@@ -65,7 +69,12 @@ sign-in — if you saved them, update the saved credentials (see
 
 ## I can't sign in to ZeroVDI at all
 
-- Double-check your username and password.
+- Double-check your username and password. Forgotten it? Use **Forgot password?** on the sign-in page
+  and a reset link is e-mailed to you.
+- Too many wrong attempts **lock the account** for a while — wait, or ask an administrator to unlock it.
 - If you use two-factor authentication, make sure the code is current (they expire quickly) and your
-  phone's clock is accurate. Out of codes? Use a recovery code — see [Your account](your-account.md).
-- Still stuck? Contact your administrator to reset your account.
+  phone's clock is accurate. Out of codes? Use a recovery code, or an e-mailed code if you enabled
+  that method — see [Your account](your-account.md).
+- If the sign-in page says your account is disabled, an administrator switched it off; only they can
+  turn it back on.
+- Still stuck? Contact your administrator.

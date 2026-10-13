@@ -9,6 +9,10 @@ Open the ZeroVDI address your administrator gave you and sign in with your usern
 two-factor authentication is required for your account, you'll also be asked for a one-time code —
 see [Your account](your-account.md) to set that up.
 
+If your organisation uses **single sign-on**, there is a **Sign in with …** button below the password
+box instead — use that and you'll sign in with your usual work account. Your account is created
+automatically the first time.
+
 ## Your desktops
 
 After signing in you land on the **Your desktops** dashboard. Each card is a remote desktop you've

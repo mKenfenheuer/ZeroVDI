@@ -7,4 +7,9 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Shared with the gateway so both probe RDP hosts the same, GNOME-Remote-Desktop-safe way. -->
+    <Compile Include="..\KSol.ZeroVDI\RDP\RdpPortProbe.cs" Link="RdpPortProbe.cs" />
+  </ItemGroup>
+
 </Project>

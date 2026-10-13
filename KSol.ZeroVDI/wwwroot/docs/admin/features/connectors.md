@@ -22,8 +22,11 @@ WebSocket open. No inbound firewall rule is needed on the connector's side.
   asks the agent to dial the target `host:port`. The agent opens a per-request data channel
   (`wss://<gateway>/agent/data/<id>`) and bidirectionally pumps TCP ↔ WebSocket. RDP traffic
   runs with Nagle disabled to keep the session responsive.
-- **Reachability probes.** The gateway can ask a connector to TCP-probe a host and report
-  round-trip time, so it can pick the best connector for a given target.
+- **Reachability probes.** The gateway can ask a connector to probe a host's RDP port and report
+  round-trip time, so it can pick the best connector for a given target. The probe opens a TCP
+  connection and sends an RDP Connection Request before closing — never a bare connect-and-close,
+  which locks GNOME Remote Desktop 50 hosts out of the prober's address. Keep connector agents on the
+  same release as the gateway for this reason.
 
 All connector transport is **TLS only** — the gateway URL must be `https://` (the agent
 refuses a plaintext URL and connects over `wss://`).
@@ -43,9 +46,15 @@ working until it re-registers.
 
 ## Deploying the agent
 
-The agent ships as the `KSol.ZeroVDI.Connector` container image (see the `ksol-rdpgw-connector`
-service in [`docker-compose.yml`](../../../../../docker-compose.yml)). It persists no state
-unless you give it a volume.
+The agent ships as a container image, `ghcr.io/mkenfenheuer/zerovdi/connector`. The reference
+`docker-compose.yml` in the repository root carries it as the `ksol-zerovdi-connector` service behind
+a profile, so it stays out of the way of deployments that do not need one:
+
+```bash
+docker compose --profile connector up -d
+```
+
+It persists no state unless you give it a volume.
 
 Configure it with environment variables:
 

@@ -7,7 +7,6 @@
 **/.vscode/
 .git/
 .github/
-.gitlab-ci.yml
 **/.DS_Store
 
 # Local state and secrets that must never reach an image. Note these are deliberately specific: the
@@ -23,8 +22,15 @@
 **/Data/recordings/
 capture/
 
-# Reference material that is not part of the runtime payload.
+# Reference material and repository meta that is not part of the runtime payload. Note this is
+# deliberately anchored at the context root: KSol.ZeroVDI/wwwroot/docs holds the documentation the
+# app itself serves and must NOT be excluded.
 Spec/
-docs/
 Readme.md
 CHANGELOG.md
+CONTRIBUTING.md
+SECURITY.md
+AGENTS.md
+CLAUDE.md
+.env
+.env.example

@@ -27,7 +27,7 @@ action is audited as `RecordingVerified` with a success flag.
 
 ## Retention & auto-purge
 
-A background sweep (every 6 hours) purges recordings by:
+A background sweep (every `Recording:RetentionSweepHours`, default 6) purges recordings by:
 
 - **Age** — `Recording:RetentionDays` (older than N days), and/or
 - **Total size** — `Recording:MaxTotalGB` (oldest-first until under the cap).
@@ -40,10 +40,14 @@ Both default to `0` (off). Purges are audited as `RecordingPurged`; manual delet
   "Recording": {
     "EncryptAtRest": true,
     "RetentionDays": 90,
-    "MaxTotalGB": 500
+    "MaxTotalGB": 500,
+    "RetentionSweepHours": 6
   }
 }
 ```
+
+The sweep's last run is shown on **Admin → Operations**, along with the recordings' current size and
+the free space on that volume.
 
 ## Related
 

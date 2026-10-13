@@ -1,7 +1,7 @@
 # Backends
 
 A **backend** is a Proxmox VE endpoint that ZeroVDI talks to for power control, IP discovery, and
-(for VDI) cloning. Manage them at **Admin → Backends** (`/admin/proxmoxbackends`). You can register
+(for VDI) cloning. Manage them at **Admin → Backends** (`/admin/backends`). You can register
 more than one.
 
 ## Configuring a backend
@@ -14,8 +14,15 @@ Each backend needs:
   connection, so keep it on and give the cluster a certificate the gateway trusts (Proxmox supports
   ACME/Let's Encrypt or your own CA). Turn it off only for a self-signed lab cluster.
 
+Optionally:
+
+- **Kerberos realm** and **KDC host** — set these to let the gateway authenticate to hosts in an
+  Active Directory domain with Kerberos instead of NTLM. Leave both empty for workgroup hosts; the
+  gateway then uses NTLM, which needs no extra configuration.
+
 The admin dashboard probes every configured backend concurrently and shows online status, total VMs,
-and running VMs per backend.
+and running VMs per backend. **Admin → Operations** has a *Test backends* button that runs the same
+probe on demand and records the result in the [audit log](../features/audit).
 
 ## Required token permissions
 
